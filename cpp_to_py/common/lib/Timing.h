@@ -13,7 +13,10 @@ class TimingArc;
 struct LutTemplate;
 class Lut;
 
-enum class TimingSense { non_unate, positive_unate, negative_unate, unknown };
+enum class TimingSense { non_unate = 0, 
+        positive_unate = 1, 
+        negative_unate = 2, 
+        unknown = -1 };
 
 enum class TimingType {
     clear,
@@ -66,15 +69,15 @@ public:
     int id = -1;
     string encode_str_;
 
-    LibertyCell* cell_;
-    LibertyPort* liberty_port_;
+    LibertyCell* cell_ = nullptr;
+    LibertyPort* liberty_port_ = nullptr;
 
     TimingType timing_type_ = TimingType::unknown;
     TimingSense timing_sense_ = TimingSense::unknown;
 
     string related_port_name_;
-    LibertyPort* from_port_;
-    LibertyPort* to_port_;
+    LibertyPort* from_port_ = nullptr;
+    LibertyPort* to_port_ = nullptr;
 
     string sdf_cond_;
     bool is_cond_ = false;
@@ -90,6 +93,14 @@ public:
     bool is_max_constraint() const;
     bool is_rising_edge_triggered() const;
     bool is_falling_edge_triggered() const;
+    bool is_input_transition_defined() const;
+    bool is_input_transition_defined(Tran) const;
+    bool is_output_transition_defined(Tran) const;
+    bool is_transition_defined(Tran, Tran) const;
+    
+    std::optional<float> delay(Tran, Tran, float, float) const;
 };
+
+// using TimingView = TimingData<const Timing*, MAX_SPLIT>;
 
 };  // namespace gt

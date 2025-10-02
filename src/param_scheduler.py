@@ -148,7 +148,7 @@ class ParamScheduler:
         # mixed size parameter
         self.enable_mixed_size = args.mixed_size
         self.include_macros = args.include_macros
-        self.zero_macro_grad = False
+        self.zero_macro_grad = True
 
         # timing parameter
         self.timing_sol_recorder = []

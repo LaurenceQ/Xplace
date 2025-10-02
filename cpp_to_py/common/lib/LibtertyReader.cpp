@@ -130,10 +130,20 @@ Lut* CellLib::extract_lut(token_iterator& itr, const token_iterator end) {
     int stack = 1;
     size_t size1 = 1;
     size_t size2 = 1;
+    float ind1_scale = 1.0;
+    float ind2_scale = 1.0;
+    if(lut -> lut_template -> variable1 != std::nullopt){
+        if(is_time_lut_var(lut -> lut_template -> variable1.value()))ind1_scale = scale_factors["time"];
+        else if(is_capacitance_lut_var(lut -> lut_template -> variable1.value()))ind1_scale = scale_factors["capacitance"];
+    }
+    if(lut -> lut_template -> variable2 != std::nullopt){
+        if(is_time_lut_var(lut -> lut_template -> variable2.value()))ind2_scale = scale_factors["time"];
+        else if(is_capacitance_lut_var(lut -> lut_template -> variable2.value()))ind2_scale = scale_factors["capacitance"];
+    }
     while (stack && ++itr != end) {
         if (*itr == "index_1") {
             itr = on_next_parentheses(
-                itr, end, [&](auto& v) mutable { lut->indices1.push_back(std::strtof(v.data(), nullptr)); });
+                itr, end, [&](auto& v) mutable { lut->indices1.push_back(std::strtof(v.data(), nullptr) * ind1_scale); });
 
             if (lut->indices1.size() == 0) {
                 logger.info("syntax error in %s index_1", lut->name);
@@ -142,7 +152,7 @@ Lut* CellLib::extract_lut(token_iterator& itr, const token_iterator end) {
             size1 = lut->indices1.size();
         } else if (*itr == "index_2") {
             itr = on_next_parentheses(
-                itr, end, [&](auto& v) mutable { lut->indices2.push_back(std::strtof(v.data(), nullptr)); });
+                itr, end, [&](auto& v) mutable { lut->indices2.push_back(std::strtof(v.data(), nullptr) * ind2_scale); });
 
             if (lut->indices2.size() == 0) {
                 logger.info("syntax error in %s index_2", lut->name);
@@ -168,7 +178,7 @@ Lut* CellLib::extract_lut(token_iterator& itr, const token_iterator end) {
 
             int id{0};
             itr = on_next_parentheses(
-                itr, end, [&](auto& v) mutable { lut->table[id++] = std::strtof(v.data(), nullptr); });
+                itr, end, [&](auto& v) mutable { lut->table[id++] = std::strtof(v.data() , nullptr) * scale_factors["time"]; });
         } else if (*itr == "}") {
             stack--;
         } else if (*itr == "{") {
@@ -191,7 +201,9 @@ TimingArc* CellLib::extractTimingArc(token_iterator& itr, const token_iterator e
     TimingArc* timing_arc = new TimingArc();
     timing_arc->liberty_port_ = cell_port;
     cell_port->timing_arcs_.push_back(timing_arc);
-
+    string cell_name = cell_port -> cell_ -> name;
+    // bool flag = "DFFASRHQNx1_ASAP7_75t_SL" == cell_name; 
+    bool flag = false;
     if (itr = std::find(itr, end, "{"); itr == end) {
         logger.info("can't find group brace '{' in timing");
     }
@@ -230,7 +242,9 @@ TimingArc* CellLib::extractTimingArc(token_iterator& itr, const token_iterator e
             // undefined token TODO:
         }
     }
-
+    if(flag){
+        std::cout<< "read lut " << timing_arc->transition_[0]->name << " at port " << cell_port -> name  << " related to port " << timing_arc->related_port_name_ << " with " << timing_arc->transition_[0]->indices1.size() << " x " << timing_arc->transition_[0]->indices2.size()<<" table and set is " << timing_arc->transition_[0]->set_ << std::endl;
+    }
     if (stack != 0 || *itr != "}") {
         logger.info("can't find group brace '}' in cell timing ");
     }
@@ -254,25 +268,25 @@ LibertyPort* CellLib::extractLibertyPort(token_iterator& itr, const token_iterat
             cell_port->direction_ = findPortDirection(string(*itr));
         } else if (*itr == "capacitance") {
             logger.infoif(++itr == end, "can't get the capacitance in cellpin");
-            cell_port->port_capacitance_[2] = std::strtof(itr->data(), nullptr);
+            cell_port->port_capacitance_[2] = std::strtof(itr->data(), nullptr) * scale_factors["capacitance"];
         } else if (*itr == "fall_capacitance") {
             logger.infoif(++itr == end, "can't get fall_capacitance in cellpin");
-            cell_port->port_capacitance_[1] = std::strtof(itr->data(), nullptr);
+            cell_port->port_capacitance_[1] = std::strtof(itr->data(), nullptr) * scale_factors["capacitance"];
         } else if (*itr == "rise_capacitance") {
             logger.infoif(++itr == end, "can't get rise_capacitance in cellpin");
-            cell_port->port_capacitance_[0] = std::strtof(itr->data(), nullptr);
+            cell_port->port_capacitance_[0] = std::strtof(itr->data(), nullptr) * scale_factors["capacitance"];
         } else if (*itr == "max_capacitance") {
             logger.infoif(++itr == end, "can't get the max_capacitance in cellpin");
-            cell_port->max_capacitance = std::strtof(itr->data(), nullptr);
+            cell_port->max_capacitance = std::strtof(itr->data(), nullptr) * scale_factors["capacitance"];
         } else if (*itr == "min_capacitance") {
             logger.infoif(++itr == end, "can't get the min_capacitance in cellpin");
-            cell_port->min_capacitance = std::strtof(itr->data(), nullptr);
+            cell_port->min_capacitance = std::strtof(itr->data(), nullptr) * scale_factors["capacitance"];
         } else if (*itr == "max_transition") {
             logger.infoif(++itr == end, "can't get the max_transition in cellpin");
-            cell_port->max_transition = std::strtof(itr->data(), nullptr);
+            cell_port->max_transition = std::strtof(itr->data(), nullptr) * scale_factors["time"];
         } else if (*itr == "min_transition") {
             logger.infoif(++itr == end, "can't get the min_transition in cellpin");
-            cell_port->min_transition = std::strtof(itr->data(), nullptr);
+            cell_port->min_transition = std::strtof(itr->data(), nullptr) * scale_factors["time"];
         } else if (*itr == "fanout_load") {
             logger.infoif(++itr == end, "can't get fanout_load in cellpin");
             cell_port->fanout_load = std::strtof(itr->data(), nullptr);
@@ -285,7 +299,21 @@ LibertyPort* CellLib::extractLibertyPort(token_iterator& itr, const token_iterat
         } else if (*itr == "clock") {
             logger.infoif(++itr == end, "can't get the clock status in cellpin");
             cell_port->is_clock_ = (*itr == "true") ? true : false;
-        } else if (*itr == "timing") {
+        } else if (*itr == "function") {
+            if (*++itr == "(") {
+                itr = on_next_parentheses(itr, end, [&] (auto& func) mutable {
+                    cell_port->func_str_ += func;
+                });
+            } else {
+                cell_port->func_str_ = *itr;
+            }
+        } else if(*itr == "bus_type"){
+            logger.infoif(++itr == end, "can't get bus type in cell ", cell_port->name);
+            auto& bus_type = bus_types[string(*itr)];
+            cell_port -> func_str_ = cell_port -> name + std::to_string(bus_type.width) + "_" + std::to_string(bus_type.from) + "_" + std::to_string(bus_type.to);
+            // std::cout<<"Hashing! "<< cell_port -> func_str_ <<std::endl;
+        } 
+        else if (*itr == "timing") {
             TimingArc* timing_arc_ = extractTimingArc(itr, end, cell_port);
         } else if (*itr == "}") {
             stack--;
@@ -324,7 +352,7 @@ LibertyCell* CellLib::extractLibertyCell(token_iterator& itr, const token_iterat
             while (stack_1 && ++itr != end) {
                 if (*itr == "value") {
                     logger.infoif(++itr == end, "can't get value in cell %s", liberty_cell->name);
-                    liberty_cell->leakage_powers_.push_back(std::strtof(itr->data(), nullptr));
+                    liberty_cell->leakage_powers_.push_back(scale_factors["power"] * std::strtof(itr->data(), nullptr));
                 } else if (*itr == "}")
                     stack_1--;
                 else if (*itr == "{")
@@ -337,12 +365,17 @@ LibertyCell* CellLib::extractLibertyCell(token_iterator& itr, const token_iterat
             logger.infoif(++itr == end, "can't get port in cell %s", liberty_cell->name);
             LibertyPort* cell_port_ = extractLibertyPort(itr, end, liberty_cell);
             liberty_cell->ports_.push_back(cell_port_);
+        } else if (*itr == "bus") {
+            logger.infoif(++itr == end, "can't get bus in cell %s", liberty_cell->name);
+            LibertyPort* cell_port_ = extractLibertyPort(itr, end, liberty_cell);
+            liberty_cell->ports_.push_back(cell_port_);
         } else if (*itr == "bundle") {
             LibertyPort* cell_port_bundle = new LibertyPort();
             liberty_cell->ports_.push_back(cell_port_bundle);
             cell_port_bundle->cell_ = liberty_cell;
             cell_port_bundle->is_bundle_ = true;
 
+            std::queue<string> members;
             on_next_parentheses(itr, end, [&](auto& name) mutable { cell_port_bundle->name = name; });
             itr = std::find(itr, end, "{");
 
@@ -351,6 +384,11 @@ LibertyCell* CellLib::extractLibertyCell(token_iterator& itr, const token_iterat
                 if (*itr == "direction") {
                     logger.infoif(++itr == end, "can't get direction in cell %s", liberty_cell->name);
                     cell_port_bundle->direction_ = findPortDirection(string(*itr));
+                } else if(*itr == "members") {
+                    itr = on_next_parentheses(itr, end, [&] (auto& name) mutable {
+                        members.push( std::string{name});
+                    });
+                    liberty_cell->num_bits_ = members.size();
                 } else if (*itr == "pin") {
                     LibertyPort* cell_port_ = extractLibertyPort(itr, end, liberty_cell);
                     cell_port_bundle->member_ports_.push_back(cell_port_);
@@ -448,7 +486,9 @@ void CellLib::read(const std::string& file) {
             default_values["voltage"] = extract_operating_conditions(itr, end);
         } else if (*itr == "time_unit") {
             logger.infoif(++itr == end, "syntax error");
-            time_unit_ = make_time_unit(*itr);
+            auto current_time_unit_ = make_time_unit(*itr);
+            if (!time_unit_) time_unit_ = current_time_unit_;
+            scale_factors["time"] = *current_time_unit_ / *time_unit_;
         } else if (*itr == "voltage_unit") {
             logger.infoif(++itr == end, "syntax error");
             voltage_unit_ = make_voltage_unit(*itr);
@@ -461,7 +501,9 @@ void CellLib::read(const std::string& file) {
         } else if (*itr == "capacitive_load_unit") {
             string unit;
             on_next_parentheses(itr, end, [&](auto& str) mutable { unit += str; });
-            capacitance_unit_ = make_capacitance_unit(unit);
+            auto current_capacitance_unit_ = make_capacitance_unit(unit);
+            if (!capacitance_unit_) capacitance_unit_ = current_capacitance_unit_;
+            scale_factors["capacitance"] = *current_capacitance_unit_ / *capacitance_unit_;
         } else if (*itr == "leakage_power_unit") {
             logger.infoif(++itr == end, "syntax error");
             auto current_power_unit_ = make_power_unit(*itr);
@@ -470,6 +512,34 @@ void CellLib::read(const std::string& file) {
         } else if (*itr == "cell") {
             LibertyCell* libterty_cell = extractLibertyCell(itr, end);
             lib_cells_[libterty_cell->name] = libterty_cell;
+        } else if (*itr == "type") {
+            string lib_type_name;
+            itr = on_next_parentheses(itr, end, [&](auto& name) mutable { lib_type_name = name; });
+            BusType bus_type;
+            itr = std::find(itr, end, "{");
+            int stack_1 = 1;
+            while (stack_1 && ++itr != end) {
+                if (*itr == "base_type") {
+                    logger.infoif(++itr == end, "can't get lib base type");
+                } else if(*itr == "data_type") {
+                    // TODO:
+                } else if (*itr == "bit")  {
+                    // TODO:
+                } else if (*itr == "bit_width") {
+                    logger.infoif(++itr == end, "can't get bit width");
+                    bus_type.width = std::stoi(itr->data());
+                } else if (*itr == "bit_from") {
+                    logger.infoif(++itr == end, "can't get bit start");
+                    bus_type.from = std::stoi(itr->data());
+                } else if (*itr == "bit_to") {
+                    logger.infoif(++itr == end, "can't get bit end");
+                    bus_type.to = std::stoi(itr->data());
+                } else if (*itr == "}")
+                    stack_1--;
+                else if (*itr == "{")
+                    stack_1++;
+            }
+            bus_types[lib_type_name] = bus_type;
         } else if (*itr == "}") {
             stack--;
         } else if (*itr == "{") {
@@ -523,6 +593,12 @@ void CellLib::finish_read() {
             lef_cell_type->liberty_cell = liberty_cell;
             liberty_cell->cell_type_ = lef_cell_type;
         }
+        if (!liberty_cell->leakage_power_) {
+            liberty_cell->leakage_power_ = default_values["default_cell_leakage_power"];
+            for (float power : liberty_cell->leakage_powers_) {
+                liberty_cell->leakage_power_ = std::max(*liberty_cell->leakage_power_, power);
+            }
+        }
         // sort port by name
         std::sort(liberty_cell->ports_.begin(),
                   liberty_cell->ports_.end(),
@@ -541,7 +617,8 @@ void CellLib::finish_read() {
             } else
                 finish_port_read(port);
         }
-
+        liberty_cell->num_bits_ = liberty_cell->num_bits_ ? liberty_cell->num_bits_ : liberty_cell->is_seq_;
+        size_t num_timing_arc_hash = 0;
         for (auto port : liberty_cell->ports_) {
             LibertyPort* non_bundle_port;
             if (port->is_bundle_) {
@@ -552,10 +629,78 @@ void CellLib::finish_read() {
                 // string encode_str = kvp.first;
                 // std::cout << encode_str << std::endl;
                 TimingArc* timing_arc = kvp.second;
+                timing_arc -> cell_ = liberty_cell;
                 port->timing_arcs_non_cond_non_bundle_.push_back(timing_arc);
+                // std::cout << timing_arc -> cell_ -> name << std::endl;
             }
+            num_timing_arc_hash ^= port -> timing_arcs_non_cond_non_bundle_.size();
         }
+        
+        liberty_cell->size_hash = liberty_cell->hash() ^ num_timing_arc_hash;
+        lib_cells_hash_map_[liberty_cell->size_hash].push_back(liberty_cell);
     }
+
+
+    // for (auto& [hash, liberty_cells] : lib_cells_hash_map_) {
+    //     for (auto& liberty_cell : liberty_cells) {
+    //         std::cout << liberty_cell->name << "\n";
+    //     }
+        // std::cout << "==============================\n";
+    // }
 }
+
+// void CellLib::apply_default_values() {
+//     for (auto& ckvp : cells) {
+//         auto& cell = ckvp.second;
+
+//         // apply the default leakage power
+//         if (!cell.leakage_power) cell.leakage_power = default_cell_leakage_power;
+
+//         for (auto& pkvp : cell.cellpins) {
+//             auto& cpin = pkvp.second;
+
+//             // direction-specific default values
+//             if (!cpin.direction) {
+//                 logger.warning("cellpin %s:%s has no direction defined", cell.name.c_str(), cpin.name.c_str());
+//                 continue;
+//             }
+
+//             switch (*cpin.direction) {
+//                 case CellpinDirection::INPUT:
+//                     if (!cpin.capacitance) {
+//                         cpin.capacitance = operating_conditions["default_input_pin_cap"];
+//                     }
+
+//                     if (!cpin.fanout_load) {
+//                         cpin.fanout_load = operating_conditions["default_fanout_load"];
+//                     }
+//                     break;
+
+//                 case CellpinDirection::OUTPUT:
+//                     if (!cpin.capacitance) {
+//                         cpin.capacitance = operating_conditions["default_output_pin_cap"];
+//                     }
+
+//                     if (!cpin.max_fanout) {
+//                         cpin.max_fanout = operating_conditions["default_max_fanout"];
+//                     }
+
+//                     if (!cpin.max_transition) {
+//                         cpin.max_transition = operating_conditions["default_max_transition"];
+//                     }
+//                     break;
+
+//                 case CellpinDirection::INOUT:
+//                     if (!cpin.capacitance) {
+//                         cpin.capacitance = operating_conditions["default_inout_pin_cap"];
+//                     }
+//                     break;
+
+//                 case CellpinDirection::INTERNAL:
+//                     break;
+//             }
+//         }
+//     }
+// }
 
 };  // namespace gt

@@ -17,25 +17,25 @@ __device__ void propagateSlew(index_type arc_id,
                               GPULutAllocator *d_allocator) {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int i = idx & 0b111;
-    if ((arc_type == 0) && (i < NUM_ATTR)) {
+    if ((arc_type == 0) && (i < NUM_ATTR)) {  // 0 for net arc
         float si = pinSlew[from_pin_id * NUM_ATTR + i];
         if (isnan(si)) return;
         float imp = pinImpulse[to_pin_id * NUM_ATTR + i];
         float so = si < 0.0 ? -sqrt(si * si + imp * imp) : sqrt(si * si + imp * imp);
         pinSlew[to_pin_id * NUM_ATTR + i] = so;
-    } else if (arc_type == 1) {
-        int el = i >> 2;
-        int fel_rf = i >> 1;
-        int tel_rf = ((i & 0b100) >> 1) + (i & 1);
-        int irf = fel_rf & 1;
-        int orf = tel_rf & 1;
+    } else if (arc_type == 1) {                     // 1 for gate arc
+        int el = i >> 2;                            // early late
+        int fel_rf = i >> 1;                        // from early/late rise/fall
+        int tel_rf = ((i & 0b100) >> 1) + (i & 1);  // to early/late rise/fall
+        int irf = fel_rf & 1;                       // input rise/fall
+        int orf = tel_rf & 1;                       // output rise/fall
         if ((timing_arc_id_map[arc_id * 2 + el] == -1) || isnan(pinSlew[from_pin_id * NUM_ATTR + fel_rf])) return;
         float si = pinSlew[from_pin_id * NUM_ATTR + fel_rf];
         float lc = pinLoad[to_pin_id * NUM_ATTR + tel_rf];
         int timing_id = timing_arc_id_map[arc_id * 2 + el];
-        float so = d_allocator->query(timing_id, irf, orf, si, lc, 1);
+        float so = d_allocator->query(timing_id, irf, orf, si, lc, 1);  // slew output = LUT(slew input, load capacitance)
         if (isnan(so)) return;
-        if (isnan(pinSlew[to_pin_id * NUM_ATTR + tel_rf]) || ((pinSlew[to_pin_id * NUM_ATTR + tel_rf] > so) ^ el)) {
+        if (isnan(pinSlew[to_pin_id * NUM_ATTR + tel_rf]) || ((pinSlew[to_pin_id * NUM_ATTR + tel_rf] > so) ^ el)) {  // setup: max output slew. hold: min output slew.
             atomicExch(&pinSlew[to_pin_id * NUM_ATTR + tel_rf], so);
         }
     }
@@ -56,7 +56,7 @@ __device__ void propagateDelay(index_type arc_id,
     const int i = idx & 0b111;
     if ((arc_type == 0) && (i < NUM_ATTR)) {
         float delay = pinRootDelay[to_pin_id * NUM_ATTR + i];
-        int el_rf_rf = (i << 1) + (i & 1);
+        int el_rf_rf = (i << 1) + (i & 1);  // same rise/fall for two pins in net connections
         arcDelay[arc_id * 2 * NUM_ATTR + el_rf_rf] = delay;
     } else if (arc_type == 1) {
         int el = i >> 2;
@@ -74,14 +74,8 @@ __device__ void propagateDelay(index_type arc_id,
     }
 }
 
-__device__ void propagateAT(index_type arc_id,
-                            index_type from_pin_id,
-                            index_type to_pin_id,
-                            float *pinAt,
-                            float *arcDelay,
-                            index_type *at_prefix_pin,
-                            index_type *at_prefix_arc,
-                            index_type *at_prefix_attr) {
+__device__ void propagateAT(
+    index_type arc_id, index_type from_pin_id, index_type to_pin_id, float *pinAt, float *arcDelay, index_type *at_prefix_pin, index_type *at_prefix_arc, index_type *at_prefix_attr) {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int i = idx & 0b111;
     int el = i >> 2;
@@ -122,7 +116,7 @@ __device__ void propagateTest(index_type arc_id,
         const int rf = i & 1;
         const int el_rf_rf = (i << 1) + (i & 1);
         if ((timing_arc_id_map[arc_id * 2 + el] == -1) || (isnan(pinSlew[to_pin_id * NUM_ATTR + i]))) return;
-        int fel = el ^ 1;
+        int fel = el ^ 1;  // clock -> data. clock late -> data early (hold)
         int timing_id = timing_arc_id_map[arc_id * 2 + el];
         int frf = d_allocator->d_is_rising_edge_triggered[timing_id] ? 0 : 1;
         if (frf && !d_allocator->d_is_falling_edge_triggered[timing_id]) {
@@ -134,18 +128,17 @@ __device__ void propagateTest(index_type arc_id,
         if (el == 0) {
             testRelatedAT[test_id * NUM_ATTR + i] = pinAt[from_pin_id * NUM_ATTR + fel_rf];
         } else {
-            testRelatedAT[test_id * NUM_ATTR + i] = pinAt[from_pin_id * NUM_ATTR + fel_rf] + clock_period;
+            testRelatedAT[test_id * NUM_ATTR + i] = pinAt[from_pin_id * NUM_ATTR + fel_rf] + (frf ? 0.5 * clock_period : clock_period);  // setup is checked at next cycle (first cycle for triggering 1st FF)
         }
 
         float sr = pinSlew[from_pin_id * NUM_ATTR + fel_rf];
-        float sc = pinSlew[to_pin_id * NUM_ATTR + i];
+        float sc = pinSlew[to_pin_id * NUM_ATTR + i];   
         testConstraint[test_id * NUM_ATTR + i] = d_allocator->query(timing_id, frf, rf, sr, sc, 2);
-
         if (!isnan(testConstraint[test_id * NUM_ATTR + i]) && !isnan(testRelatedAT[test_id * NUM_ATTR + i])) {
             if (el == 0) {
-                pinRat[to_pin_id * NUM_ATTR + i] = testRelatedAT[test_id * NUM_ATTR + i] + testConstraint[test_id * NUM_ATTR + i];
+                pinRat[to_pin_id * NUM_ATTR + i] = testRelatedAT[test_id * NUM_ATTR + i] + testConstraint[test_id * NUM_ATTR + i];  // hold clocks needs data stay late, rat = at_clk + T_hold
             } else {
-                pinRat[to_pin_id * NUM_ATTR + i] = testRelatedAT[test_id * NUM_ATTR + i] - testConstraint[test_id * NUM_ATTR + i];
+                pinRat[to_pin_id * NUM_ATTR + i] = testRelatedAT[test_id * NUM_ATTR + i] - testConstraint[test_id * NUM_ATTR + i];  // setup clock needs data come early, rat = at_clk - T_setup
             }
             testRAT[test_id * NUM_ATTR + i] = pinRat[to_pin_id * NUM_ATTR + i];
         }
@@ -212,8 +205,8 @@ __device__ void propagateRAT(index_type arc_id,
         const int el = i >> 1;
         if (isnan(pinRat[to_pin_id * NUM_ATTR + i]) || isnan(arcDelay[arc_id * 2 * NUM_ATTR + el_rf_rf])) return;
         float delay = arcDelay[arc_id * 2 * NUM_ATTR + el_rf_rf];
-        float rat = pinRat[to_pin_id * NUM_ATTR + i] - delay;
-        if (isnan(pinRat[from_pin_id * NUM_ATTR + i]) || ((pinRat[from_pin_id * NUM_ATTR + i] < rat) ^ el)) {
+        float rat = pinRat[to_pin_id * NUM_ATTR + i] - delay;                                                  // rat_f - delay, at_f - delay.
+        if (isnan(pinRat[from_pin_id * NUM_ATTR + i]) || ((pinRat[from_pin_id * NUM_ATTR + i] < rat) ^ el)) {  // early(hold up): max rat
             atomicExch(&pinRat[from_pin_id * NUM_ATTR + i], rat);
         }
     } else if (arc_type == 1) {
@@ -229,7 +222,7 @@ __device__ void propagateRAT(index_type arc_id,
             float delay = arcDelay[arc_id * 2 * NUM_ATTR + i];
             float rat = pinRat[to_pin_id * NUM_ATTR + tel_rf] - delay;
             from_rats[threadIdx.x] = rat;
-        } else {
+        } else {  // CLK -> D
             if (!d_allocator->is_transition_defined(timing_id, irf, orf)) return;
             if (el == 0) {
                 const int fel_rf = 2 + irf;
@@ -237,7 +230,7 @@ __device__ void propagateRAT(index_type arc_id,
                 float at = pinAt[from_pin_id * NUM_ATTR + fel_rf];
                 if (isnan(pinRat[to_pin_id * NUM_ATTR + tel_rf]) || isnan(pinAt[to_pin_id * NUM_ATTR + tel_rf]) || isnan(at)) return;
                 float slack = (pinRat[to_pin_id * NUM_ATTR + tel_rf] - pinAt[to_pin_id * NUM_ATTR + tel_rf]) * -1;
-                float rat = at + slack;
+                float rat = at + slack;  // fel = 1 (setup)
                 from_rats[threadIdx.x] = rat;
             } else {
                 const int fel_rf = irf;

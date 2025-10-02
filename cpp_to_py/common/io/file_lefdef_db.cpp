@@ -416,7 +416,7 @@ bool Database::writeComponents(std::ofstream& ofs) {
 #else
         std::ofstream& oss = ofs;
 #endif
-        oss << "   - " << cell->name() << " " << cell->ctype()->name << std::endl;
+        oss << "   - " << expand_name(cell->name()) << " " << cell->ctype()->name << std::endl;
         // ofs << "   - " << cell->name() << " " << cell->ctype()->name <<
         // std::endl;
         if (cell->fixed()) {
@@ -1611,11 +1611,12 @@ int readDefPin(defrCallbackType_e c, defiPin* dpin, defiUserData ud) {
         } else {
             logger.warning("unknown pin signal direction: %s", dpin->direction());
         }
+
     } else {
         string pinName(dpin->pinName());
         logger.warning("Pin %s has no pin signal direction", pinName.c_str());
     }
-
+    if(!strcmp(dpin -> pinName(), "VDD") || !strcmp(dpin -> pinName(), "VSS"))direction = 'o';
     IOPin* iopin = db->addIOPin(string(dpin->pinName()), string(dpin->netName()), direction);
 
     if (dpin->hasPlacement()) {
@@ -1844,16 +1845,31 @@ int readDefNet(defrCallbackType_e c, defiNet* dnet, defiUserData ud) {
         logger.warning("Net %s is 0-Pin net. Ignore.", netName.c_str());
         return 0;
     }
-
+    if(dnet -> numConnections() == 1 && strcmp(dnet->instance(0), "PIN") != 0){
+        string netName(dnet->name());
+        logger.warning("Net %s is 1-Pin net, and not IO Pin.", netName.c_str());
+        return 0;
+    }
     string netName(dnet->name());
     netName = validate_token(netName);
     // exclude VDD and VSS TODO:
-    if (netName == "VDD" || netName == "VSS") {
-        return 0;
-    }
-    
-    Net* net = db->addNet(netName, ndr);
+    // if (netName == "VDD" || netName == "VSS") {
+    //     string cellname(dnet->instance(0));
+    //     cellname = validate_token(cellname);
+    //     string pinname(dnet->pin(0));
+    //     Cell* cell = db->getCell(cellname);
+    //     return 0;
+    // }
 
+    Net* net = db->addNet(netName, ndr);
+    if (netName == "VDD" || netName == "VSS") {
+        IOPin* iopin = db -> addIOPin(string(netName), string(netName), 'o');
+        Pin* pin = iopin -> pin;
+        iopin->is_connected = true;
+        pin -> net = net; 
+        pin -> is_connected = true;
+        net -> addPin(pin);
+    }
     if (dnet->hasUse()) {
         const string use(dnet->use());
         if (use == "POWER") {
@@ -1868,7 +1884,6 @@ int readDefNet(defrCallbackType_e c, defiNet* dnet, defiUserData ud) {
             logger.error("unknown use: %s", use.c_str());
         }
     }
-
     for (unsigned i = 0; i != (unsigned)dnet->numConnections(); ++i) {
         Pin* pin = nullptr;
         if (strcmp(dnet->instance(i), "PIN") == 0) {

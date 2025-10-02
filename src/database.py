@@ -3,6 +3,7 @@ import collections
 import copy
 import math
 from utils import *
+from pdb import set_trace as bp
 
 
 def load_dataset(args, logger, params):
@@ -24,7 +25,7 @@ def load_dataset(args, logger, params):
         )
         design_info = torch.load(design_pt_path)
         gpdb = None
-    data = PlaceData(args, logger, **design_info)
+    data = PlaceData(args, logger, **design_info) # data: PlaceData
     return data, rawdb, gpdb
 
 
@@ -626,6 +627,8 @@ class PlaceData(object):
         ])
         self.is_macro.logical_and_((self.node_area > macro_area_threshold).squeeze(1))
         self.is_macro[mov_rhs:] = True
+        self.is_macro[self.node_type_indices[3][0]:self.node_type_indices[3][1]]=False
+        self.is_macro[self.node_type_indices[5][0]:self.node_type_indices[5][1]]=False
         self.is_macro.logical_and_((self.node_size * self.die_scale > 1e-4).all(dim=1))
 
         self.is_mov_macro = self.is_macro.clone()

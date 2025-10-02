@@ -60,7 +60,10 @@ GPUTimer::GPUTimer(std::shared_ptr<GTDatabase> gtdb_, shared_ptr<TimingTorchRawD
       num_movable_nodes(timing_raw_db.num_movable_nodes),
       num_nets(timing_raw_db.num_nets),
       num_pins(timing_raw_db.num_pins),
-      scale_factor(timing_raw_db.scale_factor) {
+      scale_factor(timing_raw_db.scale_factor),
+      clock_net_pin(timing_raw_db.clock_net_pin.data_ptr<bool>())
+      {
+
     num_arcs = gtdb.num_arcs;
     num_timings = gtdb.num_timings;
     total_num_fanouts = gtdb.total_num_fanouts;
@@ -124,15 +127,14 @@ torch::Tensor GPUTimer::report_pin_slack() {
     return pin_slacks.contiguous();
 }
 
-// void GPUTimer::update_endpoints() {
-//     pin_slacks = torch::zeros_like(timing_raw_db.pinAT, torch::dtype(torch::kFloat32).device(timing_raw_db.pinAT.device()));
-//     auto s1 = timing_raw_db.pinAT - timing_raw_db.pinRAT;
-//     auto s2 = timing_raw_db.pinRAT - timing_raw_db.pinAT;
-//     pin_slacks.index({"...", torch::indexing::Slice(0, 2)}).data().copy_(s1.index({"...", torch::indexing::Slice(0, 2)}));
-//     pin_slacks.index({"...", torch::indexing::Slice(2, 4)}).data().copy_(s2.index({"...", torch::indexing::Slice(2, 4)}));
-    
-//     auto [endpoints_id, tmp1] = torch::_unique(timing_raw_db.endpoints_id);
-//     endpoint_slacks = torch::nan_to_num(pin_slacks.index_select(0, endpoints_id));
-// }
+void GPUTimer::swap_gate_type(int node_id, int index) {
+    gtdb.swap_gate_type(node_id, index);
+}
+
+vector<index_type> GPUTimer::get_driver_gate_sink_arc(int node_id){
+    return gtdb.get_driver_gate_sink_arc(node_id);
+}
+
+
 
 }  // namespace gt

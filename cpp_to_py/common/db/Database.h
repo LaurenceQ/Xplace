@@ -56,6 +56,7 @@ public:
     vector<Site*> lefsites;
     vector<ViaType*> viatypes;
     vector<CellType*> celltypes;
+    int num_cells;
 
     vector<Cell*> cells;
     vector<IOPin*> iopins;
@@ -115,6 +116,7 @@ public:
     ViaType* addViaType(const string& name) { return addViaType(name, false); }
     CellType* addCellType(const string& name, unsigned libcell);
     void reserveCells(const size_t n) { cells.reserve(n); }
+    void changeCellSizing(const int cell_id, unsigned libcell);
     Cell* addCell(const string& name, CellType* type = nullptr);
     IOPin* addIOPin(const string& name = "", const string& netName = "", const char direction = 'x');
     void reserveNets(const size_t n) { nets.reserve(n); }

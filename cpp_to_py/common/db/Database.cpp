@@ -795,7 +795,7 @@ ViaType* Database::addViaType(const string& name, bool isDef) {
 CellType* Database::addCellType(const string& name, unsigned libcell) {
     CellType* celltype = getCellType(name);
     if (celltype) {
-        logger.warning("cell type re-defined: %s", name.c_str());
+        // logger.warning("cell type re-defined: %s", name.c_str());
         return celltype;
     }
     celltype = new CellType(name, libcell);
@@ -834,7 +834,7 @@ IOPin* Database::addIOPin(const string& name, const string& netName, const char 
 Net* Database::addNet(const string& name, const NDR* ndr) {
     Net* net = getNet(name);
     if (net) {
-        logger.warning("Net re-defined: %s", name.c_str());
+        // logger.warning("Net re-defined: %s", name.c_str());
         return net;
     }
     net = new Net(name, ndr);
@@ -988,6 +988,17 @@ Cell* Database::getCell(const string& name) {
         return nullptr;
     }
     return mi->second;
+}
+
+void Database::changeCellSizing(const int cell_id, unsigned libcell){
+    bool flag = true;
+    const char* cell_name = (cells[cell_id] -> name()).c_str();
+    const char* ori_cell_type = (cells[cell_id] -> ctype() -> name).c_str();
+    float ori_area = cells[cell_id] -> ctype() -> liberty_cell -> area_ != std::nullopt ? *(cells[cell_id] -> ctype() -> liberty_cell -> area_) : -1;
+    const char* new_cell_type = (celltypes[libcell] -> name).c_str();
+    float new_area = celltypes[libcell] -> liberty_cell -> area_ != std::nullopt ? *(celltypes[libcell] -> liberty_cell -> area_) : -1;
+    if(flag)printf("cell name:%s orignal cell:%s cell_type:%d area:%.4f new cell:%s cell_type:%d area:%.4f\n", cell_name, ori_cell_type, cells[cell_id] -> ctype() -> libcell(), ori_area, new_cell_type, libcell, new_area);
+    cells[cell_id]->set_ctype(celltypes[libcell]);
 }
 
 Net* Database::getNet(const string& name) {

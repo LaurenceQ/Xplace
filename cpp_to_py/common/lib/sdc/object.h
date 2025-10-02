@@ -57,5 +57,5 @@ using Object = std::variant<CurrentDesign,
                             AllRegisters>;
 
 Object parse_port(const std::string&);
-
+Object parse_pin(const std::string&);
 };  // namespace gt::sdc

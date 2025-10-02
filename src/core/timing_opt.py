@@ -16,7 +16,7 @@ class GPUTimer():
         self.pin_names = data.pin_names
         
         self.microns = data.microns
-        self.wire_resistance_per_micron = args.wire_resistance_per_micron
+        self.wire_resistance_per_micron = args.wire_resistance_per_micron #todo update later gza 2025.8.6 
         self.wire_capacitance_per_micron = args.wire_capacitance_per_micron
 
         self.node_size = data.node_size.detach().clone()
@@ -54,9 +54,9 @@ class GPUTimer():
             self.wire_resistance_per_micron,
             self.wire_capacitance_per_micron
         )
-        
+        # print("Timing raw database created with %d nodes and %d pins." % (data.num_nodes, data.num_pins))
         self.timer = gputimer.create_gputimer(params, rawdb, gpdb, self.timing_raw_db)
-        
+        # print("GPUTimer initialized with %d nodes and %d pins." % (data.num_nodes, data.num_pins))
         ## Timing optimization
         self.timer.init()
         self.timer.levelize()
@@ -228,6 +228,9 @@ class GPUTimer():
             "tns": tns,
         }
         self.recorder.push(**metrics_dict)
+        
+    def swap_type(self, node_id, new_gate_type):
+        self.timer.swap_type(node_id, new_gate_type)
          
     def visualize(self, args):
         file_prefix = "%s_" % args.design_name

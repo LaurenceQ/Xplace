@@ -53,6 +53,8 @@ void bindGPDatabase(pybind11::module& m) {
         .def("net_names", &gp::GPDatabase::getNetNames)
         .def("pin_names", &gp::GPDatabase::getPinNames)
         .def("node_names", &gp::GPDatabase::getNodeNames)
+        .def("node_type_names", &gp::GPDatabase::getNodeTypeNames)
+        .def("pin_name2pin_id", &gp::GPDatabase::getPinName2PinId, py::return_value_policy::copy)
         .def("microns", &gp::GPDatabase::getMicrons, py::return_value_policy::copy)
         .def("dieInfo", &gp::GPDatabase::getDieInfo, py::return_value_policy::copy)  // dieLX, dieHX, dieLY, dieHY
         .def("coreInfo", &gp::GPDatabase::getCoreInfo, py::return_value_policy::copy)  // coreLX, coreHX, coreLY, coreHY
@@ -77,7 +79,9 @@ void bindGPDatabase(pybind11::module& m) {
         .def("apply_node_cpos", &gp::GPDatabase::applyNodeCPos)
         .def("apply_node_lpos", &gp::GPDatabase::applyNodeLPos)
         .def("write_placement", &gp::GPDatabase::writePlacement)
+        .def("write_netlist", &gp::GPDatabase::writeNetlist)
         .def("get_io_nets", &gp::GPDatabase::getIONets)
+        .def("celltype_size_tensor", &gp::GPDatabase::getCelltypeSizeTensor, py::return_value_policy::move)
         ;
 }
 

@@ -4,6 +4,7 @@
 __pycache__/
 *.so
 build/
+build_debug/
 *.log
 *.npy
 *.csv
@@ -12,6 +13,16 @@ build/
 *.json
 result/
 data/cad
+data/ispd2013
 data/raw
+data/ariane
+data/ac97_top
+data/simple
+data/iccad2015.tar.gz
+design/
+output/
+platform/
 misc
 .venv/
+*.txt
+*.sh

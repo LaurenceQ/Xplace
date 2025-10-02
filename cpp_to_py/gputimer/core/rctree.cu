@@ -276,7 +276,7 @@ __global__ void propagate_rc_kernel(const int *flat_net2node_start_map,
             int pnode = parent_node[node];
             int pin = node2pin_map[node];
             float t = node_load[node * NUM_ATTR + cond] * res_parent[node * NUM_ATTR + cond];
-            node_delay[node * NUM_ATTR + cond] = node_delay[pnode * NUM_ATTR + cond] + t;
+            if(pnode != -1)node_delay[node * NUM_ATTR + cond] = node_delay[pnode * NUM_ATTR + cond] + t;
         }
         for (int i = nend - 1; i >= nst; i--) {
             int node = node_order[i];
@@ -298,7 +298,7 @@ __global__ void propagate_rc_kernel(const int *flat_net2node_start_map,
             int pnode = parent_node[node];
             int pin = node2pin_map[node];
             float t = node_ldelay[node * NUM_ATTR + cond] * res_parent[node * NUM_ATTR + cond];
-            node_beta[node * NUM_ATTR + cond] = node_beta[pnode * NUM_ATTR + cond] + t;
+            if(pnode != -1)node_beta[node * NUM_ATTR + cond] = node_beta[pnode * NUM_ATTR + cond] + t;
             node_impulse[node * NUM_ATTR + cond] =
                 sqrt(2 * node_beta[node * NUM_ATTR + cond] - node_delay[node * NUM_ATTR + cond] * node_delay[node * NUM_ATTR + cond]);
         }
@@ -310,9 +310,11 @@ __global__ void move_to_timing_graph(const int *flat_net2node_start_map,
                                      const float *node_load,
                                      const float *node_delay,
                                      const float *node_impulse,
+                                     const float *res_parent,
                                      float *pinLoad,
                                      float *pinImpulse,
                                      float *pinRootDelay,
+                                     float *pinRootRes,
                                      int num_nets) {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int cond = threadIdx.y;
@@ -326,6 +328,7 @@ __global__ void move_to_timing_graph(const int *flat_net2node_start_map,
                 pinLoad[pin * NUM_ATTR + cond] = node_load[node * NUM_ATTR + cond];
                 pinRootDelay[pin * NUM_ATTR + cond] = node_delay[node * NUM_ATTR + cond];
                 pinImpulse[pin * NUM_ATTR + cond] = node_impulse[node * NUM_ATTR + cond];
+                pinRootRes[pin * NUM_ATTR + cond] = res_parent[node * NUM_ATTR + cond];
             }
         }
     }
@@ -472,7 +475,17 @@ void propagate_rc_tree(std::vector<int> host_edge_from,
                                                     num_nets,
                                                     num_nodes);
 
-    move_to_timing_graph<<<numBlocks2, block_size>>>(flat_net2node_start_map, node2pin_map, node_load, node_delay, node_impulse, pinLoad, pinImpulse, pinRootDelay, num_nets);
+    move_to_timing_graph<<<numBlocks2, block_size>>>(flat_net2node_start_map, 
+                                                    node2pin_map, 
+                                                    node_load, 
+                                                    node_delay, 
+                                                    node_impulse, 
+                                                    res_parent,
+                                                    pinLoad, 
+                                                    pinImpulse, 
+                                                    pinRootDelay, 
+                                                    pinRootRes,
+                                                    num_nets);
 
     cudaFree(edge_from);
     cudaFree(edge_to);

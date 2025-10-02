@@ -31,6 +31,16 @@ class LibertyPort;
 class TimingArc;
 struct LutTemplate;
 class Lut;
+class BusType {
+public:
+    BusType() = default;
+    BusType(string name_) : name(name_) {}
+    string name;
+    int width = 0;
+    int from = 0;
+    int to = 0;
+};
+
 
 enum class DelayModel { generic_cmos, table_lookup, cmos2, piecewise_cmos, dcm, polynomial, unknown };
 enum class CellPortDirection { input, output, inout, internal, unknown };
@@ -55,6 +65,9 @@ public:
     optional<farad_t> capacitance_unit_;
     optional<ampere_t> current_unit_;
     optional<volt_t> voltage_unit_;
+    
+    unordered_map<string, BusType> bus_types;
+
 
     unordered_map<string, optional<float>> default_values = {
         {"default_cell_leakage_power", optional<float>{}},
@@ -78,6 +91,8 @@ public:
 
     unordered_map<string, LutTemplate *> lut_templates_;
     unordered_map<string, LibertyCell *> lib_cells_;
+    unordered_map<size_t, vector<LibertyCell *>> lib_cells_hash_map_;
+
 
     LutTemplate *get_lut_template(const string &);
     LibertyCell *get_cell(const std::string &name);
@@ -110,7 +125,10 @@ public:
     vector<float> leakage_powers_;
     optional<float> leakage_power_;
     optional<float> area_;
+    size_t hash() const;
+    float average_delay();
 
+    size_t size_hash;
     bool is_seq_ = false;
     int num_bits_ = 0;
 
@@ -121,6 +139,13 @@ public:
 class LibertyPort {
 public:
     LibertyPort() = default;
+
+    std::string func_str_="";
+    size_t func_hash() {
+        size_t h = std::hash<std::string>()(func_str_);
+        h = h ^ std::hash<std::string>{}(name);
+        return h;
+    }
 
 public:
     string name;
@@ -151,5 +176,8 @@ public:
     optional<float> max_transition;
     optional<float> min_transition;
 };
+
+
+
 
 };  // namespace gt

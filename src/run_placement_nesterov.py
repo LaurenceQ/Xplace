@@ -1,6 +1,8 @@
 from utils import *
 from src import *
 from functools import partial
+from pdb import set_trace as bp
+import itertools
 
 def get_trunc_node_pos_fn(mov_node_size, data):
     node_pos_lb = mov_node_size / 2 + data.die_ll + 1e-4 
@@ -107,6 +109,26 @@ def global_placement_main(gpdb, rawdb, ps: ParamScheduler, data: PlaceData, args
     torch.cuda.synchronize(device)
     gp_start_time = time.time()
     logger.info("start gp")
+    
+    # bp()
+    # gputimer.update_timing_eval(data.node_pos)
+    # gputimer.report_timing_slack()
+
+    # gputimer.timer.swap_gate_type(1200, 0)
+    # gputimer.update_timing_eval(data.node_pos)
+    # gputimer.report_timing_slack()
+    
+    # gputimer.timer.swap_gate_type(124, 1)
+    # gputimer.timer.swap_gate_type(3000, 2)
+    # gputimer.update_timing_eval(data.node_pos)
+    # gputimer.report_timing_slack()
+    
+    # bp()
+    
+    # for i in range(1000): gputimer.timer.swap_gate_type(i, 2)
+    # gputimer.update_timing_eval(data.node_pos)
+    # gputimer.report_timing_slack()
+    
 
     # def trace_handler(prof):
     #     print(prof.key_averages().table(
@@ -346,27 +368,27 @@ def global_placement_main(gpdb, rawdb, ps: ParamScheduler, data: PlaceData, args
                     wns_early, tns_early, wns_late, tns_late
                 )
             logger.info(log_str)
-            if args.draw_placement:
-                info = (iteration, hpwl, data.design_name)
-                node_pos_to_draw = mov_node_pos[mov_lhs:mov_rhs, ...].clone()
-                node_size_to_draw = data.node_size[mov_lhs:mov_rhs, ...].clone()
-                node_pos_to_draw = torch.cat(
-                    [node_pos_to_draw, data.node_pos[mov_rhs:, ...].clone()], dim=0
-                )
-                node_size_to_draw = torch.cat(
-                    [node_size_to_draw, data.node_size[mov_rhs:, ...].clone()], dim=0
-                )
-                if args.use_filler:
-                    node_pos_to_draw = torch.cat(
-                        [node_pos_to_draw, mov_node_pos[mov_rhs:, ...].clone()], dim=0
-                    )
-                    node_size_filler_to_draw = data.filler_size[:(mov_node_pos.shape[0] - mov_rhs), ...]
-                    node_size_to_draw = torch.cat(
-                        [node_size_to_draw, node_size_filler_to_draw], dim=0
-                    )
-                draw_fig_with_cairo_cpp(
-                    node_pos_to_draw, node_size_to_draw, data, info, args
-                )
+            # if args.draw_placement or terminate_signal:
+            #     info = (iteration, hpwl, data.design_name)
+            #     node_pos_to_draw = mov_node_pos[mov_lhs:mov_rhs, ...].clone()
+            #     node_size_to_draw = data.node_size[mov_lhs:mov_rhs, ...].clone()
+            #     node_pos_to_draw = torch.cat(
+            #         [node_pos_to_draw, data.node_pos[mov_rhs:, ...].clone()], dim=0
+            #     )
+            #     node_size_to_draw = torch.cat(
+            #         [node_size_to_draw, data.node_size[mov_rhs:, ...].clone()], dim=0
+            #     )
+            #     if args.use_filler:
+            #         node_pos_to_draw = torch.cat(
+            #             [node_pos_to_draw, mov_node_pos[mov_rhs:, ...].clone()], dim=0
+            #         )
+            #         node_size_filler_to_draw = data.filler_size[:(mov_node_pos.shape[0] - mov_rhs), ...]
+            #         node_size_to_draw = torch.cat(
+            #             [node_size_to_draw, node_size_filler_to_draw], dim=0
+            #         )
+            #     draw_fig_with_cairo_cpp(
+            #         node_pos_to_draw, node_size_to_draw, data, info, args
+            #     )
 
         if terminate_signal:
             break
@@ -421,7 +443,6 @@ def global_placement_main(gpdb, rawdb, ps: ParamScheduler, data: PlaceData, args
     iteration += 1 # increase 1 For DP drawing
 
     return node_pos, iteration, gp_hpwl, overflow, gp_time, gp_per_iter
-
 
 def run_placement_main_nesterov(args, logger):
     total_start = time.time()
@@ -490,5 +511,95 @@ def run_placement_main_nesterov(args, logger):
     place_metrics = (dp_hpwl, gp_hpwl, top5overflow, overflow, gp_time, dp_time + lg_time, gp_per_iter, place_time)
     if args.timing_opt:
         place_metrics += (wns_early_dp, tns_early_dp, wns_late_dp, tns_late_dp)
+
+    return place_metrics, route_metrics
+
+def run_placement_main_nesterov_and_sizing(args, logger, data, rawdb, gpdb):
+    total_start = time.time()
+    params = {
+        "design_name": f"{args.designName}",
+        "sdc": f"design/{args.designName}/{args.designName}.sdc",
+        "spef": f"design/{args.designName}/{args.designName}.spef",
+    }
+
+    device = torch.device(
+        "cuda:{}".format(args.gpu) if torch.cuda.is_available() else "cpu"
+    )
+    assert args.use_eplace_nesterov
+    logger.info("Start place %s/%s" % (args.dataset , args.design_name))
+    logger.info("Use Nesterov optimizer!")
+    data = data.to(device)
+    data = data.preprocess()
+    logger.info(data)
+    logger.info(data.node_type_indices)
+    # args.num_bin_x = args.num_bin_y = 2 ** math.ceil(math.log2(max(data.die_info).item() // 25))
+    get_init_density_map(rawdb, gpdb, data, args, logger)
+    data.init_filler()
+
+    ps = ParamScheduler(data, args, logger)
+
+    gputimer = None
+    if args.timing_opt:        
+        gputimer = GPUTimer(data, rawdb, gpdb, params, args)
+        data.gputimer = gputimer
+        def timing_eval_func(node_pos):
+            gputimer.update_timing_eval(node_pos)
+            wns_early, tns_early, wns_late, tns_late = gputimer.report_timing_slack()
+            logger.info("early WNS/TNS: %.4f/%.4f (ns) | late WNS/TNS: %.4f/%.4f (ns)" % (wns_early, tns_early, wns_late, tns_late))
+            return wns_early, tns_early, wns_late, tns_late
+            
+    # global placement
+    node_pos, iteration, gp_hpwl, overflow, gp_time, gp_per_iter = global_placement_main(
+        gpdb, rawdb, ps, data, args, logger, params, gputimer
+    )
+    if args.timing_opt:
+        wns_early_gp, tns_early_gp, wns_late_gp, tns_late_gp = timing_eval_func(node_pos)
+
+    # detail placement
+    node_pos, dp_hpwl, top5overflow, lg_time, dp_time = detail_placement_main(
+        node_pos, gpdb, rawdb, ps, data, args, logger
+    )
+    if args.timing_opt:
+        wns_early_dp, tns_early_dp, wns_late_dp, tns_late_dp = timing_eval_func(node_pos)
+    iteration += 1
+
+    route_metrics = None
+    if ps.enable_route and args.final_route_eval:
+        logger.info("Final routing evalution by GGR...")
+        route_metrics = run_gr_and_fft(
+            args, logger, data, rawdb, gpdb, ps, 
+            report_gr_metrics_only=True,
+            skip_m1_route=True, given_gr_params={
+                "rrrIters": 1,
+                "route_guide": os.path.join(args.result_dir, args.exp_id, args.output_dir, "%s_%s.guide" %(args.output_prefix, args.design_name)),
+            }
+        )
+
+    # if args.load_from_raw:
+    #     del gpdb, rawdb
+    #     del gputimer
+
+    place_time = time.time() - total_start
+    logger.info("GP Time: %.4f LG Time: %.4f DP Time: %.4f Total Place Time: %.4f" % (
+        gp_time, lg_time, dp_time, place_time))
+    place_metrics = (dp_hpwl, gp_hpwl, top5overflow, overflow, gp_time, dp_time + lg_time, gp_per_iter, place_time)
+    if args.timing_opt:
+        place_metrics += (wns_early_dp, tns_early_dp, wns_late_dp, tns_late_dp)
+    
+    # gputimer.update_timing_eval(data.node_pos)
+    # wns_early, tns_early, wns_late, tns_late = gputimer.report_timing_slack()
+    # logger.info("FLUTE evaluation: wns_early: %.3f, tns_early: %.3f, wns_late: %.3f, tns_late: %.3f" % ( wns_early, tns_early, wns_late, tns_late))
+
+    # gputimer.timer.init_sizing()
+    # for T in range(1):
+    #     gputimer.timer.evaluate_sizing(-1)
+    #     gputimer.timer.change_db_sizing()
+    #     data.node_pos = run_lg(data.node_pos, data, args, logger)
+    #     gputimer.update_timing_eval(data.node_pos)
+    #     wns_early, tns_early, wns_late, tns_late = gputimer.report_timing_slack()
+    #     logger.info("FLUTE evaluation: wns_early: %.3f, tns_early: %.3f, wns_late: %.3f, tns_late: %.3f" % ( wns_early, tns_early, wns_late, tns_late))
+    # gputimer.timer.report_K_path(10, 1, True)    
+    # gputimer.report_path(ep_name = "i_cache_subsystem_i_nbdcache_i_miss_handler_evict_cl_q_reg[data][102]:SETN", el = 1, verbose = True)
+    gpdb.write_placement(f"./output/{args.designName}")
 
     return place_metrics, route_metrics

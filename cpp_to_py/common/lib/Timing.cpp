@@ -100,6 +100,39 @@ bool TimingArc::is_rising_edge_triggered() const {
     };
 }
 
+bool TimingArc::is_input_transition_defined(Tran irf) const {
+    if(is_rising_edge_triggered() && irf != RISE) return false;
+    if(is_falling_edge_triggered() && irf != FALL) return false;
+    return true;
+}
+  
+bool TimingArc::is_input_transition_defined() const {
+    return (is_falling_edge_triggered() || is_rising_edge_triggered());
+}
+
+bool TimingArc::is_transition_defined(Tran irf, Tran orf) const {
+
+    if(!is_input_transition_defined(irf)) return false;
+    
+    if(timing_sense_ != TimingSense::unknown && timing_sense_ != TimingSense::non_unate) {
+      switch(timing_sense_) {
+        case TimingSense::positive_unate:
+          if(irf != orf) return false;
+        break;
+  
+        case TimingSense::negative_unate:
+          if(irf == orf) return false;
+        break;
+  
+        default:
+        break;
+      }
+    }
+  
+    return true;
+}
+
+  
 // encode TimingType TimingSense from_port_name to_port_name to remove duplicate
 string TimingArc::encode_arc() {
     int max_type_shift = std::ceil(std::log2(static_cast<int>(TimingType::unknown)));
@@ -109,6 +142,74 @@ string TimingArc::encode_arc() {
     return encode_str;
 }
 
+std::optional<float> TimingArc::delay(Tran irf, Tran orf, float slew, float load) const {
+
+    if(!is_transition_defined(irf, orf)) {
+      return std::nullopt;
+    }
+    
+    const Lut* lut {nullptr};
+  
+    switch(orf) {
+      case RISE:
+        lut = cell_delay_[0]->set_ ? cell_delay_[0] : nullptr;
+      break;
+  
+      case FALL:
+        lut = cell_delay_[1]->set_ ? cell_delay_[1] : nullptr;
+      break;
+  
+      default:
+        assert(false);
+      break;
+    };
+    
+    if(lut == nullptr) {
+      return std::nullopt;
+    }
+    
+    // Case 1: scalar.
+    if(lut->lut_template == nullptr) {     
+      if(lut->is_scalar()) {
+        return lut->table[0];
+      }
+      else {
+        logger.info("lut without template must contain a single scalar");
+      }
+    }
+  
+    // Case 2: non-scalar table.
+    float val1 {.0f}, val2 {.0f};
+    
+    // - obtain the input numerics
+    assert(lut->lut_template->variable1);
+  
+    switch(*(lut->lut_template->variable1)) {
+  
+      case LutVar::TOTAL_OUTPUT_NET_CAPACITANCE:
+        if(lut->lut_template->variable2) {
+          assert(lut->lut_template->variable2 == LutVar::INPUT_NET_TRANSITION);
+        }
+        val1 = load;
+        val2 = slew;
+      break;
+  
+      case LutVar::INPUT_NET_TRANSITION:
+        if(lut->lut_template->variable2) {
+          assert(lut->lut_template->variable2 == LutVar::TOTAL_OUTPUT_NET_CAPACITANCE);
+        }
+        val1 = slew;
+        val2 = load;
+      break;
+  
+      default:
+        logger.info("invalid delay lut template variable");
+      break;
+    };
+    
+    // - perform the linear inter/extro-polation on indices1 and indices2
+    return (*lut)(val1, val2); 
+  }
 
 EnumNameMap<TimingSense> timing_sense_name_map = {{TimingSense::non_unate, "non_unate"},
                                                   {TimingSense::positive_unate, "positive_unate"},

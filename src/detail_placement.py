@@ -401,10 +401,10 @@ def run_lg(node_pos: torch.Tensor, data: PlaceData, args, logger):
         logger.info("Finish Greedy Legalization. Time: %.4f" % (time.time() - gl_time))
 
     # # Commit result
-    # commit_to_node_pos(node_pos, data, lg_rawdb)
-    # torch.cuda.synchronize(node_pos.device)
-    # info = (-1, 0, data.design_name)
-    # draw_fig_with_cairo_cpp(node_pos, data.node_size, data, info, args, base_size=4096)
+    commit_to_node_pos(node_pos, data, lg_rawdb)
+    torch.cuda.synchronize(node_pos.device)
+    info = (-1, 0, data.design_name)
+    draw_fig_with_cairo_cpp(node_pos, data.node_size, data, info, args, base_size=4096)
 
     logger.info("Start running Abacus Legalization...")
     al_time = time.time()
@@ -516,7 +516,9 @@ def run_dp_local(node_pos: torch.Tensor, data: PlaceData, args, logger, displace
     kr_iter = 2
     gs_bs = 256
     gs_iter = 2
-
+    ism_bs = 1024
+    ism_set = 128
+    ism_iter = 50
     # use integer coordinate systems in DP for better quality
     scalar = compute_scalar(get_ori_scale_factor(data))
     # scalar = 1.0
@@ -548,7 +550,8 @@ def run_dp_local(node_pos: torch.Tensor, data: PlaceData, args, logger, displace
         ))
     
     dp_handler(gpudp.kReorder, "K-Reorder 1", num_bins_x, num_bins_y, kr_K, kr_iter)
-    dp_handler(gpudp.globalSwap, "Global Swap", num_bins_x // 2, num_bins_y // 2, gs_bs, gs_iter, displacement_ratio)
+    dp_handler(gpudp.independentSetMatching, "Independent Set Match", num_bins_x, num_bins_y, ism_bs, ism_set, ism_iter)
+    # dp_handler(gpudp.globalSwap, "Global Swap", num_bins_x // 2, num_bins_y // 2, gs_bs, gs_iter, displacement_ratio)
     dp_handler(gpudp.kReorder, "K-Reorder 2", num_bins_x, num_bins_y, kr_K, kr_iter)
 
     del dp_rawdb
@@ -743,8 +746,8 @@ def external_detail_placement(input_file, data: PlaceData, args, logger, eval_mo
 def default_detail_placement(node_pos, gpdb, rawdb, ps, data: PlaceData, args, logger):
     torch.cuda.synchronize(node_pos.device)
     lg_start_time = time.time()
-    if args.legalization:
-        node_pos = run_lg(node_pos, data, args, logger)
+    # if args.legalization:
+    #     node_pos = run_lg(node_pos, data, args, logger)
     torch.cuda.synchronize(node_pos.device)
     lg_end_time = time.time()
     if args.draw_placement:

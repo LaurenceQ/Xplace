@@ -73,7 +73,7 @@ void GPUTimer::levelize() {
     }
     cudaMalloc(&level_list_end, level_list_end_cpu.size() * sizeof(index_type));
     cudaMemcpy(level_list_end, level_list_end_cpu.data(), level_list_end_cpu.size() * sizeof(index_type), cudaMemcpyHostToDevice);
-    index_type *level_list_cpu = new index_type[total_num_frontiers];
+    level_list_cpu = new index_type[total_num_frontiers];
     cudaMemcpy(level_list_cpu, level_list, total_num_frontiers * sizeof(index_type), cudaMemcpyDeviceToHost);
 
     // checkTimingGraph(level_list_cpu, num_pins, gtdb.pin_names);

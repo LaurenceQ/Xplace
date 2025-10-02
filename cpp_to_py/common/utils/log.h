@@ -63,6 +63,7 @@ class PrintfLogger {
     static constexpr bool write_log = false;
     FILE* f;
     bool tmp_verbose_parser_log = false;
+    // int _global_log_level = LOG_DEBUG;
     int _global_log_level = LOG_INFO;
 
 public:

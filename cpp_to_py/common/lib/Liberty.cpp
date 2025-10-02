@@ -1,6 +1,7 @@
 
 
 #include "Liberty.h"
+#include "Timing.h"
 
 namespace gt {
 
@@ -75,6 +76,34 @@ void CellLib::tokenize(const std::vector<char>& buf, std::vector<std::string_vie
     if (len > 0) {
         tokens.push_back({token, len});
     }
+}
+
+size_t LibertyCell::hash() const {
+    size_t h = 0;
+    for (const auto &port : ports_) {
+        h ^= port->func_hash();
+    }
+    return h;
+}
+
+float LibertyCell::average_delay() {
+    float total_delay = 0;
+    int table_cnt = 0;
+    for(const auto& cellpin : ports_) {
+      if (cellpin->name == "QN" || cellpin->name == "QN1") {
+         for (auto timing : cellpin->timing_arcs_non_cond_non_bundle_) {
+            auto delay = timing->delay(gt::Tran::RISE, gt::Tran::FALL, 30, 30);
+            if (delay) {
+               total_delay += *delay;
+               table_cnt++;
+            }
+         }
+      }
+    }
+    if (table_cnt == 0) {
+      return 0;
+    }
+    return total_delay / table_cnt;
 }
 
 LibertyCell* CellLib::get_cell(const std::string& name) {

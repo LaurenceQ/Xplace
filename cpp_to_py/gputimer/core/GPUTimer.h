@@ -38,6 +38,7 @@ public:
     void update_states();
     void update_timing();
     void update_endpoints();
+    void init_sizing();
     
     float report_wns(int el);
     float report_tns_elw(int el);
@@ -51,9 +52,12 @@ public:
     torch::Tensor report_pin_load();
 
     tuple<vector<int64_t>, vector<float>, vector<float>> report_path(int ep_idx = -1, int el = -1, bool verbose = false);
-    vector<vector<int64_t>> report_K_path(int K, bool verbose = false);
+    vector<vector<int64_t>> report_K_path(int K, int el = -1, bool verbose = false);
     tuple<torch::Tensor, torch::Tensor> report_criticality(int K, bool verbose = false, bool deterministic = true);
     tuple<torch::Tensor, torch::Tensor> report_criticality_threshold(float thrs, bool verbose = false, bool deterministic = true);
+
+    void swap_gate_type(int idx, int index);
+    vector<index_type> get_driver_gate_sink_arc(int node_id);
 
 public:
     float time_unit() const;
@@ -65,7 +69,6 @@ public:
     float *arcDelay, *arcSlew;
     float *pinCap, *pinWireCap;
     float *testRelatedAT, *testConstraint, *testRAT;
-
     float *__pinSlew__, *__pinLoad__, *__pinRAT__, *__pinAT__;
     float *pinImpulse_ref, *pinLoad_ref, *pinRootDelay_ref;
     float *pinLoad_ratio, *pinRootDelay_ratio;
@@ -82,6 +85,7 @@ public:
     TimingArc* liberty_timing_arcs;
     index_type *level_list_end, *level_list;
     vector<int> level_list_end_cpu;
+    index_type *level_list_cpu;
     int* net_is_clock;
 
     float clock_period;
@@ -125,6 +129,35 @@ public:
 
     torch::Tensor pin_slacks;
     torch::Tensor endpoint_slacks;
+
+    /*gate sizing*/
+    int* equivalent_cell_list;
+    int* equivalent_cell_list_end;
+    int* pin_id2equivalent_cell_id;
+    int* liberty_cell_type2port_list_end;
+    int* pin_id2port_offset_id;
+    int* liberty_port2timing_list_end;
+    int* timing_arc_in_port_id;
+    int* candidate_id2pin_id;
+    int* candidate_id2lib_cell_id;
+    int* topo_order2candidate_list_end;
+    int* pin_id2timing_arc_list_start;
+    int* pin_id2timing_arc_list_end;
+    int* level_candidate;
+    float* liberty_port_capacitance;
+    float* level_pinSlew;
+    float* level_cost;
+    float* arcLambda;
+    float* POLambda;
+    vector<int*> level_equivalent_cell_num_pin;
+
+    index_type *sizing_level_list_end, *sizing_level_list;
+    int *pin_id2cell_type_id;
+    vector<int> sizing_level_list_end_cpu;
+    vector<int> sizing_level_list_cpu;
+    void evaluate_sizing(int sizing_max_level);
+    void change_db_sizing();
+    bool* clock_net_pin;
 };
 
 }  // namespace gt

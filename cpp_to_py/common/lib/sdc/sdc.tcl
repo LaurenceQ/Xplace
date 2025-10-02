@@ -29,7 +29,7 @@ proc sdc_callback {cmd parsing_result} {
   
   # Switch on cmd type
   switch -- $cmd {
-
+    current_design -
     create_clock -
     set_input_delay -
     set_input_transition -
@@ -37,6 +37,8 @@ proc sdc_callback {cmd parsing_result} {
     set_driving_cell -
     set_clock_uncertainty -
     set_load -
+    set_propagated_clock - 
+    set_clock_latency - 
     set_units { 
 
       set cmd_body [list "command" [json::write string $cmd]]
@@ -54,6 +56,9 @@ proc sdc_callback {cmd parsing_result} {
 
     get_clocks -
     get_ports {
+      return [join $res(patterns) " "]
+    }
+    get_pins {
       return [join $res(patterns) " "]
     }
 

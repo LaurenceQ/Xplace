@@ -49,6 +49,9 @@ public:
     std::vector<float> table;
 
     const LutTemplate* lut_template{nullptr};
+    bool is_scalar() const;
+    bool empty() const;
+    float operator() (float, float) const;
 
     bool set_ = false;
 };

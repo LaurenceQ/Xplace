@@ -223,4 +223,64 @@ string tokenize_name(const string& name) {
     return new_name;
 }
 
+bool Database::write_verilog(const std::string& file) {
+    std::ofstream ofs(file.c_str());
+    if (!ofs.good()) {
+        logger.error("cannot open verilog file: %s", file.c_str());
+        return false;
+    }
+
+    ofs << "module " << module_name << " (" << std::endl;
+
+    for (int i = 0; i < verilog_parser->ports.size(); i++) {
+        auto &port = verilog_parser->ports[i];
+        for (auto &name : port.names) {
+            ofs << "  " << name;
+        }
+        if (i != verilog_parser->ports.size() - 1) ofs << ",\n";
+        else ofs << ");\n";
+    }
+
+    for (int i = 0; i < verilog_parser->ports.size(); i++) {
+        auto &port = verilog_parser->ports[i];
+        for (auto &name : port.names) {
+            if (port.dir == verilog::PortDirection::INPUT || port.dir == verilog::PortDirection::OUTPUT) {
+                if ((port.beg != -1) && (port.end != -1)) {
+                    ofs << "  " << ((port.dir == verilog::PortDirection::INPUT) ? "input " : "output ") << "[" << port.beg << ":" << port.end << "] " << name ;
+                } else {
+                    ofs << "  " << ((port.dir == verilog::PortDirection::INPUT) ? "input " : "output ") << name;
+                }
+            }
+        }
+        ofs << ";\n";
+    }
+
+    for (Net* net : nets) {
+        if (net->is_port) continue;
+        ofs << " wire " << tokenize_name(net->name) << " ; " << std::endl;
+    } 
+    ofs << std::endl;
+
+    for (Cell* cell : cells) {
+        string raw_name = cell->name();
+        string cell_name = tokenize_name(raw_name);
+        ofs << " " << cell->ctype()->name << " " << cell_name << " (";
+        vector<Pin*> cell_pins = cell->pins();
+        bool first_line = true;
+        for (int i = 0; i < cell_pins.size(); i++) {
+            Pin* pin = cell_pins[i];
+            if (!pin->net) continue;
+            if (!first_line) ofs << " ,\n";
+            ofs << "    ." << pin->type->name() << "(" << tokenize_name(pin->net->name) << " )";
+            first_line = false;
+        }
+        ofs << " );\n";
+    } 
+
+
+    ofs << "endmodule" << std::endl;
+    ofs.close();
+    return true;
+}
+
 }

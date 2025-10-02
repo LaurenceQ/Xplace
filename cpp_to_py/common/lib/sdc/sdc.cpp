@@ -91,7 +91,11 @@ void SDC::read(const std::filesystem::path& path) {
                 commands.emplace_back(std::in_place_type_t<CreateClock>{}, j);
             } else if (c == "set_units") {
                 commands.emplace_back(std::in_place_type_t<SetUnits>{}, j);
-            } else {
+            } else if (c == "set_propagated_clock") {
+                commands.emplace_back(std::in_place_type_t<SetPropagatedClock>{}, j);
+            }else if (c == "set_clock_latency"){
+                commands.emplace_back(std::in_place_type_t<SetClockLatency>{}, j);
+            }else {
                 logger.error("sdc command %s not supported yet", c);
             }
         }
@@ -307,6 +311,46 @@ SetClockUncertainty::SetClockUncertainty(const Json& json) {
     for (auto itr = json.begin(); itr != json.end(); ++itr) {
         if (auto& key = itr.key(); key == "uncertainty") {
         } else if (key == "object_list") {
+            object_list = parse_port(unquoted(itr.value()));
+        } else if (key == "command") {
+            logger.errorif(itr.value() != command, "wrong command field: %s", itr.value());
+        } else {
+            logger.error("%s: %s not supported", command, std::quoted(key));
+        }
+    }
+}
+SetClockLatency::SetClockLatency(const Json& json) {
+    for (auto itr = json.begin(); itr != json.end(); ++itr) {
+        if (auto& key = itr.key(); key == "delay") {
+            delay = std::stof(unquoted(itr.value()));
+        } else if (key == "object_list") {
+            object_list = parse_pin(unquoted(itr.value()));
+        } else if (key == "-rise") {
+            rise.emplace();
+        } else if (key == "-fall") {
+            fall.emplace();
+        } else if (key == "-max") {
+            max.emplace();
+        } else if (key == "-min") {
+            min.emplace();
+        } else if (key == "-source") {
+            source.emplace();
+        } else if (key == "-early") {
+            early.emplace();
+        } else if (key == "-late") {
+            late.emplace();
+        } else if (key == "command") {
+            logger.errorif(itr.value() != command, "wrong command field: %s", itr.value());
+        } else if (key ==  "-clock") {
+            clock = parse_port(unquoted(itr.value()));
+        } else {
+            logger.error("%s: %s not supported", command, std::quoted(key));
+        }
+    }
+}
+SetPropagatedClock::SetPropagatedClock(const Json& json) {
+    for (auto itr = json.begin(); itr != json.end(); ++itr) {
+        if (auto& key = itr.key(); key == "object_list") {
             object_list = parse_port(unquoted(itr.value()));
         } else if (key == "command") {
             logger.errorif(itr.value() != command, "wrong command field: %s", itr.value());

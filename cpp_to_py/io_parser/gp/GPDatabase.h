@@ -1,12 +1,17 @@
 #pragma once
 #include <torch/extension.h>
 #include "common/common.h"
+#include "common/db/Database.h"
 
 namespace db {
 class Database;
 class Pin;
 class PinType;
 }
+
+using std::string;
+using std::vector;
+using std::unordered_map;
 
 namespace gp {
 
@@ -60,8 +65,9 @@ public:
         pins_id.emplace_back(pin_id);
     }
     const int getPinbyPortName(std::string portName) const {
-        const int portId = portMap.find(portName)->second;
-        return portId;
+        assert(portMap.size() > 0 && "Port map is empty, no pins added yet!");
+        if(portMap.find(portName) == portMap.end())return -1;
+        else return portMap.find(portName)->second;
     }
 
     void setIsPolygonShape(bool isPolygonShape_) { isPolygonShape = isPolygonShape_; }
@@ -185,8 +191,11 @@ protected:
     std::vector<GPNet> nets;        // store all nets
     std::vector<GPRegion> regions;  // store all regions
     std::vector<std::string> node_names;
+    std::vector<string> node_type_names;
+    std::vector<index_type> node_celltype_index;
     std::vector<std::string> net_names;
     std::vector<std::string> pin_names;
+    std::unordered_map<string, int> pin_name2pin_id;
 
     std::vector<std::tuple<index_type, index_type, std::string>> node_types_indices;  // (start_idx, end_idx, type)
     std::vector<std::string> node_id2node_name;
@@ -219,15 +228,17 @@ public:
     void transferOrient();
     bool setup();
     bool reset();
-
+    void changeCellSizing(int node_id, int cell_id);
     void setup_random_place();
 
     const std::vector<GPNode>& getNodes() const { return nodes; }
-    const std::vector<std::string>& getNodeNames() const { return node_names; }
+    const std::vector<string>& getNodeNames() const { return node_names; }
+    const std::vector<string>& getNodeTypeNames() const { return node_type_names; }
     const std::vector<GPNet>& getNets() const { return nets; }
     const std::vector<std::string>& getNetNames() const { return net_names; }
     const std::vector<GPPin>& getPins() const { return pins; }
     const std::vector<std::string>& getPinNames() const { return pin_names; }
+    const std::unordered_map<string, int>& getPinName2PinId() const { return pin_name2pin_id; }
     const std::vector<std::tuple<index_type, index_type, std::string>>& getNodeTypeIndices() const {
         return node_types_indices;
     }
@@ -250,6 +261,8 @@ public:
     torch::Tensor getPinSizeTensor();
     torch::Tensor getPinId2NodeIdTensor();
     torch::Tensor getPinId2NetIdTensor();
+    torch::Tensor getCelltypeSizeTensor();
+
     std::vector<torch::Tensor> getHyperedgeInfoTensor();  // hyperedge_index, hyperedge_list, hyperedge_list_end
     std::vector<torch::Tensor> getNode2PinInfoTensor();   // node2pin_index, node2pin_list, node2pin_list_end
     std::vector<torch::Tensor> getRegionInfoTensor();     // node_id2region_id, region_boxes, region_boxes_end

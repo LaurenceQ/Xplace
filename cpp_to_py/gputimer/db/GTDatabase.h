@@ -84,7 +84,13 @@ public:
     void _read_sdc(sdc::SetLoad&);
     void _read_sdc(sdc::CreateClock&);
     void _read_sdc(sdc::SetUnits&);
+    void _read_sdc(sdc::SetClockLatency&);
+    void _read_sdc(sdc::SetPropagatedClock&);
     bool is_redundant_timing(const TimingArc* timing_arc, Split el);
+
+    // Incremental update
+    void swap_gate_type(int node_id, int index);
+    vector<index_type> get_driver_gate_sink_arc(int node_id);
 
     // Units
     float res_unit;
@@ -128,6 +134,8 @@ public:
 
     vector<int> timing_arc_from_pin_id, timing_arc_to_pin_id;
     vector<int> timing_arc_id_map;
+    vector<int> timing_arc_in_port_id;
+    vector<int> pin_id2timing_arc_list_start, pin_id2timing_arc_list_end;
     vector<int> arc_types, arc_id2test_id;
     vector<int> test_id2_arc_id;
     vector<int> net_is_clock;
@@ -150,6 +158,19 @@ public:
     vector<index_type> pin_forward_arc_list_end, pin_forward_arc_list;
     vector<index_type> pin_backward_arc_list_end, pin_backward_arc_list;
 
+    // Gate Sizing
+    vector<int> equivalent_cell_list;
+    vector<int> equivalent_cell_list_end = {0};
+    vector<int> equivalent_cell_num_pin;
+    vector<int> pin_id2equivalent_cell_id;
+    vector<int> pin_IO_direction; // 'i' for input, 'o' for output, 
+    vector<float> arc_lambda;
+    vector<float> po_lambda;
+    vector<float> cell_area;
+    vector<int> lib_cell2equivalen_cell_map;
+    vector<int> is_FF_Q;
+    void gate_sizing_init();
+    void change_cell_size(int output_pin_id, unsigned libcell);
 };
 
 class TimingTorchRawDB {
@@ -289,6 +310,8 @@ public:
     torch::Tensor timing_arc_id_map;
     torch::Tensor arc_id2test_id;
     torch::Tensor test_id2_arc_id;
+    torch::Tensor clock_net_pin; // clock net pin info for each arc
+    
 };
 
 }  // namespace gt

@@ -78,7 +78,30 @@ struct SetInputTransition {
     SetInputTransition() = default;
     SetInputTransition(const Json&);
 };
+struct SetPropagatedClock {
+    inline static constexpr auto command = "set_propagated_clock";
 
+    std::optional<Object> object_list;
+
+    SetPropagatedClock() = default;
+    SetPropagatedClock(const Json&);
+};
+struct SetClockLatency {
+    inline static constexpr auto command = "set_clock_latency";
+
+    std::optional<float> delay;
+    std::optional<Object> object_list;
+    std::optional<std::byte> rise;
+    std::optional<std::byte> fall;
+    std::optional<std::byte> max;
+    std::optional<std::byte> min;
+    std::optional<std::byte> source;
+    std::optional<std::byte> early;
+    std::optional<std::byte> late;
+    std::optional<Object> clock;
+    SetClockLatency() = default;
+    SetClockLatency(const Json&);
+};
 struct SetOutputDelay {
     inline static constexpr auto command = "set_output_delay";
 
@@ -138,7 +161,7 @@ struct SetClockUncertainty {
     SetClockUncertainty(const Json&);
 };
 
-using Command = std::variant<SetUnits, SetInputDelay, SetDrivingCell, SetInputTransition, SetOutputDelay, SetLoad, CreateClock>;
+using Command = std::variant<SetUnits, SetInputDelay, SetDrivingCell, SetInputTransition, SetOutputDelay, SetLoad, SetClockLatency, SetPropagatedClock, CreateClock>;
 
 struct SDC {
     std::vector<Command> commands;

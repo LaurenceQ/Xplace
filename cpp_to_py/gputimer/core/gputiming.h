@@ -3,7 +3,7 @@
 #include <vector>
 #include "common/lib/Lut.h"
 #include "common/lib/Timing.h"
-
+#include "common/lib/Liberty.h"
 using std::vector;
 
 namespace gt {
@@ -58,7 +58,10 @@ public:
     GPULutAllocator() = default;
     __host__ __forceinline__ void AllocateBatch(vector<TimingArc *> timings) {
         auto check_lut = [&](Lut *lut) {
-            if (!lut) return;
+            if (!lut) {
+                return;
+            }
+
             if (lut->set_) {
                 x_size += lut->indices1.size();
                 y_size += lut->indices2.size();
@@ -73,6 +76,7 @@ public:
         num_timings = 0;
         for (auto timing_ptr : timings) {
             auto &timing = *timing_ptr;
+
             check_lut(timing.cell_delay_[0]);
             check_lut(timing.cell_delay_[1]);
             check_lut(timing.transition_[0]);
@@ -232,6 +236,7 @@ public:
     }
 
     __device__ __forceinline__ float lut(int in_timing_lut, float x, float y) {
+        
         if (d_num_x[in_timing_lut] < 1 || d_num_y[in_timing_lut] < 1) {
             // return std::nullopt;
             return nanf("");
@@ -271,7 +276,6 @@ public:
 
     __device__ __forceinline__ float query(int timing_id, int irf, int orf, float slew_or_related, float load_or_constraint, int type) {  // 0:cell/1:trans/3:constraint
         if (!is_transition_defined(timing_id, irf, orf)) {
-            // return std::nullopt;
             return nanf("");
         }
 
@@ -284,7 +288,6 @@ public:
         }
 
         float val1{0.0f}, val2{0.0f};
-
         if (type == 0 || type == 1) {
             switch (d_lut_template_var[in_timing_lut * 2]) {
                 case 0:  // LutVar::TOTAL_OUTPUT_NET_CAPACITANCE

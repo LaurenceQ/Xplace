@@ -395,61 +395,130 @@ void GPUTimer::update_rc_timing_spef() {
     vector<vector<int>> net_id2node2pin_map(num_nets);
     vector<std::unordered_map<std::string, int>> node_name2node_id_map(num_nets);
 
-    printf("num_nets: %d\n", num_nets);
-    printf("num_nets in spef file: %d\n", spef.nets.size());
+    // printf("num_nets: %d\n", num_nets);
+    // printf("num_nets in spef file: %d\n", spef.nets.size());
     float spef_res_ratio = *gtdb.spef_res_unit / gtdb.res_unit;
     float spef_cap_ratio = *gtdb.spef_cap_unit / gtdb.cap_unit;
     float spef_time_ratio = *gtdb.spef_time_unit / gtdb.time_unit;
     logger.info("spef lib ratios: res %.5E cap %.5E time %.5E", spef_res_ratio, spef_cap_ratio, spef_time_ratio);
 
+    // auto add_node_cap = [&](const std::string& node_name, float cap, int net_idx) {
+    //     if (auto itr = std::find(gtdb.pin_names.begin(), gtdb.pin_names.end(), node_name); itr != gtdb.pin_names.end()) {
+    //         int in_net_idx = flat_net2pin_map[std::distance(gtdb.pin_names.begin(), itr)] - flat_net2pin_start_map[net_idx];
+    //         net_id2node_cap[net_idx][in_net_idx] = cap * spef_cap_ratio;
+    //         node_name2node_id_map[net_idx][node_name] = in_net_idx;
+    //     } else {
+    //         net_id2node_cap[net_idx].push_back(cap * spef_cap_ratio);
+    //         node_name2node_id_map[net_idx][node_name] = net_id2node_cap[net_idx].size() - 1;
+    //         net_id2node2pin_map[net_idx].push_back(-1);
+    //     }
+    // };
+    // for (const auto& n : spef.nets) {
+    //     string net_name = n.name;
+    //     net_name = validate_token(net_name);
+    //     if (auto itr = std::find(gtdb.net_names.begin(), gtdb.net_names.end(), net_name); itr == gtdb.net_names.end()) {
+    //         continue;
+    //     } else {
+    //         int net_idx = std::distance(gtdb.net_names.begin(), itr);
+
+    //         // Put pin nodes in the front
+    //         for (int j = 0; j < flat_net2pin_start_map[net_idx + 1] - flat_net2pin_start_map[net_idx]; ++j) {
+    //             net_id2node2pin_map[net_idx].push_back(flat_net2pin_map[j + flat_net2pin_start_map[net_idx]]); // Pins in the front
+    //         }
+    //         net_id2node_cap[net_idx].resize(net_id2node2pin_map[net_idx].size(), 0);
+
+    //         // Add ground-node capacitance
+    //         for (const auto& [node1, node2, cap] : n.caps) {
+    //             if (node2.empty()) {
+    //                 add_node_cap(node1, cap, net_idx);
+    //             }
+    //         }
+
+    //         // Add node-node resistance
+    //         for (const auto& [node1, node2, value] : n.ress) {
+    //             if (node_name2node_id_map[net_idx].find(node1) == node_name2node_id_map[net_idx].end()) {
+    //                 add_node_cap(node1, 0, net_idx);
+    //             }
+    //             if (node_name2node_id_map[net_idx].find(node2) == node_name2node_id_map[net_idx].end()) {
+    //                 add_node_cap(node2, 0, net_idx);
+    //             }
+    //             int from = node_name2node_id_map[net_idx][node1];
+    //             int to = node_name2node_id_map[net_idx][node2];
+    //             net_id2edge_from[net_idx].push_back(from);
+    //             net_id2edge_to[net_idx].push_back(to);
+    //             net_id2edge_res[net_idx].push_back(value * spef_res_ratio);
+    //         }
+    //     }
+    // }
+    // 预构建网络名称到索引的映射
+    std::unordered_map<std::string, int> net_name_to_index;
+    for (int i = 0; i < gtdb.net_names.size(); ++i) {
+        net_name_to_index[gtdb.net_names[i]] = i;
+    }
+
+    // 预构建引脚名称到局部索引的映射（每个网络独立）
+    std::vector<std::unordered_map<std::string, int>> net_pin_index_map(num_nets);
+    for (int net_idx = 0; net_idx < num_nets; ++net_idx) {
+        int start = flat_net2pin_start_map[net_idx];
+        int end = flat_net2pin_start_map[net_idx + 1];
+        for (int j = start; j < end; ++j) {
+            int pin_id = flat_net2pin_map[j];
+            const std::string& pin_name = gtdb.pin_names[pin_id];
+            net_pin_index_map[net_idx][pin_name] = j - start; // 局部索引
+        }
+    }
+
     auto add_node_cap = [&](const std::string& node_name, float cap, int net_idx) {
-        if (auto itr = std::find(gtdb.pin_names.begin(), gtdb.pin_names.end(), node_name); itr != gtdb.pin_names.end()) {
-            int in_net_idx = flat_net2pin_map[std::distance(gtdb.pin_names.begin(), itr)] - flat_net2pin_start_map[net_idx];
+        auto& pin_map = net_pin_index_map[net_idx];
+        if (auto itr = pin_map.find(node_name); itr != pin_map.end()) {
+            int in_net_idx = itr->second;
             net_id2node_cap[net_idx][in_net_idx] = cap * spef_cap_ratio;
             node_name2node_id_map[net_idx][node_name] = in_net_idx;
         } else {
             net_id2node_cap[net_idx].push_back(cap * spef_cap_ratio);
-            node_name2node_id_map[net_idx][node_name] = net_id2node_cap[net_idx].size() - 1;
+            int new_index = net_id2node_cap[net_idx].size() - 1;
+            node_name2node_id_map[net_idx][node_name] = new_index;
             net_id2node2pin_map[net_idx].push_back(-1);
         }
     };
+
     for (const auto& n : spef.nets) {
         string net_name = n.name;
         net_name = validate_token(net_name);
-        if (auto itr = std::find(gtdb.net_names.begin(), gtdb.net_names.end(), net_name); itr == gtdb.net_names.end()) {
-            continue;
-        } else {
-            int net_idx = std::distance(gtdb.net_names.begin(), itr);
+        auto net_itr = net_name_to_index.find(net_name);
+        if (net_itr == net_name_to_index.end()) continue;
 
-            // Put pin nodes in the front
-            for (int j = 0; j < flat_net2pin_start_map[net_idx + 1] - flat_net2pin_start_map[net_idx]; ++j) {
-                net_id2node2pin_map[net_idx].push_back(flat_net2pin_map[j + flat_net2pin_start_map[net_idx]]); // Pins in the front
-            }
-            net_id2node_cap[net_idx].resize(net_id2node2pin_map[net_idx].size(), 0);
+        int net_idx = net_itr->second;
+        int num_pins = flat_net2pin_start_map[net_idx + 1] - flat_net2pin_start_map[net_idx];
+        
+        // 预分配空间
+        net_id2node2pin_map[net_idx].reserve(num_pins);
+        net_id2node_cap[net_idx].resize(num_pins, 0);
 
-            // Add ground-node capacitance
-            for (const auto& [node1, node2, cap] : n.caps) {
-                if (node2.empty()) {
-                    add_node_cap(node1, cap, net_idx);
-                }
-            }
+        // 填充引脚信息
+        for (int j = 0; j < num_pins; ++j) {
+            net_id2node2pin_map[net_idx].emplace_back(
+                flat_net2pin_map[flat_net2pin_start_map[net_idx] + j]
+            );
+        }
 
-            // Add node-node resistance
-            for (const auto& [node1, node2, value] : n.ress) {
-                if (node_name2node_id_map[net_idx].find(node1) == node_name2node_id_map[net_idx].end()) {
-                    add_node_cap(node1, 0, net_idx);
-                }
-                if (node_name2node_id_map[net_idx].find(node2) == node_name2node_id_map[net_idx].end()) {
-                    add_node_cap(node2, 0, net_idx);
-                }
-                int from = node_name2node_id_map[net_idx][node1];
-                int to = node_name2node_id_map[net_idx][node2];
-                net_id2edge_from[net_idx].push_back(from);
-                net_id2edge_to[net_idx].push_back(to);
-                net_id2edge_res[net_idx].push_back(value * spef_res_ratio);
-            }
+        // 处理电容和电阻
+        for (const auto& [node1, node2, cap] : n.caps) {
+            if (node2.empty()) add_node_cap(node1, cap, net_idx);
+        }
+
+        for (const auto& [node1, node2, res] : n.ress) {
+            auto& node_map = node_name2node_id_map[net_idx];
+            if (!node_map.count(node1)) add_node_cap(node1, 0, net_idx);
+            if (!node_map.count(node2)) add_node_cap(node2, 0, net_idx);
+            int from = node_map[node1];
+            int to = node_map[node2];
+            net_id2edge_from[net_idx].push_back(from);
+            net_id2edge_to[net_idx].push_back(to);
+            net_id2edge_res[net_idx].push_back(res * spef_res_ratio);
         }
     }
+
     for (int i = 0; i < num_nets; ++i) {
         if (net_id2node2pin_map[i].empty()) {
             logger.warning("net %s has no spef rc, assign 0", gtdb.net_names[i].c_str());
@@ -506,6 +575,7 @@ void GPUTimer::update_rc_timing_spef() {
     torch::Tensor edge_order = torch::zeros({num_edges}, torch::kInt32).contiguous().to(device);
     torch::Tensor parent_node = -torch::ones({num_nodes}, torch::dtype(torch::kInt32).device(device));
     torch::Tensor res_parent = torch::zeros({num_nodes * NUM_ATTR}, torch::dtype(torch::kFloat32).device(device));
+    //printf("num nodes:%d num edges:%d")
 
     flatten_rc_tree(edge_from,
                     edge_to,
@@ -549,6 +619,22 @@ void GPUTimer::update_rc_timing_spef() {
                       num_pins,
                       num_nodes,
                       num_edges);
+
+    // torch::Tensor parent_node_cpu_tensor = parent_node.cpu().contiguous();
+    // int* parent_node_cpu = parent_node_cpu_tensor.data_ptr<int>();
+    // for(int net_id = 0; net_id < num_nets; net_id++){
+    //     auto name2node_id = node_name2node_id_map[net_id];
+    //     int root_cnt = 0;
+    //     for(auto itr : name2node_id){
+    //         if(parent_node_cpu[itr.second] == -1 && itr.second != 0) {
+    //             root_cnt++;
+    //         }
+    //     }
+    //     if(root_cnt >= 1){
+    //         std::cout<<"Warning: net " << gtdb.net_names[net_id] << " has multiple root nodes, please check the SPEF file." << std::endl;
+    //     }
+    // }
+   
 }
 
 }  // namespace gt

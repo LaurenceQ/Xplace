@@ -142,6 +142,7 @@ public:
     void place(int x, int y);
     void place(int x, int y, int orient);
     void unplace();
+    void set_ctype(CellType* new_cell_type){_type = new_cell_type;}
     unsigned numPins() const { return _pins.size(); }
 
     friend std::ostream& operator<<(std::ostream& os, const Cell& c) {

@@ -26,6 +26,7 @@ target_compile_options(gt PRIVATE -fPIC)
 target_compile_options(gt PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>")
 
 pybind11_add_module(gputimer MODULE PyBindCppMain.cpp)
+#add_library(gputimer MODULE PyBindCppMain.cpp)
 
 target_include_directories(gputimer PRIVATE ${TORCH_INCLUDE_DIRS} ${PROJECT_SOURCE_DIR}/cpp_to_py ${FLUTE_MP_INCLUDE_DIR})
 target_link_libraries(gputimer PRIVATE torch ${TORCH_PYTHON_LIBRARY} xplace_common io_parser gt)

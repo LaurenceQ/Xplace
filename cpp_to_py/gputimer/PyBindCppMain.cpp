@@ -29,7 +29,7 @@ std::shared_ptr<gt::GPUTimer> create_gputimer(const py::dict& kwargs,
 
     gtdb->ExtractTimingGraph();
     gtdb->readSdc(*sdc);
-
+    
     std::shared_ptr<gt::GPUTimer> gputimer = std::make_shared<gt::GPUTimer>(gtdb, timing_raw_db);
 
     readLUT("thirdparty/flute_mp/lut.ICCAD2015/POWV9.dat", "thirdparty/flute_mp/lut.ICCAD2015/POST9.dat");
@@ -64,6 +64,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("report_K_path", &gt::GPUTimer::report_K_path, py::return_value_policy::copy)
         .def("report_criticality", &gt::GPUTimer::report_criticality, py::return_value_policy::copy)
         .def("report_criticality_threshold", &gt::GPUTimer::report_criticality_threshold, py::return_value_policy::copy)
+        // Incr
+        .def("swap_gate_type", &gt::GPUTimer::swap_gate_type)
+        .def("get_driver_gate_sink_arc", &gt::GPUTimer::get_driver_gate_sink_arc, py::return_value_policy::copy)
+        // Sizing
+        .def("evaluate_sizing", &gt::GPUTimer::evaluate_sizing)
+        .def("change_db_sizing", &gt::GPUTimer::change_db_sizing)
+        .def("init_sizing", &gt::GPUTimer::init_sizing)
         ;
     pybind11::class_<gt::TimingTorchRawDB, std::shared_ptr<gt::TimingTorchRawDB>>(m, "TimingTorchRawDB")
         .def(pybind11::init<torch::Tensor,
