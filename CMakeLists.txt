@@ -5,11 +5,11 @@ if (NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
 endif()
 
 project(xplace LANGUAGES C CXX CUDA)
-# set(CMAKE_BUILD_TYPE "Debug") 
-# set(CMAKE_CXX_FLAGS_DEBUG "$ENV{CXXFLAGS} -O0 -Wall -g -ggdb") 
-# set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -O0 -Wall -g -ggdb")
-# set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -g -G -O0 -Xcompiler -rdynamic 
-#       -lineinfo --generate-line-info --source-in-ptx -Xcompiler -Wall -Xcompiler -Wextra")
+set(CMAKE_BUILD_TYPE "Debug") 
+set(CMAKE_CXX_FLAGS_DEBUG "$ENV{CXXFLAGS} -O0 -Wall -g -ggdb") 
+set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -O0 -Wall -g -ggdb")
+set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -g -G -O0 -Xcompiler -rdynamic 
+      -lineinfo --generate-line-info --source-in-ptx -Xcompiler -Wall -Xcompiler -Wextra")
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()

@@ -4,7 +4,6 @@
 #include "common/common.h"
 #include "common/lib/spef/parser-spef.hpp"
 #include "gputimer/base.h"
-
 using std::tuple;
 using std::vector;
 using std::shared_ptr;
@@ -15,7 +14,7 @@ class TimingArc;
 class TimingTorchRawDB;
 class GTDatabase;
 class GPULutAllocator;
-
+class dmp_model;
 class GPUTimer {
 public:
     GPULutAllocator *allocator;
@@ -158,6 +157,11 @@ public:
     void evaluate_sizing(int sizing_max_level);
     void change_db_sizing();
     bool* clock_net_pin;
+
+    void compute_pi_model();
+    void initialize_dmp_model();
+    dmp_model* dmp_db = nullptr;
+    dmp_model* h_dmp_db = nullptr;
 };
 
 }  // namespace gt

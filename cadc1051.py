@@ -133,7 +133,8 @@ def main():
     # # timing analysis for extracted RC network
 
     
-    gputimer.update_timing_eval(data.node_pos)
+    gputimer.update_timing(data.node_pos)
+    gputimer.compute_pi_model()
     wns_early, tns_early, wns_late, tns_late = gputimer.report_timing_slack()
     logger.info("FLUTE evaluation: wns_early: %.3f, tns_early: %.3f, wns_late: %.3f, tns_late: %.3f" % ( wns_early, tns_early, wns_late, tns_late))
 

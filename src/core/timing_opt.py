@@ -90,7 +90,11 @@ class GPUTimer():
         self.timer.update_states()
         self.timer.update_rc(node_lpos, False, False, False)
         self.timer.update_timing()
-    
+        
+    def compute_pi_model(self):
+        self.timer.initialize_dmp_model()
+        self.timer.compute_pi_model()
+
     def update_timing_eval(self, node_pos):
         node_lpos = (node_pos.detach() - self.node_size / 2).to(self.data.device)
         self.conn_node_lpos = torch.cat([

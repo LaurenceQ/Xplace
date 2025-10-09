@@ -90,6 +90,7 @@ __global__ void RCTreeNet(float *x,
                 pinImpulse[root * NUM_ATTR + j] = 0;
             }
         }
+        // printf("net_id:%d root:%d rootLoad:%.4f\n", idx, root, pinLoad[root * NUM_ATTR + 0]);
     }
 }
 

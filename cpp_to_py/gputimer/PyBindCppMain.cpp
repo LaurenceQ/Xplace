@@ -71,6 +71,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("evaluate_sizing", &gt::GPUTimer::evaluate_sizing)
         .def("change_db_sizing", &gt::GPUTimer::change_db_sizing)
         .def("init_sizing", &gt::GPUTimer::init_sizing)
+        .def("compute_pi_model", &gt::GPUTimer::compute_pi_model)
+        .def("initialize_dmp_model", &gt::GPUTimer::initialize_dmp_model)
         ;
     pybind11::class_<gt::TimingTorchRawDB, std::shared_ptr<gt::TimingTorchRawDB>>(m, "TimingTorchRawDB")
         .def(pybind11::init<torch::Tensor,

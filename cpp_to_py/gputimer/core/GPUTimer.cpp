@@ -6,7 +6,7 @@
 #include "io_parser/gp/GPDatabase.h"
 #include "gputimer/db/GTDatabase.h"
 #include "GPUTimer.h"
-
+#include "DmpCeff.h"
 namespace gt {
 
 GPUTimer::GPUTimer(std::shared_ptr<GTDatabase> gtdb_, shared_ptr<TimingTorchRawDB> timing_raw_db_)
@@ -134,7 +134,6 @@ void GPUTimer::swap_gate_type(int node_id, int index) {
 vector<index_type> GPUTimer::get_driver_gate_sink_arc(int node_id){
     return gtdb.get_driver_gate_sink_arc(node_id);
 }
-
 
 
 }  // namespace gt
