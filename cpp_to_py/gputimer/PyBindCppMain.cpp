@@ -6,7 +6,7 @@
 #include "gputimer/core/GPUTimer.h"
 
 #include <flute.hpp>
-using namespace Flute;
+using namespace flt;
 
 namespace Xplace {
 
@@ -31,8 +31,8 @@ std::shared_ptr<gt::GPUTimer> create_gputimer(const py::dict& kwargs,
     gtdb->readSdc(*sdc);
     
     std::shared_ptr<gt::GPUTimer> gputimer = std::make_shared<gt::GPUTimer>(gtdb, timing_raw_db);
-
-    readLUT("thirdparty/flute_mp/lut.ICCAD2015/POWV9.dat", "thirdparty/flute_mp/lut.ICCAD2015/POST9.dat");
+    // readLUT("thirdparty/flute_mp/etc/POWV9.dat", "thirdparty/flute_mp/etc/POST9.dat");
+    // readLUT("thirdparty/flute_mp/lut.ICCAD2015/POWV9.dat", "thirdparty/flute_mp/lut.ICCAD2015/POST9.dat");
     
     return gputimer;
 }
@@ -66,13 +66,19 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("report_criticality_threshold", &gt::GPUTimer::report_criticality_threshold, py::return_value_policy::copy)
         // Incr
         .def("swap_gate_type", &gt::GPUTimer::swap_gate_type)
+        .def("set_dmp_debug_flag", &gt::GPUTimer::set_dmp_debug_flag)
         .def("get_driver_gate_sink_arc", &gt::GPUTimer::get_driver_gate_sink_arc, py::return_value_policy::copy)
         // Sizing
         .def("evaluate_sizing", &gt::GPUTimer::evaluate_sizing)
         .def("change_db_sizing", &gt::GPUTimer::change_db_sizing)
         .def("init_sizing", &gt::GPUTimer::init_sizing)
-        .def("compute_pi_model", &gt::GPUTimer::compute_pi_model)
+        // .def("compute_pi_model", &gt::GPUTimer::compute_pi_model)
+        .def("update_rc_flute_dmp", &gt::GPUTimer::update_rc_timing_flute_dmp)
         .def("initialize_dmp_model", &gt::GPUTimer::initialize_dmp_model)
+        .def("update_timing_dmp", &gt::GPUTimer::update_timing_dmp)
+        .def("print_pin_id_name", &gt::GPUTimer::print_pin_id_name)
+        .def("get_units", &gt::GPUTimer::get_units)
+        .def("print_pinLoad", &gt::GPUTimer::print_pinLoad)
         ;
     pybind11::class_<gt::TimingTorchRawDB, std::shared_ptr<gt::TimingTorchRawDB>>(m, "TimingTorchRawDB")
         .def(pybind11::init<torch::Tensor,

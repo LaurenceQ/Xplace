@@ -146,15 +146,18 @@ __global__ void update_endpoints_kernel1(float *pinAT, float *pinRAT, index_type
 }
 
 void GPUTimer::update_endpoints() {
-    torch::Tensor endpoints0 = torch::zeros({num_tests, NUM_ATTR}, torch::dtype(torch::kFloat32).device(torch::kCUDA)).contiguous();
-    torch::Tensor endpoints1 = torch::zeros({num_POs, NUM_ATTR}, torch::dtype(torch::kFloat32).device(torch::kCUDA)).contiguous();
-    torch::fill_(endpoints0, nanf(""));
-    torch::fill_(endpoints1, nanf(""));
+    // torch::Tensor endpoints0 = torch::zeros({num_tests, NUM_ATTR}, torch::dtype(torch::kFloat32).device(torch::kCUDA)).contiguous();
+    // torch::Tensor endpoints1 = torch::zeros({num_POs, NUM_ATTR}, torch::dtype(torch::kFloat32).device(torch::kCUDA)).contiguous();
+    // torch::fill_(endpoints0, nanf(""));
+    // torch::fill_(endpoints1, nanf(""));
 
-    update_endpoints_kernel0<<<BLOCK_NUMBER(num_tests * NUM_ATTR), BLOCK_SIZE>>>(pinAT, testRAT, test_id2_arc_id, timing_arc_from_pin_id, timing_arc_to_pin_id, endpoints0.data_ptr<float>(), num_tests);
-    update_endpoints_kernel1<<<BLOCK_NUMBER(num_POs * NUM_ATTR), BLOCK_SIZE>>>(pinAT, pinRAT, primary_outputs, endpoints1.data_ptr<float>(), num_POs);
-
-    endpoint_slacks = torch::cat({endpoints0, endpoints1}, 0).contiguous();
+    // update_endpoints_kernel0<<<BLOCK_NUMBER(num_tests * NUM_ATTR), BLOCK_SIZE>>>(pinAT, testRAT, test_id2_arc_id, timing_arc_from_pin_id, timing_arc_to_pin_id, endpoints0.data_ptr<float>(), num_tests);
+    // update_endpoints_kernel1<<<BLOCK_NUMBER(num_POs * NUM_ATTR), BLOCK_SIZE>>>(pinAT, pinRAT, primary_outputs, endpoints1.data_ptr<float>(), num_POs);
+    // endpoint_slacks = torch::cat({endpoints0, endpoints1}, 0).contiguous();
+    report_pin_slack();
+    auto [endpoints_id, tmp1] = torch::_unique(timing_raw_db.endpoints_id);
+    endpoint_slacks = torch::nan_to_num(pin_slacks.index_select(0, endpoints_id), FLT_MAX);
+    
 }
 void GPUTimer::change_db_sizing(){
   vector<int> cell_type(sizing_level_list_cpu.size());

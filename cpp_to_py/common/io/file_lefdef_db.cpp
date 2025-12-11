@@ -1127,7 +1127,7 @@ int readLefPin(lefrCallbackType_e c, lefiPin* pin, lefiUserData ud) {
                 break;
             case lefiGeomRectE:
                 rect = geom->getRect(i);
-                pintype->addShape(*layer,
+                pintype->addShape(*layer, // dqk: adding rectangle into pintype
                                   lround(rect->xl * convertFactor),
                                   lround(rect->yl * convertFactor),
                                   lround(rect->xh * convertFactor),

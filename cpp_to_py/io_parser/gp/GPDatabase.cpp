@@ -133,8 +133,10 @@ void GPDatabase::addPin(db::Pin* dbpin, const db::PinType* pintype, GPNode& node
     isIOPin ? pin.setName(macroPinName) : pin.setName(instName + ":" + macroPinName);
     pin.setMacroName(macroPinName);
 
-    pin.setRelLx(pintype->boundLX);
-    pin.setRelLy(pintype->boundLY);
+    // pin.setRelLx(pintype->boundLX); //dqk: set relative pos to lower left corner of instance
+    // pin.setRelLy(pintype->boundLY);
+    pin.setRelLx(pintype -> getAvgX());
+    pin.setRelLy(pintype -> getAvgY());
     pin.setWidth(pintype->getW());
     pin.setHeight(pintype->getH());
     pin.setDirection(pintype->direction());
@@ -410,7 +412,7 @@ orient_type rotate_180_orient(orient_type orient) {
 
 orient_type vflip_orient(orient_type orient) { return hflip_orient(rotate_180_orient(orient)); }
 
-void GPDatabase::transferOrient() {
+void GPDatabase::transferOrient() { // dqk: setRelLx/Ly 
     // Transfer all gpdb nodes to "N" direction for global placement
     // NOTE: we don't change rawdb
     logger.info("Updating gpdb node orient...");

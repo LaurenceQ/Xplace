@@ -16,12 +16,12 @@ def load_design(args,logger):
         "benchmark": "iccad2025",
         "design_name": designName,
         "lefs": [platformPath + "/ASAP7/techlef/asap7_tech_1x_201209.lef",
-                 platformPath + "/ASAP7/LEF/sram_asap7_64x256_1rw.lef",
+                #  platformPath + "/ASAP7/LEF/sram_asap7_64x256_1rw.lef",
                  platformPath + "/ASAP7/LEF/asap7sc7p5t_28_L_1x_220121a.lef",
-                 platformPath + "/ASAP7/LEF/sram_asap7_16x256_1rw.lef",
-                 platformPath + "/ASAP7/LEF/sram_asap7_64x64_1rw.lef",
+                #  platformPath + "/ASAP7/LEF/sram_asap7_16x2/56_1rw.lef",
+                #  platformPath + "/ASAP7/LEF/sram_asap7_64x64_1rw.lef",
                  platformPath + "/ASAP7/LEF/asap7sc7p5t_28_R_1x_220121a.lef",
-                 platformPath + "/ASAP7/LEF/sram_asap7_32x256_1rw.lef",
+                #  platformPath + "/ASAP7/LEF/sram_asap7_32x256_1rw.lef",
                  platformPath + "/ASAP7/LEF/asap7sc7p5t_28_SL_1x_220121a.lef",
                  platformPath + "/ASAP7/LEF/asap7sc7p5t_28_SRAM_1x_220121a.lef"
         ],
@@ -45,11 +45,14 @@ def load_design(args,logger):
                  platformPath + "/ASAP7/LIB/asap7sc7p5t_SIMPLE_RVT_TT_nldm_211120.lib",
                  platformPath + "/ASAP7/LIB/asap7sc7p5t_SIMPLE_SLVT_TT_nldm_211120.lib",
                  platformPath + "/ASAP7/LIB/asap7sc7p5t_SIMPLE_SRAM_TT_nldm_211120.lib",
-                 platformPath + "/ASAP7/LIB/sram_asap7_16x256_1rw.lib",
-                 platformPath + "/ASAP7/LIB/sram_asap7_32x256_1rw.lib",
-                 platformPath + "/ASAP7/LIB/sram_asap7_64x256_1rw.lib",
+                #  platformPath + "/ASAP7/LIB/sram_asap7_16x256_1rw.lib",
+                #  platformPath + "/ASAP7/LIB/sram_asap7_32x256_1rw.lib",
+                #  platformPath + "/ASAP7/LIB/sram_asap7_64x256_1rw.lib",
         ],
-        "def": designPath + "/" + designName + "/" + designName + ".def"
+        "def": designPath + "/" + designName + "/" + designName + ".def",
+        "sdc": designPath + "/" + designName + "/" + designName + ".sdc",
+        "spef": designPath + "/" + designName + "/" + designName + ".spef",
+    
         # "def": "output/" + designName + ".def"
         
     }
@@ -99,4 +102,4 @@ def load_design(args,logger):
 
     data, rawdb, gpdb = load_dataset(args, logger, params)
     logger.info("Design loaded successfully.")
-    return data, rawdb, gpdb
+    return data, rawdb, gpdb, params

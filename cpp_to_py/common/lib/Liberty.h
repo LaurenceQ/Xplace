@@ -152,7 +152,7 @@ public:
     LibertyCell *cell_;
     CellPortDirection direction_;
     optional<float> port_capacitance_[3];
-
+    optional<float> port_capacitances_[2][2];
     bool is_clock_ = false;
     bool is_bundle_ = false;
     vector<LibertyPort *> member_ports_;

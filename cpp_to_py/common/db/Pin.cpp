@@ -123,6 +123,10 @@ void PinType::addShape(const Layer& layer, const int lx, const int ly, const int
     boundLY = std::min(boundLY, ly);
     boundHX = std::max(boundHX, hx);
     boundHY = std::max(boundHY, hy);
+    sumLX += lx;
+    sumLY += ly;
+    sumHX += hx;
+    sumHY += hy;
     shapes.emplace_back(layer, lx, ly, hx, hy);
 }
 

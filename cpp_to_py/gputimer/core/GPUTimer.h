@@ -15,6 +15,7 @@ class TimingTorchRawDB;
 class GTDatabase;
 class GPULutAllocator;
 class dmp_model;
+// class dmp_rc;
 class GPUTimer {
 public:
     GPULutAllocator *allocator;
@@ -160,8 +161,33 @@ public:
 
     void compute_pi_model();
     void initialize_dmp_model();
+    void initialize_dmp_rc(
+                  std::vector<int> host_edge_from,
+                  std::vector<int> host_edge_to,
+                  std::vector<int> host_flat_net2node_start_map,
+                  std::vector<int> host_flat_net2edge_start_map,
+                  std::vector<int> host_node2pin_map,
+                  std::vector<float> host_edge_wl,
+                  int num_nets,
+                  int num_edges,
+                  int num_nodes,
+                  float unit_to_micron,
+                  float rf,
+                  float cf);
+    
+    void update_timing_dmp();
+    void print_pin_id_name();
+    void get_units();
+    void update_rc_timing_flute_dmp(torch::Tensor node_lpos, bool record = false);
+    void print_pinLoad();
     dmp_model* dmp_db = nullptr;
     dmp_model* h_dmp_db = nullptr;
+    bool dmp_debug_on = false;
+    void set_dmp_debug_flag(bool flag){dmp_debug_on = flag;}
+    // dmp_rc *dmp_rc_ = nullptr;
+    // dmp_rc *h_dmp_rc_ = nullptr;
 };
+
+
 
 }  // namespace gt

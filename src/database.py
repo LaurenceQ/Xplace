@@ -861,6 +861,17 @@ class PlaceData(object):
         self.init_fence_region()
         self.logging_statistics()
         return self
+    
+    def timer_preprocess(self):
+        start_idx = self.hyperedge_list_end.roll(1)
+        start_idx[0] = 0
+        ignore_net_degree = 1e9
+        self.net_to_num_pins = self.hyperedge_list_end - start_idx
+        self.net_mask = torch.logical_and(
+            self.net_to_num_pins <= ignore_net_degree, self.net_to_num_pins >= 2
+        )  # 0: ignore, 1: consider in wirelength calculation
+        self.__site_width__ = 1.0
+        return self
 
     def init_filler(self):
         self.compute_filler(self.__args__, self.__logger__)

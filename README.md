@@ -72,6 +72,7 @@ For example, RTX 3090's compute capability is 8.6. You would specify: `-DCMAKE_C
 - [PyTorch](https://pytorch.org/) >= 1.12.0
 - [Cairo](https://www.cairographics.org/)
 - [Innovus®](https://www.cadence.com/content/cadence-www/global/en_US/home/tools/digital-design-and-signoff/soc-implementation-and-floorplanning/innovus-implementation-system.html) (version 20.14, optional, for detailed routing and design rule checking)
+- [Tcl] 
 
 ## 2. How to Run
 ### 2.1. Data Preparation 

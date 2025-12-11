@@ -104,13 +104,14 @@ float GPUTimer::report_tns_elw(int el) {
 }
 
 tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> GPUTimer::report_wns_and_tns() {
+    // auto [endpoints_id, tmp1] = torch::_unique(timing_raw_db.endpoints_id);
+
     auto ep_slacks = torch::nan_to_num(endpoint_slacks, FLT_MAX);
     auto [slack_e, order_e] = torch::min(ep_slacks.index({"...", torch::indexing::Slice(0, 2)}), 1);
     slack_e.clamp_max_(0);
 
     auto [slack_l, order_l] = torch::min(ep_slacks.index({"...", torch::indexing::Slice(2, 4)}), 1);
     slack_l.clamp_max_(0);
-
     return {torch::min(ep_slacks.index({"...", torch::indexing::Slice(0, 2)})),
             torch::sum(slack_e, 0),
             torch::min(ep_slacks.index({"...", torch::indexing::Slice(2, 4)})),
@@ -134,6 +135,10 @@ void GPUTimer::swap_gate_type(int node_id, int index) {
 vector<index_type> GPUTimer::get_driver_gate_sink_arc(int node_id){
     return gtdb.get_driver_gate_sink_arc(node_id);
 }
-
+void GPUTimer::print_pin_id_name(){
+    for(int i = 0; i < num_pins; i++){
+        std::cout << "pin id: " << i << " name: " << gtdb.pin_names[i] << std::endl;
+    }
+}
 
 }  // namespace gt

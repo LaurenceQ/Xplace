@@ -95,7 +95,7 @@ public:
     double maxDensity = 0;
     double maxDisp = 0;
 
-    int LefConvertFactor;
+    int LefConvertFactor = 1;
     double DBU_Micron;
     double version;
     string designName;

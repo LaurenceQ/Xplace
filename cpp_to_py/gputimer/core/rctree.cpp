@@ -4,7 +4,7 @@
 #include "common/db/Database.h"
 #include "gputimer/db/GTDatabase.h"
 #include <flute.hpp>
-using namespace Flute;
+using namespace flt;
 
 namespace gt {
 
@@ -117,27 +117,29 @@ tuple<vector<int>, vector<int>, vector<float>, vector<int>, vector<int>, vector<
     vector<int> node2pin_map;
     int node_count = 0;
     int edge_count = 0;
-    flat_net2node_start_map.push_back(0);
-    flat_net2edge_start_map.push_back(0);
+    flat_net2node_start_map.emplace_back(0);
+    flat_net2edge_start_map.emplace_back(0);
 
     vector<vector<int>> net_id2edge_from(num_nets);
     vector<vector<int>> net_id2edge_to(num_nets);
     vector<vector<float>> net_id2edge_wl(num_nets);
     vector<vector<int>> net_id2node2pin_map(num_nets);
-
+    Flute Fobj;     
+    Fobj.readLUT();                                                                                                       
     omp_lock_t lock;
     omp_init_lock(&lock);
-#pragma omp parallel for
+// #pragma omp parallel for
     for (int i = 0; i < num_nets; ++i) {
         const int degree = flat_net2pin_start_map[i + 1] - flat_net2pin_start_map[i];
         const int root = flat_net2pin_map[flat_net2pin_start_map[i]];
         std::map<Point2i, std::set<int>> pos2pins_map;
         std::vector<int> vx, vy;
+        
         vx.reserve(degree);
         vy.reserve(degree);
 
         std::map<int, int> global2inner_map;
-
+        // printf("net:%d\n", i);
         for (int j = 0; j < degree; ++j) {
             int pin = flat_net2pin_map[j + flat_net2pin_start_map[i]];
             int node = pin2node_map[pin];
@@ -145,6 +147,7 @@ tuple<vector<int>, vector<int>, vector<float>, vector<int>, vector<int>, vector<
             // Find the correct pin locations given cell locations.
             auto x_ = static_cast<int>((x[node] + offset_x) * scale);
             auto y_ = static_cast<int>((y[node] + offset_y) * scale);
+            // printf("pin:%d node:%d loc:(%.4f, %.4f) offset:(%.4f, %.4f) final:(%d, %d)\n", pin, node, x[node], y[node], offset_x, offset_y, x_, y_);
             global2inner_map[pin] = j;
 
             if (pos2pins_map.find(Point2i(x_, y_)) != pos2pins_map.end())
@@ -159,14 +162,14 @@ tuple<vector<int>, vector<int>, vector<float>, vector<int>, vector<int>, vector<
         int num_pins = degree;
         std::set<Point2i> multipin_pos;
         std::map<Point2i, Point2i> pos2neighbor_map;
-
+        
         if (valid_size > 1) {
-            Tree flutetree = flute(valid_size, vx.data(), vy.data(), 8);
-
+            Tree flutetree = Fobj.flute(vx, vy, 8);
+            // if(i == 0)printf("flutetree branch count:%d\n", flutetree.branchCount());
             for (int bid = 0; bid < 2 * valid_size - 2; ++bid) {
                 Branch& branch1 = flutetree.branch[bid];
                 Branch& branch2 = flutetree.branch[branch1.n];
-
+                // if(i == 0)printf("flutetree branch: %d %d -> %d %d\n", branch1.x, branch1.y, branch2.x, branch2.y);
                 Point2i p1(branch1.x, branch1.y), p2(branch2.x, branch2.y);
 
                 if (p1 == p2) continue;
@@ -189,7 +192,7 @@ tuple<vector<int>, vector<int>, vector<float>, vector<int>, vector<int>, vector<
                     if (id2.size() > 1) multipin_pos.insert(p2);
                 }
             }
-            free(flutetree.branch);
+            vector<Branch>().swap(flutetree.branch);
         } else if (valid_size == 1 && degree > 1) {
             multipin_pos.emplace(vx[0], vy[0]);
         }
@@ -211,26 +214,26 @@ tuple<vector<int>, vector<int>, vector<float>, vector<int>, vector<int>, vector<
 
         for (int j = 0; j < num_pins; ++j) {
             if (j < degree)
-                net_id2node2pin_map[i].push_back(flat_net2pin_map[j + flat_net2pin_start_map[i]]);
+                net_id2node2pin_map[i].emplace_back(flat_net2pin_map[j + flat_net2pin_start_map[i]]);
             else
-                net_id2node2pin_map[i].push_back(-1);
+                net_id2node2pin_map[i].emplace_back(-1);
         }
     }
     omp_destroy_lock(&lock);
 
     for (int i = 0; i < num_nets; ++i) {
         for (int j = 0; j < net_id2edge_from[i].size(); ++j) {
-            edge_from.push_back(node_count + net_id2edge_from[i][j]);
-            edge_to.push_back(node_count + net_id2edge_to[i][j]);
-            edge_wl.push_back(net_id2edge_wl[i][j]);
+            edge_from.emplace_back(node_count + net_id2edge_from[i][j]);
+            edge_to.emplace_back(node_count + net_id2edge_to[i][j]);
+            edge_wl.emplace_back(net_id2edge_wl[i][j]);
             edge_count++;
         }
         node_count += net_id2node2pin_map[i].size();
         for (int j = 0; j < net_id2node2pin_map[i].size(); ++j) {
-            node2pin_map.push_back(net_id2node2pin_map[i][j]);
+            node2pin_map.emplace_back(net_id2node2pin_map[i][j]);
         }
-        flat_net2node_start_map.push_back(node_count);
-        flat_net2edge_start_map.push_back(edge_count);
+        flat_net2node_start_map.emplace_back(node_count);
+        flat_net2edge_start_map.emplace_back(edge_count);
     }
 
     return {edge_from, edge_to, edge_wl, flat_net2node_start_map, flat_net2edge_start_map, node2pin_map, node_count, edge_count};
@@ -408,9 +411,9 @@ void GPUTimer::update_rc_timing_spef() {
     //         net_id2node_cap[net_idx][in_net_idx] = cap * spef_cap_ratio;
     //         node_name2node_id_map[net_idx][node_name] = in_net_idx;
     //     } else {
-    //         net_id2node_cap[net_idx].push_back(cap * spef_cap_ratio);
+    //         net_id2node_cap[net_idx].emplace_back(cap * spef_cap_ratio);
     //         node_name2node_id_map[net_idx][node_name] = net_id2node_cap[net_idx].size() - 1;
-    //         net_id2node2pin_map[net_idx].push_back(-1);
+    //         net_id2node2pin_map[net_idx].emplace_back(-1);
     //     }
     // };
     // for (const auto& n : spef.nets) {
@@ -423,7 +426,7 @@ void GPUTimer::update_rc_timing_spef() {
 
     //         // Put pin nodes in the front
     //         for (int j = 0; j < flat_net2pin_start_map[net_idx + 1] - flat_net2pin_start_map[net_idx]; ++j) {
-    //             net_id2node2pin_map[net_idx].push_back(flat_net2pin_map[j + flat_net2pin_start_map[net_idx]]); // Pins in the front
+    //             net_id2node2pin_map[net_idx].emplace_back(flat_net2pin_map[j + flat_net2pin_start_map[net_idx]]); // Pins in the front
     //         }
     //         net_id2node_cap[net_idx].resize(net_id2node2pin_map[net_idx].size(), 0);
 
@@ -444,9 +447,9 @@ void GPUTimer::update_rc_timing_spef() {
     //             }
     //             int from = node_name2node_id_map[net_idx][node1];
     //             int to = node_name2node_id_map[net_idx][node2];
-    //             net_id2edge_from[net_idx].push_back(from);
-    //             net_id2edge_to[net_idx].push_back(to);
-    //             net_id2edge_res[net_idx].push_back(value * spef_res_ratio);
+    //             net_id2edge_from[net_idx].emplace_back(from);
+    //             net_id2edge_to[net_idx].emplace_back(to);
+    //             net_id2edge_res[net_idx].emplace_back(value * spef_res_ratio);
     //         }
     //     }
     // }
@@ -475,10 +478,10 @@ void GPUTimer::update_rc_timing_spef() {
             net_id2node_cap[net_idx][in_net_idx] = cap * spef_cap_ratio;
             node_name2node_id_map[net_idx][node_name] = in_net_idx;
         } else {
-            net_id2node_cap[net_idx].push_back(cap * spef_cap_ratio);
+            net_id2node_cap[net_idx].emplace_back(cap * spef_cap_ratio);
             int new_index = net_id2node_cap[net_idx].size() - 1;
             node_name2node_id_map[net_idx][node_name] = new_index;
-            net_id2node2pin_map[net_idx].push_back(-1);
+            net_id2node2pin_map[net_idx].emplace_back(-1);
         }
     };
 
@@ -513,9 +516,9 @@ void GPUTimer::update_rc_timing_spef() {
             if (!node_map.count(node2)) add_node_cap(node2, 0, net_idx);
             int from = node_map[node1];
             int to = node_map[node2];
-            net_id2edge_from[net_idx].push_back(from);
-            net_id2edge_to[net_idx].push_back(to);
-            net_id2edge_res[net_idx].push_back(res * spef_res_ratio);
+            net_id2edge_from[net_idx].emplace_back(from);
+            net_id2edge_to[net_idx].emplace_back(to);
+            net_id2edge_res[net_idx].emplace_back(res * spef_res_ratio);
         }
     }
 
@@ -523,12 +526,12 @@ void GPUTimer::update_rc_timing_spef() {
         if (net_id2node2pin_map[i].empty()) {
             logger.warning("net %s has no spef rc, assign 0", gtdb.net_names[i].c_str());
             for (int j = 0; j < flat_net2pin_start_map[i + 1] - flat_net2pin_start_map[i]; ++j) {
-                net_id2node2pin_map[i].push_back(flat_net2pin_map[j + flat_net2pin_start_map[i]]); // Pins in the front
-                net_id2node_cap[i].push_back(0);
+                net_id2node2pin_map[i].emplace_back(flat_net2pin_map[j + flat_net2pin_start_map[i]]); // Pins in the front
+                net_id2node_cap[i].emplace_back(0);
                 if (j != 0) {
-                    net_id2edge_from[i].push_back(0);
-                    net_id2edge_to[i].push_back(j);
-                    net_id2edge_res[i].push_back(0);
+                    net_id2edge_from[i].emplace_back(0);
+                    net_id2edge_to[i].emplace_back(j);
+                    net_id2edge_res[i].emplace_back(0);
                 }
             }
         }
@@ -546,26 +549,26 @@ void GPUTimer::update_rc_timing_spef() {
     vector<int> node2pin_map;
     int num_nodes = 0;
     int num_edges = 0;
-    flat_net2node_start_map.push_back(0);
-    flat_net2edge_start_map.push_back(0);
+    flat_net2node_start_map.emplace_back(0);
+    flat_net2edge_start_map.emplace_back(0);
     for (int i = 0; i < num_nets; ++i) {
         for (int j = 0; j < net_id2edge_from[i].size(); ++j) {
-            edge_from.push_back(num_nodes + net_id2edge_from[i][j]);
-            edge_to.push_back(num_nodes + net_id2edge_to[i][j]);
+            edge_from.emplace_back(num_nodes + net_id2edge_from[i][j]);
+            edge_to.emplace_back(num_nodes + net_id2edge_to[i][j]);
             float res = gtdb.net_is_clock[i] == 1 ? 0 : net_id2edge_res[i][j];
-            edge_res_vec.push_back(res);
+            edge_res_vec.emplace_back(res);
             num_edges++;
         }
         num_nodes += net_id2node2pin_map[i].size();
         for (int j = 0; j < net_id2node_cap[i].size(); ++j) {
-            node2pin_map.push_back(net_id2node2pin_map[i][j]);
+            node2pin_map.emplace_back(net_id2node2pin_map[i][j]);
             float cap = gtdb.net_is_clock[i] == 1 ? 0 : net_id2node_cap[i][j];
             for (int k = 0; k < NUM_ATTR; k++) {
-                node_cap_vec.push_back(cap);
+                node_cap_vec.emplace_back(cap);
             }
         }
-        flat_net2node_start_map.push_back(num_nodes);
-        flat_net2edge_start_map.push_back(num_edges);
+        flat_net2node_start_map.emplace_back(num_nodes);
+        flat_net2edge_start_map.emplace_back(num_edges);
     }
 
     auto device = timing_raw_db.node_size.device();

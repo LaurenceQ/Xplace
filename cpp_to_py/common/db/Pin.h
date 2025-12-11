@@ -39,7 +39,10 @@ public:
     int boundLY = INT_MAX;
     int boundHX = INT_MIN;
     int boundHY = INT_MIN;
-
+    int sumHX = 0;
+    int sumHY = 0;
+    int sumLX = 0;
+    int sumLY = 0;
     PinType(const string& name, const char direction, const char type)
         : _name(name), _direction(direction), _type(type) {}
 
@@ -53,6 +56,8 @@ public:
     void addShape(const Layer& layer, const int lx, const int ly) { addShape(layer, lx, ly, lx + 1, ly + 1); }
     unsigned getW() const { return boundHX - boundLX; }
     unsigned getH() const { return boundHY - boundLY; }
+    int getAvgX() const { return (sumLX + sumHX) / (2 * shapes.size()); }
+    int getAvgY() const { return (sumLY + sumHY) / (2 * shapes.size()); }
     void getBounds(int& lx, int& ly, int& hx, int& hy) const;
     bool operator==(const PinType& r) const;
     bool operator!=(const PinType& r) const { return !(*this == r); }

@@ -5,7 +5,7 @@
 namespace gt {
 
 // #define BLOCK_SIZE 512
-#define BLOCK_SIZE 512
+#define BLOCK_SIZE 32
 #define BLOCK_NUMBER(n) (((n) + (BLOCK_SIZE)-1) / BLOCK_SIZE)
 // el rf rf: e0 l1 r0 f1
 

@@ -17,8 +17,9 @@ bool GTDatabase::is_redundant_timing(const TimingArc* timing_arc, Split el) {
     if (timing_arc->from_port_->name == timing_arc->to_port_->name) return true;
     if (timing_arc->related_port_name_.empty()) return true;
     if (timing_arc->timing_type_ == TimingType::non_seq_setup_rising || timing_arc->timing_type_ == TimingType::non_seq_setup_falling || timing_arc->timing_type_ == TimingType::non_seq_hold_rising ||
-        timing_arc->timing_type_ == TimingType::non_seq_hold_falling || timing_arc->timing_type_ == TimingType::clear || timing_arc->timing_type_ == TimingType::preset)
-        //  || timing_arc->timing_type_ == TimingType::recovery_falling || timing_arc->timing_type_ == TimingType::recovery_rising)
+        timing_arc->timing_type_ == TimingType::non_seq_hold_falling || timing_arc->timing_type_ == TimingType::clear || timing_arc->timing_type_ == TimingType::preset || 
+        timing_arc->timing_type_ == TimingType::removal_falling || timing_arc->timing_type_ == TimingType::removal_rising ||
+        timing_arc->timing_type_ == TimingType::recovery_falling || timing_arc->timing_type_ == TimingType::recovery_rising)
         return true;
     switch (el) {
         case MIN:
@@ -238,11 +239,18 @@ void GTDatabase::ExtractTimingGraph() {
         for (int i = 0; i < liberty_cell_view[MIN]->ports_.size(); i++) {
             array<LibertyPort*, 2> liberty_port_view = {liberty_cell_view[MIN]->ports_[i], liberty_cell_view[MAX]->ports_[i]};
             for_each_el(el) {
-                liberty_port_capacitance.push_back(liberty_port_view[el]->port_capacitance_[0].value_or(nanf("")));
-                liberty_port_capacitance.push_back(liberty_port_view[el]->port_capacitance_[1].value_or(nanf("")));
-                liberty_port_capacitance.push_back(liberty_port_view[el]->port_capacitance_[2].value_or(0.0f));
+                for(int rf = 0; rf < 2; rf++){
+                    // float lib_pin_cap = liberty_port_view[el]->port_capacitance_[rf].value_or(nanf(""));
+                    // if(isnan(lib_pin_cap)){
+                    float lib_pin_cap = liberty_port_view[el]->port_capacitances_[rf][el].value_or(nanf(""));
+                    // }
+                    if(isnan(lib_pin_cap)){
+                        lib_pin_cap = liberty_port_view[el^1]->port_capacitances_[rf][el].value_or(nanf(""));
+                    }
+                    liberty_port_capacitance.emplace_back(lib_pin_cap);
+                }
+                liberty_port_capacitance.emplace_back(liberty_port_view[el]->port_capacitance_[2].value_or(0.0f));
             }
-
             for_each_el(el) {
                 liberty_port2timing_list_end.push_back(liberty_port2timing_list_end.back() + liberty_port_view[el]->timing_arcs_non_cond_non_bundle_.size());
                 for (int j = 0; j < liberty_port_view[el]->timing_arcs_non_cond_non_bundle_.size(); j++) {
@@ -490,40 +498,41 @@ void GTDatabase::readSdc(sdc::SDC& sdc) {
     }
 
     // string clock_name = clocks.begin()->second.source_name();
+    assert(clocks.size() != 0);
     string clock_name = gpdb.getPins()[clocks.begin()->second.source_id()].getName();
     float period = clocks.begin()->second.period();
     logger.info("clock: %s, period: %.2f", clock_name.c_str(), period);
 
     net_is_clock.resize(gpdb.getNets().size(), 0);
-    for (auto& gpnet : gpdb.getNets()) {
-        if (gpnet.getName() == clock_name) {
-            // net_is_clock[gpnet.getId()] = 1;
+    // for (auto& gpnet : gpdb.getNets()) { // dqk: why we need to rule out CLK -> QN if CLK is not directly connected to clknet?
+    //     if (gpnet.getName() == clock_name) {
+    //         // net_is_clock[gpnet.getId()] = 1;
             
-            for (auto& gppin : gpnet.pins()) {
-                timing_raw_db.pinAT[gppin][0] = 0.0f;
-                timing_raw_db.pinAT[gppin][1] = 0.0f;
-                timing_raw_db.pinAT[gppin][2] = 0.0f;
-                timing_raw_db.pinAT[gppin][3] = 0.0f;
-                timing_raw_db.clock_net_pin[gppin] = true;
-            }
-            for(auto& arc_id : test_id2_arc_id){
-                int from_pin = timing_arc_from_pin_id[arc_id];
-                int to_pin = timing_arc_to_pin_id[arc_id];
-                if(!timing_raw_db.clock_net_pin[from_pin].item<bool>() && !timing_raw_db.clock_net_pin[to_pin].item<bool>()){
-                    timing_raw_db.arc_id2test_id[arc_id] = -1;
-                    int clk_port_pin = gpdb.getPins()[from_pin].getType() == 'c' ? from_pin : to_pin;
-                    for(int i = pin_forward_arc_list_end[clk_port_pin]; i < pin_forward_arc_list_end[clk_port_pin+1]; i++){
-                        int timing_arc_id = pin_forward_arc_list[i];
-                        if(arc_types[timing_arc_id] != 1)continue;
-                        timing_raw_db.timing_arc_id_map[2 * timing_arc_id] = timing_raw_db.timing_arc_id_map[2 * timing_arc_id + 1] = -1;
-                        // printf("add test on arc %d from pin %s to pin %s\n", arc_id2, pin_names[from_pin2].c_str(), pin_names[to_pin2].c_str());
-                    }
-                    // printf("remove test on arc %d from pin %s to pin %s\n", arc_id, pin_names[from_pin].c_str(), pin_names[to_pin].c_str());
-                }
-            }
+    //         for (auto& gppin : gpnet.pins()) {
+    //             timing_raw_db.pinAT[gppin][0] = 0.0f;
+    //             timing_raw_db.pinAT[gppin][1] = 0.0f;
+    //             timing_raw_db.pinAT[gppin][2] = 0.0f;
+    //             timing_raw_db.pinAT[gppin][3] = 0.0f;
+    //             timing_raw_db.clock_net_pin[gppin] = true;
+    //         }
+    //         for(auto& arc_id : test_id2_arc_id){
+    //             int from_pin = timing_arc_from_pin_id[arc_id];
+    //             int to_pin = timing_arc_to_pin_id[arc_id];
+    //             if(!timing_raw_db.clock_net_pin[from_pin].item<bool>() && !timing_raw_db.clock_net_pin[to_pin].item<bool>()){
+    //                 timing_raw_db.arc_id2test_id[arc_id] = -1;
+    //                 int clk_port_pin = gpdb.getPins()[from_pin].getType() == 'c' ? from_pin : to_pin;
+    //                 for(int i = pin_forward_arc_list_end[clk_port_pin]; i < pin_forward_arc_list_end[clk_port_pin+1]; i++){
+    //                     int timing_arc_id = pin_forward_arc_list[i];
+    //                     if(arc_types[timing_arc_id] != 1)continue;
+    //                     timing_raw_db.timing_arc_id_map[2 * timing_arc_id] = timing_raw_db.timing_arc_id_map[2 * timing_arc_id + 1] = -1;
+    //                     // printf("add test on arc %d from pin %s to pin %s\n", arc_id2, pin_names[from_pin2].c_str(), pin_names[to_pin2].c_str());
+    //                 }
+    //                 // printf("remove test on arc %d from pin %s to pin %s\n", arc_id, pin_names[from_pin].c_str(), pin_names[to_pin].c_str());
+    //             }
+    //         }
             
-        }
-    }
+    //     }
+    // }
     
 
     // set nan slew of PIs to half period
@@ -544,6 +553,7 @@ void GTDatabase::readSdc(sdc::SDC& sdc) {
         // if (torch::isnan(pinAT[pi][3]).item<bool>()) pinAT[pi][3] = period / 2.0;
     }
 
+    assert(clocks.size() > 0);
     if (clocks.begin()->second.source_id() != -1) {
         int clock_pin_id = clocks.begin()->second.source_id();
         if (torch::isnan(timing_raw_db.pinAT[clock_pin_id][0]).item<bool>()) timing_raw_db.pinAT[clock_pin_id][0] = 0.0f;
@@ -757,7 +767,9 @@ void GTDatabase::_read_sdc(sdc::SetLoad& obj) {
                                     float load = *obj.value;
                                     if (sdc_res_unit.has_value()) load = load * *sdc_res_unit / res_unit;
                                     timing_raw_db.pinLoad[po][(el << 1) + rf] = load;
-                                }
+                                    pin_capacitance[6 * po + el * 2 + rf] = load;
+                                    pin_capacitance[6 * po + 4 + el] = load;
+                                }                         
                             }
                         },
                         [&](sdc::GetPorts& get_ports) {
@@ -767,6 +779,8 @@ void GTDatabase::_read_sdc(sdc::SetLoad& obj) {
                                         float load = *obj.value;
                                         if (sdc_res_unit.has_value()) load = load * *sdc_res_unit / res_unit;
                                         timing_raw_db.pinLoad[itr->second][(el << 1) + rf] = load;
+                                        pin_capacitance[6 * itr->second + el * 2 + rf] = load;
+                                        pin_capacitance[6 * itr->second + 4 + el] = load;
                                     }
                                 } else {
                                     std::cout << obj.command << " : port " << std::quoted(port) << " not found" << std::endl;

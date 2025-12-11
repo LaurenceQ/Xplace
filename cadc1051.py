@@ -69,10 +69,10 @@ def getArgs():
     parser.add_argument('--timing_init_weight', type=float, default=0.05, help='initial timing wirelength weight')
     parser.add_argument('--decay_factor', type=float, default=0.3, help='decay factor of timing weight')
     parser.add_argument('--decay_boost', type=float, default=3, help='dynamic decay boost factor')
-    # parser.add_argument('--wire_resistance_per_micron', type=float, default=2.4222e-05, help='unit wire resistance, normalized across all layers')
-    # parser.add_argument('--wire_capacitance_per_micron', type=float, default=1.2918e-22, help='unit wire capacitance, normalized across all layers')
-    parser.add_argument('--wire_resistance_per_micron', type=float, default=5.235, help='unit wire resistance, normalized across all layers')
-    parser.add_argument('--wire_capacitance_per_micron', type=float, default=0.131e-15, help='unit wire capacitance, normalized across all layers')
+    parser.add_argument('--wire_resistance_per_micron', type=float, default=2.4222e-02 * 1e3, help='unit wire resistance ohm/um, normalized across all layers. setup.sh kohm/um (follows last lib read by openroad)')
+    parser.add_argument('--wire_capacitance_per_micron', type=float, default=1.2918e-01 * 1e-15, help='unit wire capacitance F/um, normalized across all layers. setup.sh fF/um (follows last lib read by openroad)')
+    # parser.add_argument('--wire_resistance_per_micron', type=float, default=5.235, help='unit wire resistance, normalized across all layers')
+    # parser.add_argument('--wire_capacitance_per_micron', type=float, default=0.131e-15, help='unit wire capacitance, normalized across all layers')
 
     # detailed placement and evaluation
     parser.add_argument('--legalization', type=str2bool, default=True, help='perform lg') 
@@ -106,21 +106,20 @@ def main():
 
     set_random_seed(args)
     # Flute.register(args.num_threads)
-    data, rawdb, gpdb = load_design(args, logger)
+    data, rawdb, gpdb, params = load_design(args, logger)
     device = torch.device(
         "cuda:{}".format(args.gpu) if torch.cuda.is_available() else "cpu"
     )
     data = data.to(device)
-    data = data.preprocess()
+    # data = data.preprocess()
+    data = data.timer_preprocess()
+    # print("site_width:", data.site_width)
+    # print(f"microns:{gpdb.microns()}")
+
     # run_placement_main_nesterov_and_sizing(args, logger, data, rawdb, gpdb)
     # # use bangqi's db? or construct sizing db?
-    params = {
-        "design_name": f"{args.designName}",
-        "sdc": f"design/{args.designName}/{args.designName}.sdc",
-        "spef": f"design/{args.designName}/{args.designName}.spef",
-    }
-    # ps = ParamScheduler(data, args, logger)
 
+    # ps = ParamScheduler(data, args, logger)
 
     # node_pos = data.node_pos
     # node_pos, dp_hpwl, top5overflow, lg_time, dp_time = detail_placement_main(
@@ -129,15 +128,18 @@ def main():
     # gpdb.write_placement(f"./output/{args.designName}")
     # logger.info("Data preprocessing finished")
     gputimer = GPUTimer(data, rawdb, gpdb, params, args)
-    
+    gputimer.timer.get_units()
+    # gputimer.timer.set_dmp_debug_flag(True)
     # # timing analysis for extracted RC network
 
     
-    gputimer.update_timing(data.node_pos)
-    gputimer.compute_pi_model()
+    # gputimer.update_timing_eval(data.node_pos)
+    gputimer.update_timing_dmp(data.node_pos)
+    # gputimer.timer.print_pinLoad()
     wns_early, tns_early, wns_late, tns_late = gputimer.report_timing_slack()
     logger.info("FLUTE evaluation: wns_early: %.3f, tns_early: %.3f, wns_late: %.3f, tns_late: %.3f" % ( wns_early, tns_early, wns_late, tns_late))
-
+    
+    # gputimer.timer.print_pin_id_name()
     # gputimer.timer.init_sizing()
     # for T in range(1):
     #     gputimer.timer.evaluate_sizing(-1)
@@ -149,11 +151,10 @@ def main():
     # # bp()
     
     
-    # gputimer.timer.report_K_path(10, 1, True)    
+    gputimer.timer.report_K_path(5, 1, True)    
     # # # gputimer.report_path(ep_name = "i_cache_subsystem_i_nbdcache_i_miss_handler_evict_cl_q_reg[data][102]:SETN", el = 1, verbose = True)
     # gpdb.write_placement(f"./output/{args.designName}")
-    # bp()
-               
+    # bp()          
 
 if __name__ == "__main__":
     main()

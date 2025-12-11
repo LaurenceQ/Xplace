@@ -140,6 +140,7 @@ Lut* CellLib::extract_lut(token_iterator& itr, const token_iterator end) {
         if(is_time_lut_var(lut -> lut_template -> variable2.value()))ind2_scale = scale_factors["time"];
         else if(is_capacitance_lut_var(lut -> lut_template -> variable2.value()))ind2_scale = scale_factors["capacitance"];
     }
+    // printf("lut_name:%s index1_scale:%.4f index2_scale:%.4f time_scale:%.4f\n", lut->name.c_str(), ind1_scale, ind2_scale, scale_factors["time"]);
     while (stack && ++itr != end) {
         if (*itr == "index_1") {
             itr = on_next_parentheses(
@@ -275,6 +276,22 @@ LibertyPort* CellLib::extractLibertyPort(token_iterator& itr, const token_iterat
         } else if (*itr == "rise_capacitance") {
             logger.infoif(++itr == end, "can't get rise_capacitance in cellpin");
             cell_port->port_capacitance_[0] = std::strtof(itr->data(), nullptr) * scale_factors["capacitance"];
+        } else if (*itr == "rise_capacitance_range") {
+            logger.infoif(++itr == end, "can't get rise_capacitance_range in cellpin");
+            //itr == "("
+            ++itr;
+            cell_port->port_capacitances_[0][0] = std::strtof(itr->data(), nullptr) * scale_factors["capacitance"];
+            ++itr;
+            cell_port->port_capacitances_[0][1] = std::strtof(itr->data(), nullptr) * scale_factors["capacitance"];
+
+            ++itr; // itr == ")"
+        } else if (*itr == "fall_capacitance_range") {
+            logger.infoif(++itr == end, "can't get fall_capacitance_range in cellpin");
+            ++itr;
+            cell_port->port_capacitances_[1][0] = std::strtof(itr->data(), nullptr) * scale_factors["capacitance"];
+            ++itr;
+            cell_port->port_capacitances_[1][1] = std::strtof(itr->data(), nullptr) * scale_factors["capacitance"];
+            ++itr;
         } else if (*itr == "max_capacitance") {
             logger.infoif(++itr == end, "can't get the max_capacitance in cellpin");
             cell_port->max_capacitance = std::strtof(itr->data(), nullptr) * scale_factors["capacitance"];
@@ -548,6 +565,7 @@ void CellLib::read(const std::string& file) {
             // undefined token TODO:
         }
     }
+    logger.info("cap_unit:%E time_unit:%E resistance_unit:%E power_unit:%E", *capacitance_unit_ * scale_factors["capacitance"], *time_unit_ * scale_factors["time"], *resistance_unit_, *power_unit_ * scale_factors["power"]);
 }
 
 void CellLib::finish_port_read(LibertyPort* liberty_port) {

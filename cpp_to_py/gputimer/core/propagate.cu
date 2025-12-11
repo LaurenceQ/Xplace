@@ -72,6 +72,11 @@ __device__ void propagateDelay(index_type arc_id,
         if (isnan(delay)) return;
         arcDelay[arc_id * 2 * NUM_ATTR + i] = delay;
     }
+    else return ;
+    float si = pinSlew[from_pin_id * NUM_ATTR + (i >> 1)];
+    float so = pinSlew[to_pin_id * NUM_ATTR + (i & (0b11))];
+    float delay = arcDelay[arc_id * 2 * NUM_ATTR + i];
+    printf("arc_id:%d from:%d to:%d arc_type:%d i:%d si:%.4f so:%.4f delay:%.4f\n", arc_id, from_pin_id, to_pin_id, arc_type, i, si, so, delay);
 }
 
 __device__ void propagateAT(
@@ -350,7 +355,7 @@ void update_timing_cuda(index_type *level_list,
     for (int i = 1; i < level_list_end_cpu.size() - 1; i++) {
         int num_pins_level = level_list_end_cpu[i + 1] - level_list_end_cpu[i];
         index_type level_start_offset = level_list_end_cpu[i];
-        // printf("==== level %d ======= %d \n", i, num_pins_level);
+        printf("==== level %d ======= %d \n", i, num_pins_level);
         propagatePin<<<BLOCK_NUMBER(num_pins_level * 2 * NUM_ATTR), BLOCK_SIZE>>>(level_list,
                                                                                   pin_backward_arc_list_end,
                                                                                   pin_backward_arc_list,

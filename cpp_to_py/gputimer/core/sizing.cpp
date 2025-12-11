@@ -93,7 +93,7 @@ void GPUTimer::evaluate_sizing(int sizing_max_level) {
                          num_arcs,
                          i,
                          num_POs);
-    fflush(stdout);
+    // fflush(stdout);
 
 }
 

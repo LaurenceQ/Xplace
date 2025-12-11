@@ -21,8 +21,8 @@ class GPUTimer():
 
         self.node_size = data.node_size.detach().clone()
         node_lpos = data.node_pos.detach() - self.node_size / 2
-        self.pin_rel_lpos = data.pin_rel_lpos.detach() + data.pin_size / 2
-
+        #self.pin_rel_lpos = data.pin_rel_lpos.detach() + data.pin_size / 2 #dqk: align to openroad
+        self.pin_rel_lpos = data.pin_rel_lpos.detach()
         die_info = data.die_info
         xl, xh, yl, yh = die_info.cpu().numpy()
 
@@ -40,7 +40,7 @@ class GPUTimer():
         self.timing_raw_db = gputimer.create_timing_rawdb(
             self.conn_node_lpos,
             data.node_size,
-            self.pin_rel_lpos,
+            self.pin_rel_lpos, #dqk: instance pin relative pos to lower left corner
             data.pin_id2node_id,
             data.pin_id2net_id.int(),
             data.node2pin_list,
@@ -55,6 +55,7 @@ class GPUTimer():
             self.wire_capacitance_per_micron
         )
         # print("Timing raw database created with %d nodes and %d pins." % (data.num_nodes, data.num_pins))
+        print(f"reading sdc from:{params['sdc']}")
         self.timer = gputimer.create_gputimer(params, rawdb, gpdb, self.timing_raw_db)
         # print("GPUTimer initialized with %d nodes and %d pins." % (data.num_nodes, data.num_pins))
         ## Timing optimization
@@ -90,10 +91,22 @@ class GPUTimer():
         self.timer.update_states()
         self.timer.update_rc(node_lpos, False, False, False)
         self.timer.update_timing()
+    
+    def update_timing_dmp(self, node_pos):
+        node_lpos = (node_pos.detach() - self.node_size / 2).to(self.data.device)
+        self.conn_node_lpos = torch.cat([
+            node_lpos[self.mov_lhs:self.mov_rhs], self.fix_conn_node_lpos
+        ], dim=0)
         
-    def compute_pi_model(self):
-        self.timer.initialize_dmp_model()
-        self.timer.compute_pi_model()
+        self.timer.update_states()
+        # self.timer.update_rc(node_lpos, False, False, False)     
+        print("Updating DMP RC...")
+        self.timer.update_rc_flute_dmp(node_lpos, False)
+        print("DMP RC updated.")
+        # exit(0)
+
+        # self.timer.initialize_dmp_model()
+        self.timer.update_timing_dmp()
 
     def update_timing_eval(self, node_pos):
         node_lpos = (node_pos.detach() - self.node_size / 2).to(self.data.device)
@@ -130,10 +143,14 @@ class GPUTimer():
         time_unit = self.timer.time_unit()
         self.timer.update_endpoints()
         wns_early, tns_early, wns_late, tns_late = self.timer.report_wns_and_tns()
-        wns_early = (wns_early.item() * (time_unit * 1e9))
-        wns_late = (wns_late.item() * (time_unit * 1e9))
-        tns_early = (tns_early.item() * (time_unit * 1e9))
-        tns_late = (tns_late.item() * (time_unit * 1e9))
+        # wns_early = (wns_early.item() * (time_unit * 1e9))
+        # wns_late = (wns_late.item() * (time_unit * 1e9))
+        # tns_early = (tns_early.item() * (time_unit * 1e9))
+        # tns_late = (tns_late.item() * (time_unit * 1e9))
+        wns_early = wns_early.item() 
+        wns_late = wns_late.item()
+        tns_early = tns_early.item()
+        tns_late = tns_late.item()     
         self.push_metric(-wns_late, -tns_late)
         return wns_early, tns_early, wns_late, tns_late
 
