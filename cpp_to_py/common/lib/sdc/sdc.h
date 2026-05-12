@@ -55,6 +55,8 @@ struct SetDrivingCell {
     std::optional<std::byte> rise;
     std::optional<std::byte> fall;
     std::optional<std::byte> clock_fall;
+    std::optional<std::string> lib_cell;
+    std::optional<std::string> pin;
     std::array<std::optional<float>, 2> transitions;
     std::optional<Object> port_list;
 

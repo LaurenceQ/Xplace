@@ -46,6 +46,12 @@ public:
     db::CellType *cell_type_ = nullptr;
 
     using token_iterator = std::vector<std::string_view>::iterator;
+    struct BusType {
+        int bit_from = 0;
+        int bit_to = -1;
+        int bit_width = 0;
+        bool valid = false;
+    };
     DelayModel delay_model;
     string name;
 
@@ -76,8 +82,21 @@ public:
         {"voltage", 1.0},
     };
 
+    float input_threshold_pct[MAX_TRAN] = {0.5f, 0.5f};
+    float output_threshold_pct[MAX_TRAN] = {0.5f, 0.5f};
+    float slew_lower_threshold_pct[MAX_TRAN] = {0.2f, 0.2f};
+    float slew_upper_threshold_pct[MAX_TRAN] = {0.8f, 0.8f};
+    float slew_derate_from_library = 1.0f;
+    bool default_thresholds_initialized = false;
+    float default_input_threshold_pct[MAX_TRAN] = {0.5f, 0.5f};
+    float default_output_threshold_pct[MAX_TRAN] = {0.5f, 0.5f};
+    float default_slew_lower_threshold_pct[MAX_TRAN] = {0.2f, 0.2f};
+    float default_slew_upper_threshold_pct[MAX_TRAN] = {0.8f, 0.8f};
+    float default_slew_derate_from_library = 1.0f;
+
     unordered_map<string, LutTemplate *> lut_templates_;
     unordered_map<string, LibertyCell *> lib_cells_;
+    unordered_map<string, BusType> bus_types_;
 
     LutTemplate *get_lut_template(const string &);
     LibertyCell *get_cell(const std::string &name);
@@ -88,8 +107,10 @@ public:
 public:
     LibertyCell *extractLibertyCell(token_iterator &, const token_iterator);
     LibertyPort *extractLibertyPort(token_iterator &, const token_iterator, LibertyCell *);
+    vector<LibertyPort *> extractLibertyBus(token_iterator &, const token_iterator, LibertyCell *);
     TimingArc *extractTimingArc(token_iterator &, const token_iterator, LibertyPort *);
     std::optional<float> extract_operating_conditions(token_iterator &itr, const token_iterator end);
+    BusType extract_bus_type(token_iterator &, const token_iterator);
     LutTemplate *extract_lut_template(token_iterator &, const token_iterator);
     Lut *extract_lut(token_iterator &, const token_iterator);
 
@@ -113,6 +134,11 @@ public:
 
     bool is_seq_ = false;
     int num_bits_ = 0;
+    float input_threshold_pct[MAX_TRAN] = {0.5f, 0.5f};
+    float output_threshold_pct[MAX_TRAN] = {0.5f, 0.5f};
+    float slew_lower_threshold_pct[MAX_TRAN] = {0.2f, 0.2f};
+    float slew_upper_threshold_pct[MAX_TRAN] = {0.8f, 0.8f};
+    float slew_derate_from_library = 1.0f;
 
 public:
     int get_port(const std::string &name);
@@ -127,6 +153,7 @@ public:
     LibertyCell *cell_;
     CellPortDirection direction_;
     optional<float> port_capacitance_[3];
+    optional<float> port_capacitances_[MAX_TRAN][MAX_SPLIT];
 
     bool is_clock_ = false;
     bool is_bundle_ = false;

@@ -11,6 +11,74 @@ using std::ifstream;
 
 namespace gt {
 
+static float liberty_port_default_cap(const CellLib* lib, CellPortDirection direction) {
+    const char* key = "default_inout_pin_cap";
+    if (direction == CellPortDirection::input) {
+        key = "default_input_pin_cap";
+    } else if (direction == CellPortDirection::output) {
+        key = "default_output_pin_cap";
+    }
+
+    auto default_itr = lib->default_values.find(key);
+    auto scale_itr = lib->scale_factors.find("capacitance");
+    const float scale = scale_itr == lib->scale_factors.end() ? 1.0f : scale_itr->second;
+    if (default_itr != lib->default_values.end() && default_itr->second.has_value()) {
+        return default_itr->second.value() * scale;
+    }
+    return 0.0f;
+}
+
+static void apply_liberty_port_default_caps(const CellLib* lib, LibertyPort* cell_port) {
+    const float default_cap =
+        cell_port->port_capacitance_[2].value_or(liberty_port_default_cap(lib, cell_port->direction_));
+    if (!cell_port->port_capacitance_[2].has_value()) {
+        cell_port->port_capacitance_[2] = default_cap;
+    }
+    for_each_el(el) {
+        for (auto rf : TRAN) {
+            if (!cell_port->port_capacitances_[rf][el].has_value()) {
+                cell_port->port_capacitances_[rf][el] =
+                    cell_port->port_capacitance_[rf].value_or(default_cap);
+            }
+        }
+    }
+}
+
+static void copy_liberty_port_attributes(const LibertyPort* from, LibertyPort* to) {
+    to->direction_ = from->direction_;
+    for (int i = 0; i < 3; ++i) {
+        to->port_capacitance_[i] = from->port_capacitance_[i];
+    }
+    for (auto rf : TRAN) {
+        for_each_el(el) {
+            to->port_capacitances_[rf][el] = from->port_capacitances_[rf][el];
+        }
+    }
+    to->is_clock_ = from->is_clock_;
+    to->fanout_load = from->fanout_load;
+    to->max_fanout = from->max_fanout;
+    to->min_fanout = from->min_fanout;
+    to->max_capacitance = from->max_capacitance;
+    to->min_capacitance = from->min_capacitance;
+    to->max_transition = from->max_transition;
+    to->min_transition = from->min_transition;
+}
+
+static float liberty_lut_var_scale(const CellLib* lib, const std::optional<LutVar>& var) {
+    if (!var.has_value()) {
+        return 1.0f;
+    }
+    if (is_capacitance_lut_var(var.value())) {
+        auto itr = lib->scale_factors.find("capacitance");
+        return itr == lib->scale_factors.end() ? 1.0f : itr->second;
+    }
+    if (is_time_lut_var(var.value())) {
+        auto itr = lib->scale_factors.find("time");
+        return itr == lib->scale_factors.end() ? 1.0f : itr->second;
+    }
+    return 1.0f;
+}
+
 LutTemplate* CellLib::get_lut_template(const std::string& name) {
     if (auto itr = lut_templates_.find(name); itr == lut_templates_.end()) {
         return nullptr;
@@ -54,6 +122,47 @@ std::optional<float> CellLib::extract_operating_conditions(token_iterator& itr, 
     }
 
     return voltage;
+}
+
+CellLib::BusType CellLib::extract_bus_type(token_iterator& itr, const token_iterator end) {
+    std::string type_name;
+    BusType bus_type;
+    if (itr = on_next_parentheses(itr, end, [&](auto& name) mutable { type_name = name; }); itr == end) {
+        logger.info("can't find bus type name");
+    }
+    if (itr = std::find(itr, end, "{"); itr == end) {
+        logger.info("can't find bus type group brace '{'");
+    }
+
+    int stack = 1;
+    while (stack && ++itr != end) {
+        if (*itr == "bit_from") {
+            logger.infoif(++itr == end, "can't get bit_from in type %s", type_name.c_str());
+            bus_type.bit_from = std::atoi(itr->data());
+        } else if (*itr == "bit_to") {
+            logger.infoif(++itr == end, "can't get bit_to in type %s", type_name.c_str());
+            bus_type.bit_to = std::atoi(itr->data());
+        } else if (*itr == "bit_width") {
+            logger.infoif(++itr == end, "can't get bit_width in type %s", type_name.c_str());
+            bus_type.bit_width = std::atoi(itr->data());
+        } else if (*itr == "}") {
+            stack--;
+        } else if (*itr == "{") {
+            stack++;
+        } else {
+            // undefined token TODO:
+        }
+    }
+
+    if (stack != 0 || *itr != "}") {
+        logger.info("can't find bus type group brace '}'");
+    }
+
+    bus_type.valid = bus_type.bit_width > 0 || bus_type.bit_from != bus_type.bit_to;
+    if (!type_name.empty()) {
+        bus_types_[type_name] = bus_type;
+    }
+    return bus_type;
 }
 
 LutTemplate* CellLib::extract_lut_template(token_iterator& itr, const token_iterator end) {
@@ -122,6 +231,9 @@ Lut* CellLib::extract_lut(token_iterator& itr, const token_iterator end) {
     }
 
     lut->lut_template = get_lut_template(lut->name);
+    const float index1_scale = lut->lut_template ? liberty_lut_var_scale(this, lut->lut_template->variable1) : 1.0f;
+    const float index2_scale = lut->lut_template ? liberty_lut_var_scale(this, lut->lut_template->variable2) : 1.0f;
+    const float table_scale = scale_factors["time"];
 
     if (itr = std::find(itr, end, "{"); itr == end) {
         logger.info("group brace '{' error in lut ", lut->name);
@@ -133,7 +245,7 @@ Lut* CellLib::extract_lut(token_iterator& itr, const token_iterator end) {
     while (stack && ++itr != end) {
         if (*itr == "index_1") {
             itr = on_next_parentheses(
-                itr, end, [&](auto& v) mutable { lut->indices1.push_back(std::strtof(v.data(), nullptr)); });
+                itr, end, [&](auto& v) mutable { lut->indices1.push_back(std::strtof(v.data(), nullptr) * index1_scale); });
 
             if (lut->indices1.size() == 0) {
                 logger.info("syntax error in %s index_1", lut->name);
@@ -142,7 +254,7 @@ Lut* CellLib::extract_lut(token_iterator& itr, const token_iterator end) {
             size1 = lut->indices1.size();
         } else if (*itr == "index_2") {
             itr = on_next_parentheses(
-                itr, end, [&](auto& v) mutable { lut->indices2.push_back(std::strtof(v.data(), nullptr)); });
+                itr, end, [&](auto& v) mutable { lut->indices2.push_back(std::strtof(v.data(), nullptr) * index2_scale); });
 
             if (lut->indices2.size() == 0) {
                 logger.info("syntax error in %s index_2", lut->name);
@@ -168,7 +280,7 @@ Lut* CellLib::extract_lut(token_iterator& itr, const token_iterator end) {
 
             int id{0};
             itr = on_next_parentheses(
-                itr, end, [&](auto& v) mutable { lut->table[id++] = std::strtof(v.data(), nullptr); });
+                itr, end, [&](auto& v) mutable { lut->table[id++] = std::strtof(v.data(), nullptr) * table_scale; });
         } else if (*itr == "}") {
             stack--;
         } else if (*itr == "{") {
@@ -254,25 +366,39 @@ LibertyPort* CellLib::extractLibertyPort(token_iterator& itr, const token_iterat
             cell_port->direction_ = findPortDirection(string(*itr));
         } else if (*itr == "capacitance") {
             logger.infoif(++itr == end, "can't get the capacitance in cellpin");
-            cell_port->port_capacitance_[2] = std::strtof(itr->data(), nullptr);
+            cell_port->port_capacitance_[2] = std::strtof(itr->data(), nullptr) * scale_factors["capacitance"];
         } else if (*itr == "fall_capacitance") {
             logger.infoif(++itr == end, "can't get fall_capacitance in cellpin");
-            cell_port->port_capacitance_[1] = std::strtof(itr->data(), nullptr);
+            cell_port->port_capacitance_[FALL] = std::strtof(itr->data(), nullptr) * scale_factors["capacitance"];
         } else if (*itr == "rise_capacitance") {
             logger.infoif(++itr == end, "can't get rise_capacitance in cellpin");
-            cell_port->port_capacitance_[0] = std::strtof(itr->data(), nullptr);
+            cell_port->port_capacitance_[RISE] = std::strtof(itr->data(), nullptr) * scale_factors["capacitance"];
+        } else if (*itr == "rise_capacitance_range") {
+            logger.infoif(++itr == end, "can't get rise_capacitance_range in cellpin");
+            ++itr;
+            cell_port->port_capacitances_[RISE][MIN] = std::strtof(itr->data(), nullptr) * scale_factors["capacitance"];
+            ++itr;
+            cell_port->port_capacitances_[RISE][MAX] = std::strtof(itr->data(), nullptr) * scale_factors["capacitance"];
+            ++itr;
+        } else if (*itr == "fall_capacitance_range") {
+            logger.infoif(++itr == end, "can't get fall_capacitance_range in cellpin");
+            ++itr;
+            cell_port->port_capacitances_[FALL][MIN] = std::strtof(itr->data(), nullptr) * scale_factors["capacitance"];
+            ++itr;
+            cell_port->port_capacitances_[FALL][MAX] = std::strtof(itr->data(), nullptr) * scale_factors["capacitance"];
+            ++itr;
         } else if (*itr == "max_capacitance") {
             logger.infoif(++itr == end, "can't get the max_capacitance in cellpin");
-            cell_port->max_capacitance = std::strtof(itr->data(), nullptr);
+            cell_port->max_capacitance = std::strtof(itr->data(), nullptr) * scale_factors["capacitance"];
         } else if (*itr == "min_capacitance") {
             logger.infoif(++itr == end, "can't get the min_capacitance in cellpin");
-            cell_port->min_capacitance = std::strtof(itr->data(), nullptr);
+            cell_port->min_capacitance = std::strtof(itr->data(), nullptr) * scale_factors["capacitance"];
         } else if (*itr == "max_transition") {
             logger.infoif(++itr == end, "can't get the max_transition in cellpin");
-            cell_port->max_transition = std::strtof(itr->data(), nullptr);
+            cell_port->max_transition = std::strtof(itr->data(), nullptr) * scale_factors["time"];
         } else if (*itr == "min_transition") {
             logger.infoif(++itr == end, "can't get the min_transition in cellpin");
-            cell_port->min_transition = std::strtof(itr->data(), nullptr);
+            cell_port->min_transition = std::strtof(itr->data(), nullptr) * scale_factors["time"];
         } else if (*itr == "fanout_load") {
             logger.infoif(++itr == end, "can't get fanout_load in cellpin");
             cell_port->fanout_load = std::strtof(itr->data(), nullptr);
@@ -300,11 +426,136 @@ LibertyPort* CellLib::extractLibertyPort(token_iterator& itr, const token_iterat
         logger.info("can't find group brace '}' in cell port");
     }
 
+    apply_liberty_port_default_caps(this, cell_port);
+
     return cell_port;
+}
+
+vector<LibertyPort*> CellLib::extractLibertyBus(token_iterator& itr, const token_iterator end, LibertyCell* liberty_cell) {
+    LibertyPort bus_port;
+    bus_port.cell_ = liberty_cell;
+    bus_port.is_bundle_ = true;
+    std::string bus_type_name;
+
+    on_next_parentheses(itr, end, [&](auto& name) mutable { bus_port.name = name; });
+    if (itr = std::find(itr, end, "{"); itr == end) {
+        logger.info("can't find group brace '{' in bus");
+    }
+
+    int stack = 1;
+    while (stack && ++itr != end) {
+        if (*itr == "bus_type") {
+            logger.infoif(++itr == end, "can't get bus_type in bus %s", bus_port.name.c_str());
+            bus_type_name = string(*itr);
+        } else if (*itr == "direction") {
+            logger.infoif(++itr == end, "can't get direction in bus %s", bus_port.name.c_str());
+            bus_port.direction_ = findPortDirection(string(*itr));
+        } else if (*itr == "capacitance") {
+            logger.infoif(++itr == end, "can't get the capacitance in bus");
+            bus_port.port_capacitance_[2] = std::strtof(itr->data(), nullptr) * scale_factors["capacitance"];
+        } else if (*itr == "fall_capacitance") {
+            logger.infoif(++itr == end, "can't get fall_capacitance in bus");
+            bus_port.port_capacitance_[FALL] = std::strtof(itr->data(), nullptr) * scale_factors["capacitance"];
+        } else if (*itr == "rise_capacitance") {
+            logger.infoif(++itr == end, "can't get rise_capacitance in bus");
+            bus_port.port_capacitance_[RISE] = std::strtof(itr->data(), nullptr) * scale_factors["capacitance"];
+        } else if (*itr == "rise_capacitance_range") {
+            logger.infoif(++itr == end, "can't get rise_capacitance_range in bus");
+            ++itr;
+            bus_port.port_capacitances_[RISE][MIN] = std::strtof(itr->data(), nullptr) * scale_factors["capacitance"];
+            ++itr;
+            bus_port.port_capacitances_[RISE][MAX] = std::strtof(itr->data(), nullptr) * scale_factors["capacitance"];
+            ++itr;
+        } else if (*itr == "fall_capacitance_range") {
+            logger.infoif(++itr == end, "can't get fall_capacitance_range in bus");
+            ++itr;
+            bus_port.port_capacitances_[FALL][MIN] = std::strtof(itr->data(), nullptr) * scale_factors["capacitance"];
+            ++itr;
+            bus_port.port_capacitances_[FALL][MAX] = std::strtof(itr->data(), nullptr) * scale_factors["capacitance"];
+            ++itr;
+        } else if (*itr == "max_capacitance") {
+            logger.infoif(++itr == end, "can't get the max_capacitance in bus");
+            bus_port.max_capacitance = std::strtof(itr->data(), nullptr) * scale_factors["capacitance"];
+        } else if (*itr == "min_capacitance") {
+            logger.infoif(++itr == end, "can't get the min_capacitance in bus");
+            bus_port.min_capacitance = std::strtof(itr->data(), nullptr) * scale_factors["capacitance"];
+        } else if (*itr == "max_transition") {
+            logger.infoif(++itr == end, "can't get the max_transition in bus");
+            bus_port.max_transition = std::strtof(itr->data(), nullptr) * scale_factors["time"];
+        } else if (*itr == "min_transition") {
+            logger.infoif(++itr == end, "can't get the min_transition in bus");
+            bus_port.min_transition = std::strtof(itr->data(), nullptr) * scale_factors["time"];
+        } else if (*itr == "fanout_load") {
+            logger.infoif(++itr == end, "can't get fanout_load in bus");
+            bus_port.fanout_load = std::strtof(itr->data(), nullptr);
+        } else if (*itr == "max_fanout") {
+            logger.infoif(++itr == end, "can't get max_fanout in bus");
+            bus_port.max_fanout = std::strtof(itr->data(), nullptr);
+        } else if (*itr == "min_fanout") {
+            logger.infoif(++itr == end, "can't get min_fanout in bus");
+            bus_port.min_fanout = std::strtof(itr->data(), nullptr);
+        } else if (*itr == "clock") {
+            logger.infoif(++itr == end, "can't get the clock status in bus");
+            bus_port.is_clock_ = (*itr == "true") ? true : false;
+        } else if (*itr == "timing") {
+            extractTimingArc(itr, end, &bus_port);
+        } else if (*itr == "}") {
+            stack--;
+        } else if (*itr == "{") {
+            stack++;
+        } else {
+            // undefined token TODO:
+        }
+    }
+
+    if (stack != 0 || *itr != "}") {
+        logger.info("can't find group brace '}' in bus");
+    }
+
+    apply_liberty_port_default_caps(this, &bus_port);
+
+    auto type_itr = bus_types_.find(bus_type_name);
+    if (type_itr == bus_types_.end() || !type_itr->second.valid) {
+        logger.warning("bus %s has unknown or invalid bus_type %s",
+                       bus_port.name.c_str(),
+                       bus_type_name.c_str());
+        return {};
+    }
+
+    const BusType& bus_type = type_itr->second;
+    const int step = bus_type.bit_from >= bus_type.bit_to ? -1 : 1;
+    vector<LibertyPort*> member_ports;
+    for (int bit = bus_type.bit_from;; bit += step) {
+        LibertyPort* member = new LibertyPort();
+        member->name = bus_port.name + "[" + std::to_string(bit) + "]";
+        member->cell_ = liberty_cell;
+        copy_liberty_port_attributes(&bus_port, member);
+        for (TimingArc* bus_arc : bus_port.timing_arcs_) {
+            TimingArc* timing_arc = new TimingArc(*bus_arc);
+            timing_arc->liberty_port_ = member;
+            timing_arc->from_port_ = nullptr;
+            timing_arc->to_port_ = nullptr;
+            timing_arc->encode_str_.clear();
+            member->timing_arcs_.push_back(timing_arc);
+        }
+        member_ports.push_back(member);
+        if (bit == bus_type.bit_to) {
+            break;
+        }
+    }
+
+    return member_ports;
 }
 
 LibertyCell* CellLib::extractLibertyCell(token_iterator& itr, const token_iterator end) {
     LibertyCell* liberty_cell = new LibertyCell();
+    for (auto rf : TRAN) {
+        liberty_cell->input_threshold_pct[rf] = input_threshold_pct[rf];
+        liberty_cell->output_threshold_pct[rf] = output_threshold_pct[rf];
+        liberty_cell->slew_lower_threshold_pct[rf] = slew_lower_threshold_pct[rf];
+        liberty_cell->slew_upper_threshold_pct[rf] = slew_upper_threshold_pct[rf];
+    }
+    liberty_cell->slew_derate_from_library = slew_derate_from_library;
 
     on_next_parentheses(itr, end, [&](auto& name) mutable { liberty_cell->name = name; });
     if (itr = std::find(itr, end, "{"); itr == end) {
@@ -337,6 +588,9 @@ LibertyCell* CellLib::extractLibertyCell(token_iterator& itr, const token_iterat
             logger.infoif(++itr == end, "can't get port in cell %s", liberty_cell->name);
             LibertyPort* cell_port_ = extractLibertyPort(itr, end, liberty_cell);
             liberty_cell->ports_.push_back(cell_port_);
+        } else if (*itr == "bus") {
+            vector<LibertyPort*> bus_ports = extractLibertyBus(itr, end, liberty_cell);
+            liberty_cell->ports_.insert(liberty_cell->ports_.end(), bus_ports.begin(), bus_ports.end());
         } else if (*itr == "bundle") {
             LibertyPort* cell_port_bundle = new LibertyPort();
             liberty_cell->ports_.push_back(cell_port_bundle);
@@ -435,33 +689,73 @@ void CellLib::read(const std::string& file) {
             auto lut = extract_lut_template(itr, end);
         } else if (*itr == "power_lut_template") {
             auto lut = extract_lut_template(itr, end);
+        } else if (*itr == "type") {
+            extract_bus_type(itr, end);
         } else if (*itr == "delay_model") {
             logger.infoif(++itr == end, "syntax error in delay_model");
             delay_model = findDelayModel(string(*itr));
+        } else if (*itr == "input_threshold_pct_fall") {
+            logger.infoif(++itr == end, "syntax error in input_threshold_pct_fall");
+            input_threshold_pct[FALL] = std::strtof(itr->data(), nullptr) / 100.0f;
+        } else if (*itr == "input_threshold_pct_rise") {
+            logger.infoif(++itr == end, "syntax error in input_threshold_pct_rise");
+            input_threshold_pct[RISE] = std::strtof(itr->data(), nullptr) / 100.0f;
+        } else if (*itr == "output_threshold_pct_fall") {
+            logger.infoif(++itr == end, "syntax error in output_threshold_pct_fall");
+            output_threshold_pct[FALL] = std::strtof(itr->data(), nullptr) / 100.0f;
+        } else if (*itr == "output_threshold_pct_rise") {
+            logger.infoif(++itr == end, "syntax error in output_threshold_pct_rise");
+            output_threshold_pct[RISE] = std::strtof(itr->data(), nullptr) / 100.0f;
+        } else if (*itr == "slew_lower_threshold_pct_fall") {
+            logger.infoif(++itr == end, "syntax error in slew_lower_threshold_pct_fall");
+            slew_lower_threshold_pct[FALL] = std::strtof(itr->data(), nullptr) / 100.0f;
+        } else if (*itr == "slew_lower_threshold_pct_rise") {
+            logger.infoif(++itr == end, "syntax error in slew_lower_threshold_pct_rise");
+            slew_lower_threshold_pct[RISE] = std::strtof(itr->data(), nullptr) / 100.0f;
+        } else if (*itr == "slew_upper_threshold_pct_fall") {
+            logger.infoif(++itr == end, "syntax error in slew_upper_threshold_pct_fall");
+            slew_upper_threshold_pct[FALL] = std::strtof(itr->data(), nullptr) / 100.0f;
+        } else if (*itr == "slew_upper_threshold_pct_rise") {
+            logger.infoif(++itr == end, "syntax error in slew_upper_threshold_pct_rise");
+            slew_upper_threshold_pct[RISE] = std::strtof(itr->data(), nullptr) / 100.0f;
+        } else if (*itr == "slew_derate_from_library") {
+            logger.infoif(++itr == end, "syntax error in slew_derate_from_library");
+            slew_derate_from_library = std::strtof(itr->data(), nullptr);
         } else if (*itr == "default_cell_leakage_power" || *itr == "default_inout_pin_cap" ||
                    *itr == "default_input_pin_cap" || *itr == "default_output_pin_cap" ||
                    *itr == "default_fanout_load" || *itr == "default_max_fanout" || *itr == "default_max_transition") {
+            std::string attr_name(*itr);
             logger.infoif(++itr == end, "syntax error");
-            default_values[std::string(*itr)] = std::strtof(itr->data(), nullptr);
+            default_values[attr_name] = std::strtof(itr->data(), nullptr);
         } else if (*itr == "operating_conditions") {
             logger.infoif(++itr == end, "syntax error");
             default_values["voltage"] = extract_operating_conditions(itr, end);
         } else if (*itr == "time_unit") {
             logger.infoif(++itr == end, "syntax error");
-            time_unit_ = make_time_unit(*itr);
+            auto current_time_unit = make_time_unit(*itr);
+            if (!time_unit_) time_unit_ = current_time_unit;
+            scale_factors["time"] = *current_time_unit / *time_unit_;
         } else if (*itr == "voltage_unit") {
             logger.infoif(++itr == end, "syntax error");
-            voltage_unit_ = make_voltage_unit(*itr);
+            auto current_voltage_unit = make_voltage_unit(*itr);
+            if (!voltage_unit_) voltage_unit_ = current_voltage_unit;
+            scale_factors["voltage"] = *current_voltage_unit / *voltage_unit_;
         } else if (*itr == "current_unit") {
             logger.infoif(++itr == end, "syntax error");
-            current_unit_ = make_current_unit(*itr);
+            auto current_current_unit = make_current_unit(*itr);
+            if (!current_unit_) current_unit_ = current_current_unit;
+            scale_factors["current"] = *current_current_unit / *current_unit_;
         } else if (*itr == "pulling_resistance_unit") {
             logger.infoif(++itr == end, "syntax error");
-            resistance_unit_ = make_resistance_unit(*itr);
+            auto current_resistance_unit = make_resistance_unit(*itr);
+            if (!resistance_unit_) resistance_unit_ = current_resistance_unit;
+            scale_factors["resistance"] = *current_resistance_unit / *resistance_unit_;
         } else if (*itr == "capacitive_load_unit") {
             string unit;
             on_next_parentheses(itr, end, [&](auto& str) mutable { unit += str; });
-            capacitance_unit_ = make_capacitance_unit(unit);
+            auto current_capacitance_unit = make_capacitance_unit(unit);
+            if (!capacitance_unit_) capacitance_unit_ = current_capacitance_unit;
+            scale_factors["capacitance"] = *current_capacitance_unit / *capacitance_unit_;
         } else if (*itr == "leakage_power_unit") {
             logger.infoif(++itr == end, "syntax error");
             auto current_power_unit_ = make_power_unit(*itr);
@@ -477,6 +771,27 @@ void CellLib::read(const std::string& file) {
         } else {
             // undefined token TODO:
         }
+    }
+    logger.info("Liberty thresholds %s: in(r/f)=%.3f/%.3f out(r/f)=%.3f/%.3f slew(r/f)=%.3f-%.3f/%.3f-%.3f derate=%.3f",
+                name.c_str(),
+                input_threshold_pct[RISE],
+                input_threshold_pct[FALL],
+                output_threshold_pct[RISE],
+                output_threshold_pct[FALL],
+                slew_lower_threshold_pct[RISE],
+                slew_upper_threshold_pct[RISE],
+                slew_lower_threshold_pct[FALL],
+                slew_upper_threshold_pct[FALL],
+                slew_derate_from_library);
+    if (!default_thresholds_initialized) {
+        for (auto rf : TRAN) {
+            default_input_threshold_pct[rf] = input_threshold_pct[rf];
+            default_output_threshold_pct[rf] = output_threshold_pct[rf];
+            default_slew_lower_threshold_pct[rf] = slew_lower_threshold_pct[rf];
+            default_slew_upper_threshold_pct[rf] = slew_upper_threshold_pct[rf];
+        }
+        default_slew_derate_from_library = slew_derate_from_library;
+        default_thresholds_initialized = true;
     }
 }
 
@@ -548,10 +863,11 @@ void CellLib::finish_read() {
                 non_bundle_port = port->member_ports_[0];
             } else
                 non_bundle_port = port;
-            for (auto kvp : non_bundle_port->timing_arcs_map_) {
-                // string encode_str = kvp.first;
-                // std::cout << encode_str << std::endl;
-                TimingArc* timing_arc = kvp.second;
+            // OpenSTA keeps conditional timing arcs as separate alternatives.  They
+            // must all participate in min/max propagation; collapsing by
+            // encode_arc() can pick the wrong Liberty table for paths like
+            // AOI/OAI cells with multiple "when" arcs on the same input.
+            for (TimingArc* timing_arc : non_bundle_port->timing_arcs_) {
                 port->timing_arcs_non_cond_non_bundle_.push_back(timing_arc);
             }
         }

@@ -846,7 +846,7 @@ struct Action<RulePortBeg>
 };
 
 struct RulePort: pegtl::seq<
-  pegtl::not_at<TAO_PEGTL_STRING("*D_NET")>, TAO_PEGTL_STRING("*"),
+  pegtl::not_at<TAO_PEGTL_STRING("*D_NET")>, pegtl::opt<TAO_PEGTL_STRING("*")>,
   pegtl::must<
     RuleToken, RuleSpace,
     pegtl::must<pegtl::one<'I','O','B'>>,
@@ -872,22 +872,32 @@ struct Action<RulePort>
   static bool apply(const Input& in, Spef& d){
     split_on_space(in.begin(), in.end(), d._tokens); 
 
-    d.ports.emplace_back(std::string{d._tokens[0]});
+    // Handle optional '*' prefix in port name
+    std::string port_name{d._tokens[0]};
+    int direction_idx = 1;
+    
+    if(port_name[0] == '*') {
+      port_name = port_name.substr(1);  // Remove the '*' prefix
+    }
+    
+    d.ports.emplace_back(port_name);
 
     // Set up port direction
-    switch(d._tokens[1][0]){
-      case 'O':
-        d.ports.back().direction = ConnectionDirection::OUTPUT;
-        break;
-      case 'I':
-        d.ports.back().direction = ConnectionDirection::INPUT;
-        break;
-      case 'B':
-        d.ports.back().direction = ConnectionDirection::INOUT;
-        break;
-      default:
-        return false;
-        break;
+    if(direction_idx < d._tokens.size()) {
+      switch(d._tokens[direction_idx][0]){
+        case 'O':
+          d.ports.back().direction = ConnectionDirection::OUTPUT;
+          break;
+        case 'I':
+          d.ports.back().direction = ConnectionDirection::INPUT;
+          break;
+        case 'B':
+          d.ports.back().direction = ConnectionDirection::INOUT;
+          break;
+        default:
+          return false;
+          break;
+      }
     }
 
     // TODO:  
@@ -1182,6 +1192,7 @@ inline std::string file_to_memory(const std::filesystem::path &p){
 
 // Function: read
 inline bool Spef::read(const std::filesystem::path &p){
+  clear();
 
   auto buffer {file_to_memory(p)};
 
@@ -1313,4 +1324,3 @@ inline void Spef::expand_name(Net& net){
 
 
 }; // end of namespace spef. ----------------------------------------------------------------------
-

@@ -169,9 +169,9 @@ SetDrivingCell::SetDrivingCell(const Json& json) {
         } else if (key == "-clock_fall") {
             clock_fall.emplace();
         } else if (key == "-lib_cell") {
-            // TODO: do nothing
+            lib_cell = unquoted(itr.value());
         } else if (key == "-pin") {
-            // TODO: do nothing
+            pin = unquoted(itr.value());
         } else if (key == "-min") {
             min.emplace();
         } else if (key == "-max") {

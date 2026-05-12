@@ -60,8 +60,11 @@ public:
         pins_id.emplace_back(pin_id);
     }
     const int getPinbyPortName(std::string portName) const {
-        const int portId = portMap.find(portName)->second;
-        return portId;
+        auto it = portMap.find(portName);
+        if (it == portMap.end()) {
+            return -1;
+        }
+        return it->second;
     }
 
     void setIsPolygonShape(bool isPolygonShape_) { isPolygonShape = isPolygonShape_; }
