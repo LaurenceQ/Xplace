@@ -4,14 +4,45 @@
 __pycache__/
 *.so
 build/
+build*/
+build-local/
 *.log
 *.npy
 *.csv
 *.pt
 *.pkl
 *.json
+*.bin
 result/
+logs/
+output/
+timer_r2_log/
+debug_traces/
 data/cad
 data/raw
 misc
 .venv/
+
+# Local data / external symlinks
+netlists
+synthetic_data
+sky130hd/
+EDAFlowScripts
+ML_GPUTimer
+TimingPredict
+
+# Local agent scratch files
+.codex/
+.claude/
+AGENTS.md
+CLAUDE.md
+__pycache__/
+_backup/
+
+# Local run artifacts
+run_timer_all.log
+lefRWarning.log
+log.log
+
+# cpp_to_py/gputimer is managed as a separate symlinked repo locally.
+cpp_to_py/gputimer
