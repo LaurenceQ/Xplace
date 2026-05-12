@@ -1,7 +1,9 @@
+import time
 import torch
 from cpp_to_py import gputimer, wirelength_timing_cuda
 from src.param_scheduler import MetricRecorder
 from utils import *
+import numpy as np
 
 class GPUTimer():
     def __init__(self, data, rawdb, gpdb, params, args):
@@ -12,6 +14,7 @@ class GPUTimer():
         self.recorder = MetricRecorder(**{m: [] for m in self.metrics})
         
         self.data = data
+        self.params = params
         self.net_names = data.net_names
         self.pin_names = data.pin_names
         
@@ -101,12 +104,74 @@ class GPUTimer():
         self.timer.update_rc_flute(node_lpos, False)
         self.timer.update_timing()
     
+    def update_timing_infer(self, infer_file):
+        self.timer.update_states()
+        self.timer.read_infer(infer_file)
+        torch.cuda.synchronize()
+        t0 = time.time()
+        self.timer.propagate_infer_timing()
+        torch.cuda.synchronize()
+        t1 = time.time()
+        print(f"[Timer] propagate_infer_timing: {t1 - t0:.4f}s")
+
+    def update_timing_opr_infer(self, infer_file):
+        self.timer.update_states()
+        self.timer.read_opr_gt_infer(infer_file)
+        torch.cuda.synchronize()
+        t0 = time.time()
+        self.timer.propagate_infer_timing()
+        torch.cuda.synchronize()
+        t1 = time.time()
+        print(f"[Timer] propagate_infer_timing: {t1 - t0:.4f}s")
+
+    def update_timing_dmp(self, node_pos):
+        node_lpos = (node_pos.detach() - self.node_size / 2).to(self.data.device)
+        self.conn_node_lpos = torch.cat([
+            node_lpos[self.mov_lhs:self.mov_rhs], self.fix_conn_node_lpos
+        ], dim=0)
+
+        self.timer.update_states()
+        # self.timer.update_rc(node_lpos, False, False, False)
+        print("Updating DMP RC...")
+        self.timer.update_rc_flute_dmp(node_lpos, False)
+        print("DMP RC updated.")
+        # exit(0)
+
+        # self.timer.initialize_dmp_model()
+        self.timer.update_timing_dmp()
+
+    def update_timing_dmp_spef(self):
+        if "spef" not in self.params:
+            raise ValueError("SPEF path is required for DMP SPEF timing.")
+        self.timer.read_spef(self.params["spef"])
+        self.timer.update_states()
+        self.timer.set_ideal_clock(False)
+        print("Updating DMP RC from SPEF...")
+        self.timer.init_dmp_rc_spef()
+        print("DMP SPEF RC updated.")
+        self.timer.update_timing_dmp()
+
+    def update_timing_dmp_gr(self, gr_rc_file=None):
+        gr_rc_file = gr_rc_file or self.params.get("gr_rc") or self.params.get("openroad_gr_rc")
+        if not gr_rc_file:
+            raise ValueError("OpenROAD GR RC dump path is required.")
+        self.timer.update_states()
+        self.timer.set_ideal_clock(True)
+        print(f"Updating DMP RC from OpenROAD GR RC: {gr_rc_file}")
+        self.timer.init_dmp_rc_gr(gr_rc_file)
+        print("DMP GR RC updated.")
+        self.timer.update_timing_dmp()
+
+    def debug_dump_openroad_gr_rc_net(self, gr_rc_file, net_name):
+        self.timer.update_states()
+        self.timer.debug_dump_openroad_gr_rc_net(gr_rc_file, net_name)
+
     def update_timing_calibrated(self, node_pos, record=False):
         node_lpos = (node_pos.detach() - self.node_size / 2).to(self.data.device)
         self.conn_node_lpos = torch.cat([
             node_lpos[self.mov_lhs:self.mov_rhs], self.fix_conn_node_lpos
         ], dim=0)
-        
+
         if record:
             self.timer.update_states()
             self.timer.update_rc_flute(node_lpos, True)
@@ -116,7 +181,7 @@ class GPUTimer():
             self.timer.update_states()
             self.timer.update_rc(node_lpos, False, True, True)
         self.timer.update_timing()
-        
+
     def update_timing_spef(self):
         self.timer.update_states()
         self.timer.update_rc_spef()
@@ -137,12 +202,12 @@ class GPUTimer():
         self.pin_slack = self.timer.report_pin_slack()
         return self.pin_slack
     
-    def report_path(self, ep_name=None, el = -1, verbose=False):
+    def report_path(self, ep_name=None, el=-1, rf=-1, verbose=False):
         if ep_name is not None:
             ep_idx = self.pin_names.index(ep_name)
-            path, at, delay = self.timer.report_path(ep_idx, el, verbose)
+            path, at, delay = self.timer.report_path(ep_idx, el, rf, verbose)
         else:
-            path, at, delay = self.timer.report_path(-1, el, verbose)
+            path, at, delay = self.timer.report_path(-1, el, rf, verbose)
         return path, at, delay
     
     def report_arrival(self, pin_name):
@@ -160,10 +225,49 @@ class GPUTimer():
     def report_required(self, pin_name):
         pin_idx = self.pin_names.index(pin_name)
         return self.timer.report_pin_rat()[pin_idx]
-    
+
     def report_slack(self, pin_name):
         pin_idx = self.pin_names.index(pin_name)
         return self.timer.report_pin_slack()[pin_idx]
+
+    def debug_print(self, logger):
+
+        # ============= DEBUG: Print pin timing and delays =============
+        logger.info("\n========== DEBUG: Pin AT/RAT and Delays ==========")
+        try:
+            pin_at = self.timer.report_pin_at()  # [num_pins, 4] - 4 corners
+            pin_rat = self.timer.report_pin_rat()
+
+            # Convert from internal units to nanoseconds
+            time_unit = self.timer.time_unit()
+            pin_at_ns = pin_at * (time_unit * 1e9)
+            pin_rat_ns = pin_rat * (time_unit * 1e9)
+
+            num_pins = len(self.pin_names)
+
+            # Print first 10 pins + last 10 pins for verification
+            print_indices = list(range(min(10, num_pins))) + list(range(max(0, num_pins - 10), num_pins))
+            print_indices = sorted(set(print_indices))  # Remove duplicates and sort
+
+            logger.info("PIN_ID PIN_NAME | AT_EARLY (ns) | AT_LATE (ns) | RAT_EARLY (ns) | RAT_LATE (ns)")
+
+            for idx in print_indices:
+                if idx >= num_pins:
+                    continue
+                pin_name = gputimer.pin_names[idx]
+                at_early = pin_at_ns[idx, 0].item() if pin_at_ns.shape[1] > 0 else 0.0
+                at_late = pin_at_ns[idx, 2].item() if pin_at_ns.shape[1] > 2 else 0.0
+                rat_early = pin_rat_ns[idx, 0].item() if pin_rat_ns.shape[1] > 0 else 0.0
+                rat_late = pin_rat_ns[idx, 2].item() if pin_rat_ns.shape[1] > 2 else 0.0
+
+                msg = f"[{idx:4d}] {pin_name[:50]:<50s} | {at_early:14.6e} | {at_late:14.6e} | {rat_early:15.6e} | {rat_late:14.6e}"
+                logger.info(msg)
+
+        except Exception as e:
+            logger.error(f"Error printing pin timing values: {e}")
+            import traceback
+            traceback.print_exc()
+        logger.info("==========================================\n")
 
     def get_node_critocality(self):
         pin_slacks, _ = torch.min((torch.nan_to_num(self.report_pin_slack()) * (1e-9 / self.timer.time_unit())).clamp(max=0), 1)
