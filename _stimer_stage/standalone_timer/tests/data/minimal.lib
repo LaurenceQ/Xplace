@@ -1,0 +1,67 @@
+library(minimal) {
+  capacitive_load_unit (1, pf);
+  default_input_pin_cap : 0.001;
+  default_output_pin_cap : 0.000;
+  default_inout_pin_cap : 0.002;
+
+  lu_table_template(delay_template) {
+    variable_1 : input_net_transition;
+    variable_2 : total_output_net_capacitance;
+    index_1 ("0.01, 0.10");
+    index_2 ("0.001, 0.010");
+  }
+
+  cell(NAND2_X1) {
+    pin(A) {
+      direction : input;
+      capacitance : 0.002;
+      rise_capacitance_range (0.001, 0.003);
+      fall_capacitance : 0.004;
+    }
+
+    pin(B) {
+      direction : input;
+      rise_capacitance : 0.005;
+      fall_capacitance_range (0.006, 0.007);
+    }
+
+    pin(Z) {
+      direction : output;
+      function : "!(A & B)";
+      timing() {
+        related_pin : "A";
+        timing_sense : negative_unate;
+        timing_type : combinational;
+        cell_rise(delay_template) {
+          values ("0.011, 0.012", "0.013, 0.014");
+        }
+        cell_fall(delay_template) {
+          values ("0.021, 0.022", "0.023, 0.024");
+        }
+        rise_transition(delay_template) {
+          values ("0.031, 0.032", "0.033, 0.034");
+        }
+        fall_transition(delay_template) {
+          values ("0.041, 0.042", "0.043, 0.044");
+        }
+      }
+      timing() {
+        related_pin : "B";
+        timing_sense : negative_unate;
+        timing_type : combinational;
+        cell_rise(delay_template) {
+          values ("0.111, 0.112", "0.113, 0.114");
+        }
+        cell_fall(delay_template) {
+          values ("0.121, 0.122", "0.123, 0.124");
+        }
+        rise_transition(delay_template) {
+          values ("0.131, 0.132", "0.133, 0.134");
+        }
+        fall_transition(delay_template) {
+          values ("0.141, 0.142", "0.143, 0.144");
+        }
+      }
+    }
+  }
+}
