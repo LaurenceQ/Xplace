@@ -1,6 +1,7 @@
 file(GLOB_RECURSE SRC_FILES_IO_PARSER ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
 
-pybind11_add_module(io_parser SHARED ${SRC_FILES_IO_PARSER})
+pybind11_add_module(io_parser SHARED NO_EXTRAS ${SRC_FILES_IO_PARSER})
+set_target_properties(io_parser PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
 target_include_directories(
     io_parser PUBLIC ${PROJECT_SOURCE_DIR}/cpp_to_py ${TORCH_INCLUDE_DIRS})
 target_link_libraries(

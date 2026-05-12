@@ -17,7 +17,8 @@ target_link_libraries(ggr PRIVATE torch ${TORCH_PYTHON_LIBRARY} xplace_common fl
 target_compile_options(ggr PRIVATE -fPIC)
 target_compile_options(ggr PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>")
 
-pybind11_add_module(gpugr MODULE PyBindCppMain.cpp)
+pybind11_add_module(gpugr MODULE NO_EXTRAS PyBindCppMain.cpp)
+set_target_properties(gpugr PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
 
 target_include_directories(gpugr PRIVATE ${TORCH_INCLUDE_DIRS} ${PROJECT_SOURCE_DIR}/cpp_to_py ${FLUTE_INCLUDE_DIR})
 target_link_libraries(gpugr PRIVATE torch ${TORCH_PYTHON_LIBRARY} xplace_common flute io_parser ggr)

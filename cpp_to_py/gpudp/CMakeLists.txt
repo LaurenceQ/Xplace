@@ -21,7 +21,8 @@ target_include_directories(dp PRIVATE ${TORCH_INCLUDE_DIRS} ${PROJECT_SOURCE_DIR
 target_link_libraries(dp PRIVATE torch ${TORCH_PYTHON_LIBRARY} xplace_common OpenMP::OpenMP_CXX pthread CUDA::curand)
 target_compile_options(dp PRIVATE -fPIC)
 
-pybind11_add_module(gpudp MODULE PyBindCppMain.cpp)
+pybind11_add_module(gpudp MODULE NO_EXTRAS PyBindCppMain.cpp)
+set_target_properties(gpudp PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
 
 target_include_directories(gpudp PRIVATE ${TORCH_INCLUDE_DIRS} ${PROJECT_SOURCE_DIR}/cpp_to_py)
 target_link_libraries(gpudp PRIVATE torch ${TORCH_PYTHON_LIBRARY} xplace_common io_parser dp)

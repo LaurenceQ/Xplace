@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 if (NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  set(CMAKE_CUDA_ARCHITECTURES 80 86 CACHE STRING "CUDA architectures" FORCE)
+  set(CMAKE_CUDA_ARCHITECTURES 80 CACHE STRING "CUDA architectures" FORCE)
 endif()
 
 project(xplace LANGUAGES C CXX CUDA)
@@ -22,12 +22,12 @@ set(XPLACE_LIB_DIR ${PROJECT_SOURCE_DIR}/cpp_to_py/cpybin)
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 set(CMAKE_INSTALL_RPATH ${XPLACE_LIB_DIR})
 
-# set _GLIBCXX_USE_CXX11_ABI for torch
-if(NOT CMAKE_CXX_ABI)
-    set(CMAKE_CXX_ABI 0 CACHE STRING
-        "Choose the value for _GLIBCXX_USE_CXX11_ABI, options are: 0|1."
-        FORCE)
-endif(NOT CMAKE_CXX_ABI)
+# set _GLIBCXX_USE_CXX11_ABI for torch.
+# The gnn environment uses PyTorch with the new C++11 ABI
+# (torch._C._GLIBCXX_USE_CXX11_ABI == True), so compiled extensions must use 1.
+set(CMAKE_CXX_ABI 1 CACHE STRING
+    "Choose the value for _GLIBCXX_USE_CXX11_ABI, options are: 0|1."
+    FORCE)
 message(STATUS "CMAKE_CXX_ABI: _GLIBCXX_USE_CXX11_ABI=${CMAKE_CXX_ABI}")
 add_definitions(-D_GLIBCXX_USE_CXX11_ABI=${CMAKE_CXX_ABI})
 
@@ -141,7 +141,8 @@ function(add_pytorch_extension target_name)
     endif()
   endif()
   list(FILTER ARG_UNPARSED_ARGUMENTS EXCLUDE REGEX ".*cu$")
-  pybind11_add_module(${target_name} MODULE ${ARG_UNPARSED_ARGUMENTS})
+  pybind11_add_module(${target_name} MODULE NO_EXTRAS ${ARG_UNPARSED_ARGUMENTS})
+  set_target_properties(${target_name} PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
   target_include_directories(${target_name} PRIVATE ${ARG_EXTRA_INCLUDE_DIRS} ${TORCH_INCLUDE_DIRS})
   if (TORCH_ENABLE_CUDA AND CUDA_SRCS)
     target_link_libraries(${target_name} PRIVATE ${target_name}_cuda_tmp ${ARG_EXTRA_LINK_LIBRARIES} torch ${TORCH_PYTHON_LIBRARY})
