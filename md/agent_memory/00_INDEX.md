@@ -12,7 +12,8 @@ the question; do not grep all logs first.
   `06_case_status.md`, then `05_current_case_debugging.md`.
 - bsg/NVDLA/ariane skip-fanout: `07_skip_fanout_policy.md`, then
   `05_current_case_debugging.md`.
-- DMP branch / arc-level: `08_dmp_fallback_branch.md`.
+- DMP branch / arc-level: `08_dmp_fallback_branch.md`, then
+  `12_dmp_arc_vs_fallback_profile.md`.
 - Speed or memory: `09_speed_memory_status.md`.
 - Commands and paths: `04_tools.md`.
 - Trap check before edits: `03_pitfalls.md`.
@@ -32,6 +33,8 @@ the question; do not grep all logs first.
 - `10_artifacts.md`: important summaries, logs, and evidence locations.
 - `11_memory_policy.md`: rules for adding, deleting, merging, and splitting
   memory notes after important conclusions.
+- `12_dmp_arc_vs_fallback_profile.md`: arc-level/fallback kernel timings,
+  stage timings, and WNS/TNS consistency.
 
 ## Do Not Confuse
 

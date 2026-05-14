@@ -30,20 +30,23 @@ def load_design(args,logger):
         if not arg_dict.get('gr_rc', '') and not arg_dict.get('route_segments', ''):
             libs = [lib for lib in libs if 'ram' not in lib.lower()]
 
-    # platformPath += '/ASAP7' if platformPath != '' else ''
     direct_rc_mode = bool(arg_dict.get('gr_rc', '') or arg_dict.get('route_segments', ''))
+    design_dir = os.path.join(designPath, designName)
+    plain_def = os.path.join(design_dir, designName + ".def")
+    plain_sdc = os.path.join(design_dir, designName + ".sdc")
+    uses_plain_design_files = os.path.exists(plain_def) and os.path.exists(plain_sdc)
 
-    if "ASAP7" in platformPath:
+    if uses_plain_design_files:
         params = {
             "benchmark": "gzz",
             "design_name": designName,
             "lefs": lefs,
             "libs": libs,
-            "def": designPath + "/" + designName + "/" + designName + ".def",
-            "sdc": designPath + "/" + designName + "/" + designName + ".sdc",
+            "def": plain_def,
+            "sdc": plain_sdc,
         }
         if not direct_rc_mode:
-            params["spef"] = designPath + "/" + designName + "/" + designName + ".spef"
+            params["spef"] = os.path.join(design_dir, designName + ".spef")
     else :
         target_techlib_path = "/research/d7/ascstd/qkduan25/TimingPredict/data/netlists/techlib"
         target_lef = os.path.join(target_techlib_path, "merged_unpadded.lef")
