@@ -61,7 +61,7 @@ enum DmpKernelProfileId {
 
 static void dmp_init_kernel_profiles(DmpKernelProfile profiles[DMP_PROFILE_COUNT])
 {
-    profiles[DMP_PROFILE_GATE_DELAY_SLEW].name = "propagateFusedGateNetDelaySlewAndAT_dmp";
+    profiles[DMP_PROFILE_GATE_DELAY_SLEW].name = "propagateDirectGateNetDelaySlewAndAT_dmp";
     profiles[DMP_PROFILE_DIRECT_NET].name = "propagateNetArcSlewDelay_dmp";
     profiles[DMP_PROFILE_NET_DELAY_FINALIZE].name = "finalizeNetDelayWinnersAndPropagateAT_dmp";
     profiles[DMP_PROFILE_AT_FINALIZE].name = "finalizePinWinners_dmp";
@@ -248,7 +248,7 @@ static DmpForwardArcLevels build_forward_arc_levels(dmp_model* dmp_db,
     }
 
     if (log_schedule) {
-        printf("[DMP FORWARD SCHEDULE] built levels=%zu gate_arcs=%zu net_arcs=%zu direct_net_arcs=%zu max_gate=%d@L%d max_net=%d@L%d max_direct_net=%d@L%d scratch_capacity_items=%d mode=fused\n",
+        printf("[DMP FORWARD SCHEDULE] built levels=%zu gate_arcs=%zu net_arcs=%zu direct_net_arcs=%zu max_gate=%d@L%d max_net=%d@L%d max_direct_net=%d@L%d scratch_capacity_items=%d mode=direct\n",
                result.gate_arc_end.empty() ? 0 : result.gate_arc_end.size() - 1,
                result.gate_arc_list.size(),
                result.net_arc_list.size(),
@@ -492,12 +492,12 @@ void update_timing_dmp_cuda(GPUTimer* timer){
             const int gate_blocks = DMP_TIMING_BLOCK_NUMBER(gate_work_items);
             cudaEvent_t kernel_start, kernel_stop;
             start_kernel_profile(&kernel_start, &kernel_stop);
-            propagateFusedGateNetDelaySlewAndAT_dmp<<<gate_blocks, DMP_TIMING_BLOCK_SIZE>>>(dmp_db,
+            propagateDirectGateNetDelaySlewAndAT_dmp<<<gate_blocks, DMP_TIMING_BLOCK_SIZE>>>(dmp_db,
                                                                                             forward_arc_levels->d_forward_gate_arc_list + level_gate_start,
                                                                                             num_gate_arcs_level,
                                                                                             d_gate_net_pair_debug_counts);
             finish_forward_cuda(DMP_PROFILE_GATE_DELAY_SLEW,
-                                "fused-gate-net-delay-slew-at",
+                                "direct-gate-net-delay-slew-at",
                                 gate_work_items,
                                 gate_blocks,
                                 kernel_start,
@@ -588,7 +588,7 @@ void update_timing_dmp_cuda(GPUTimer* timer){
                              cudaMemcpyDeviceToHost));
     }
     if (profile_kernels) {
-        printf("[DMP TIMING PROFILE] forward levels=%d mode=fused gate=%d direct_net=%d net_delay_finalize=%d at_finalize=%d arc_test=%d total_ms=%.3f max_level_ms=%.3f@L%d\n",
+        printf("[DMP TIMING PROFILE] forward levels=%d mode=direct gate=%d direct_net=%d net_delay_finalize=%d at_finalize=%d arc_test=%d total_ms=%.3f max_level_ms=%.3f@L%d\n",
                forward_launches,
                forward_gate_launches,
                forward_direct_net_launches,

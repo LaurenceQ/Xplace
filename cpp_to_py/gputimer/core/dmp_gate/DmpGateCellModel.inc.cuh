@@ -188,6 +188,7 @@ struct DmpGateLaneContext {
     double driver_vl;
     double driver_vh;
     double driver_derate;
+    int driver_library_id;
     bool valid;
 };
 
@@ -203,7 +204,16 @@ __device__ __forceinline__ DmpGateLaneContext dmpMakeGateLaneContext(dmp_model* 
     ctx.slew_lut = {};
     ctx.input_slew = input_slew;
     ctx.valid = false;
-    dmpLoadSlotThresholds(dmp_db, pin_idx, ctx.driver_vth, ctx.driver_vl, ctx.driver_vh, ctx.driver_derate);
+    const int attr = pin_idx & (NUM_ATTR - 1);
+    const int pin_id = pin_idx / NUM_ATTR;
+    ctx.driver_library_id = dmpPinLibraryId(dmp_db, pin_id, attr);
+    dmpDriverLibraryThresholds(dmp_db,
+                               ctx.driver_library_id,
+                               attr,
+                               ctx.driver_vth,
+                               ctx.driver_vl,
+                               ctx.driver_vh,
+                               ctx.driver_derate);
 
     if (ctx.allocator == nullptr ||
         timing_id < 0 || input_rf < 0 || output_rf < 0 ||
@@ -295,4 +305,3 @@ __device__ __forceinline__ void dmpGateDelaysWithCtxFloat(const DmpGateLaneConte
     slew = table_slew * driver_derate;
     t_vl = t_vth - slew * (driver_vth - driver_vl) / (driver_vh - driver_vl);
 }
-

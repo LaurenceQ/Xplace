@@ -8,7 +8,7 @@ __global__ void propagatePinTests_dmp(dmp_model* dmp_db, int level_start_offset,
 __global__ void propagateNetArcSlewDelay_dmp(dmp_model* dmp_db,
                                              const index_type* level_arc_list,
                                              int num_level_arcs);
-__global__ void propagateFusedGateNetDelaySlewAndAT_dmp(dmp_model* dmp_db,
+__global__ void propagateDirectGateNetDelaySlewAndAT_dmp(dmp_model* dmp_db,
                                                         const index_type* level_arc_list,
                                                         int num_level_arcs,
                                                         unsigned long long* debug_counts);

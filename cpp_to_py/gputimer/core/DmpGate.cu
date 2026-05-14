@@ -12,10 +12,8 @@ namespace gt {
 
 #include "dmp_gate/DmpGateCommon.inc.cuh"
 #include "dmp_gate/DmpGateCellModel.inc.cuh"
-#include "dmp_gate/DmpGateRootSolve.inc.cuh"
-#include "dmp_gate/DmpGateDrivingCell.inc.cuh"
 #include "dmp_gate/DmpGatePropagation.inc.cuh"
-#include "dmp_gate/DmpGateFusedFallback.inc.cuh"
+#include "dmp_gate/DmpGateDirect.inc.cuh"
 #include "dmp_gate/DmpGateHost.inc.cuh"
 
 } // namespace gt

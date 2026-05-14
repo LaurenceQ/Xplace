@@ -407,6 +407,7 @@ struct DmpLocalGateState {
     double driver_vl;
     double driver_vh;
     double driver_derate;
+    int driver_library_id;
     bool dmp_valid;
 };
 
@@ -422,34 +423,14 @@ __device__ __forceinline__ DmpGateLaneContext dmpMakeGateLaneContextDirect(dmp_m
     ctx.slew_lut = {};
     ctx.input_slew = input_slew;
     ctx.valid = false;
-    ctx.driver_vth =
-        dmpTimingThresholdArrayValue(dmp_db->dmp_timing_output_thresholds,
-                                     timing_id,
-                                     output_rf,
-                                     dmpThresholdArrayValue(dmp_db->dmp_output_thresholds,
-                                                            to_attr,
-                                                            dmp_db->vth_));
-    ctx.driver_vl =
-        dmpTimingThresholdArrayValue(dmp_db->dmp_timing_slew_lower_thresholds,
-                                     timing_id,
-                                     output_rf,
-                                     dmpThresholdArrayValue(dmp_db->dmp_slew_lower_thresholds,
-                                                            to_attr,
-                                                            dmp_db->vl_));
-    ctx.driver_vh =
-        dmpTimingThresholdArrayValue(dmp_db->dmp_timing_slew_upper_thresholds,
-                                     timing_id,
-                                     output_rf,
-                                     dmpThresholdArrayValue(dmp_db->dmp_slew_upper_thresholds,
-                                                            to_attr,
-                                                            dmp_db->vh_));
-    ctx.driver_derate =
-        dmpTimingThresholdArrayValue(dmp_db->dmp_timing_slew_derates,
-                                     timing_id,
-                                     output_rf,
-                                     dmpThresholdArrayValue(dmp_db->dmp_slew_derates,
-                                                            to_attr,
-                                                            dmp_db->slew_derate_));
+    ctx.driver_library_id = dmpTimingLibraryId(dmp_db, timing_id);
+    dmpDriverLibraryThresholds(dmp_db,
+                               ctx.driver_library_id,
+                               to_attr,
+                               ctx.driver_vth,
+                               ctx.driver_vl,
+                               ctx.driver_vh,
+                               ctx.driver_derate);
 
     if (ctx.allocator == nullptr ||
         timing_id < 0 || input_rf < 0 || output_rf < 0 ||
@@ -750,6 +731,7 @@ __device__ __forceinline__ void dmpInitLocalGateState(dmp_model* dmp_db,
     state.driver_vl = dmp_db->vl_;
     state.driver_vh = dmp_db->vh_;
     state.driver_derate = dmp_db->slew_derate_;
+    state.driver_library_id = -1;
     state.dmp_valid = false;
 }
 
@@ -766,6 +748,7 @@ __device__ __forceinline__ bool dmpComputeLocalGateStateForSlot(dmp_model* dmp_d
     state.driver_vl = ctx.driver_vl;
     state.driver_vh = ctx.driver_vh;
     state.driver_derate = ctx.driver_derate;
+    state.driver_library_id = ctx.driver_library_id;
     state.c1 = dmp_db->C1[rc_slot];
     state.c2 = dmp_db->C2[rc_slot];
     state.rpi = dmp_db->r_pi[rc_slot];
@@ -975,6 +958,7 @@ __device__ __forceinline__ void dmpLoadDelaySlewFromLocalState(dmp_model* dmp_db
     if (!driver_valid || elmore == 0.0 || elmore < drvr_slew * 1e-3) {
         dmpThresholdAdjustCuda(dmp_db, to_pin_id, load_attr,
                                driver_vth, driver_vl, driver_vh, driver_derate,
+                               state.driver_library_id,
                                wire_delay, load_slew);
         return;
     }
@@ -1059,6 +1043,7 @@ __device__ __forceinline__ void dmpLoadDelaySlewFromLocalState(dmp_model* dmp_db
     load_slew = slew1;
     dmpThresholdAdjustCuda(dmp_db, to_pin_id, load_attr,
                            driver_vth, driver_vl, driver_vh, driver_derate,
+                           state.driver_library_id,
                            wire_delay, load_slew);
 }
 
@@ -1140,7 +1125,14 @@ __device__ void dmp_model::propagateLoadSlewDelay() {
             return;
         }
         double driver_vth, driver_vl, driver_vh, driver_derate;
-        dmpLoadSlotThresholds(this, from_slot, driver_vth, driver_vl, driver_vh, driver_derate);
+        const int driver_library_id = dmpPinLibraryId(this, from_pin_id, attr);
+        dmpDriverLibraryThresholds(this,
+                                   driver_library_id,
+                                   attr,
+                                   driver_vth,
+                                   driver_vl,
+                                   driver_vh,
+                                   driver_derate);
         final_delay = elmore;
         final_slew = source_slew;
         if (pin_is_primary_input != nullptr && pin_is_primary_input[from_pin_id]) {
@@ -1159,6 +1151,7 @@ __device__ void dmp_model::propagateLoadSlewDelay() {
                                    driver_vl,
                                    driver_vh,
                                    driver_derate,
+                                   driver_library_id,
                                    final_delay,
                                    final_slew);
         }
@@ -1194,7 +1187,7 @@ __device__ void dmp_model::propagateLoadSlewDelay() {
     }
 }
 
-__global__ void propagateFusedGateNetDelaySlewAndAT_dmp(dmp_model* dmp_db,
+__global__ void propagateDirectGateNetDelaySlewAndAT_dmp(dmp_model* dmp_db,
                                                         const index_type* level_arc_list,
                                                         int num_level_arcs,
                                                         unsigned long long* debug_counts) {

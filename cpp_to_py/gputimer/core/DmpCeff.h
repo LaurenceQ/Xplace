@@ -40,14 +40,13 @@ struct dmp_model {
     const float *dmp_slew_lower_thresholds;
     const float *dmp_slew_upper_thresholds;
     const float *dmp_slew_derates;
-    const float *dmp_timing_output_thresholds;
-    const float *dmp_timing_slew_lower_thresholds;
-    const float *dmp_timing_slew_upper_thresholds;
-    const float *dmp_timing_slew_derates;
-    const float *dmp_pin_input_thresholds;
-    const float *dmp_pin_slew_lower_thresholds;
-    const float *dmp_pin_slew_upper_thresholds;
-    const float *dmp_pin_slew_derates;
+    const int *dmp_timing_library_ids;
+    const int *dmp_pin_library_ids;
+    const float *dmp_library_input_thresholds;
+    const float *dmp_library_output_thresholds;
+    const float *dmp_library_slew_lower_thresholds;
+    const float *dmp_library_slew_upper_thresholds;
+    const float *dmp_library_slew_derates;
     int *pin_is_primary_input;
     int *pin_is_clk;
     bool ideal_clock;
@@ -110,14 +109,13 @@ struct dmp_model {
                   driving_cell_input_slew(nullptr),
                   dmp_input_thresholds(nullptr), dmp_output_thresholds(nullptr),
                   dmp_slew_lower_thresholds(nullptr), dmp_slew_upper_thresholds(nullptr),
-                  dmp_slew_derates(nullptr), dmp_timing_output_thresholds(nullptr),
-                  dmp_timing_slew_lower_thresholds(nullptr),
-                  dmp_timing_slew_upper_thresholds(nullptr),
-                  dmp_timing_slew_derates(nullptr),
-                  dmp_pin_input_thresholds(nullptr),
-                  dmp_pin_slew_lower_thresholds(nullptr),
-                  dmp_pin_slew_upper_thresholds(nullptr),
-                  dmp_pin_slew_derates(nullptr), pin_is_primary_input(nullptr),
+                  dmp_slew_derates(nullptr), dmp_timing_library_ids(nullptr),
+                  dmp_pin_library_ids(nullptr),
+                  dmp_library_input_thresholds(nullptr),
+                  dmp_library_output_thresholds(nullptr),
+                  dmp_library_slew_lower_thresholds(nullptr),
+                  dmp_library_slew_upper_thresholds(nullptr),
+                  dmp_library_slew_derates(nullptr), pin_is_primary_input(nullptr),
                   pin_is_clk(nullptr), ideal_clock(false),
                   pinSlew(nullptr), elmore_delay(nullptr), pinAt(nullptr), pinRat(nullptr),
                   testRelatedAT(nullptr), testRAT(nullptr), testConstraint(nullptr),

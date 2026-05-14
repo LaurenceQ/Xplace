@@ -205,14 +205,13 @@ public:
     const float* dmp_slew_lower_thresholds;
     const float* dmp_slew_upper_thresholds;
     const float* dmp_slew_derates;
-    const float* dmp_timing_output_thresholds;
-    const float* dmp_timing_slew_lower_thresholds;
-    const float* dmp_timing_slew_upper_thresholds;
-    const float* dmp_timing_slew_derates;
-    const float* dmp_pin_input_thresholds;
-    const float* dmp_pin_slew_lower_thresholds;
-    const float* dmp_pin_slew_upper_thresholds;
-    const float* dmp_pin_slew_derates;
+    const int* dmp_timing_library_ids;
+    const int* dmp_pin_library_ids;
+    const float* dmp_library_input_thresholds;
+    const float* dmp_library_output_thresholds;
+    const float* dmp_library_slew_lower_thresholds;
+    const float* dmp_library_slew_upper_thresholds;
+    const float* dmp_library_slew_derates;
 
     /* row info */
     int num_nets;

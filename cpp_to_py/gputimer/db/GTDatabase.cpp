@@ -13,11 +13,13 @@
 #include "io_parser/gp/GPDatabase.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <iterator>
+#include <map>
 #include <unordered_map>
 
 namespace gt {
@@ -245,9 +247,50 @@ void GTDatabase::ExtractTimingGraph() {
     extract_profile.log("thresholds");
 
     //  Flatten Liberty Cell Timing
+    std::map<std::array<float, 9>, int> dmp_library_id_by_thresholds;
+    std::unordered_map<const LibertyCell*, int> dmp_library_id_by_cell;
+    auto register_dmp_library = [&](const LibertyCell* liberty_cell) -> int {
+        if (liberty_cell == nullptr) {
+            return -1;
+        }
+        auto cached_cell = dmp_library_id_by_cell.find(liberty_cell);
+        if (cached_cell != dmp_library_id_by_cell.end()) {
+            return cached_cell->second;
+        }
+        std::array<float, 9> threshold_key = {
+            liberty_cell->input_threshold_pct[RISE],
+            liberty_cell->input_threshold_pct[FALL],
+            liberty_cell->output_threshold_pct[RISE],
+            liberty_cell->output_threshold_pct[FALL],
+            liberty_cell->slew_lower_threshold_pct[RISE],
+            liberty_cell->slew_lower_threshold_pct[FALL],
+            liberty_cell->slew_upper_threshold_pct[RISE],
+            liberty_cell->slew_upper_threshold_pct[FALL],
+            liberty_cell->slew_derate_from_library,
+        };
+        auto cached_thresholds = dmp_library_id_by_thresholds.find(threshold_key);
+        if (cached_thresholds != dmp_library_id_by_thresholds.end()) {
+            dmp_library_id_by_cell.emplace(liberty_cell, cached_thresholds->second);
+            return cached_thresholds->second;
+        }
+        const int lib_id = static_cast<int>(dmp_library_input_thresholds.size() / MAX_TRAN);
+        dmp_library_id_by_thresholds.emplace(threshold_key, lib_id);
+        dmp_library_id_by_cell.emplace(liberty_cell, lib_id);
+        for (auto rf : TRAN) {
+            dmp_library_input_thresholds.push_back(liberty_cell->input_threshold_pct[rf]);
+            dmp_library_output_thresholds.push_back(liberty_cell->output_threshold_pct[rf]);
+            dmp_library_slew_lower_thresholds.push_back(liberty_cell->slew_lower_threshold_pct[rf]);
+            dmp_library_slew_upper_thresholds.push_back(liberty_cell->slew_upper_threshold_pct[rf]);
+            dmp_library_slew_derates.push_back(liberty_cell->slew_derate_from_library);
+        }
+        return lib_id;
+    };
     for (db::CellType* cell_type : rawdb.celltypes) {
         string cell_type_name = cell_type->name;
         array<LibertyCell*, 2> liberty_cell_view = {cell_libs_[MIN]->get_cell(cell_type_name), cell_libs_[MAX]->get_cell(cell_type_name)};
+        for_each_el(el) {
+            register_dmp_library(liberty_cell_view[el]);
+        }
         if (!liberty_cell_view[MIN] || !liberty_cell_view[MAX]) {
             liberty_cell_type2port_list_end.push_back(liberty_cell_type2port_list_end.back());
             continue;
@@ -279,24 +322,13 @@ void GTDatabase::ExtractTimingGraph() {
         }
     }
     extract_profile.log("flatten_liberty");
-    dmp_timing_output_thresholds.resize(liberty_timing_arcs.size() * MAX_TRAN, 0.5f);
-    dmp_timing_slew_lower_thresholds.resize(liberty_timing_arcs.size() * MAX_TRAN, 0.2f);
-    dmp_timing_slew_upper_thresholds.resize(liberty_timing_arcs.size() * MAX_TRAN, 0.8f);
-    dmp_timing_slew_derates.resize(liberty_timing_arcs.size() * MAX_TRAN, 1.0f);
+    dmp_timing_library_ids.resize(liberty_timing_arcs.size(), -1);
     for (size_t timing_id = 0; timing_id < liberty_timing_arcs.size(); ++timing_id) {
         TimingArc* timing_arc = liberty_timing_arcs[timing_id];
         LibertyCell* liberty_cell = timing_arc && timing_arc->liberty_port_
                                         ? timing_arc->liberty_port_->cell_
                                         : nullptr;
-        for (auto rf : TRAN) {
-            const int idx = static_cast<int>(timing_id) * MAX_TRAN + static_cast<int>(rf);
-            if (liberty_cell) {
-                dmp_timing_output_thresholds[idx] = liberty_cell->output_threshold_pct[rf];
-                dmp_timing_slew_lower_thresholds[idx] = liberty_cell->slew_lower_threshold_pct[rf];
-                dmp_timing_slew_upper_thresholds[idx] = liberty_cell->slew_upper_threshold_pct[rf];
-                dmp_timing_slew_derates[idx] = liberty_cell->slew_derate_from_library;
-            }
-        }
+        dmp_timing_library_ids[timing_id] = register_dmp_library(liberty_cell);
     }
     extract_profile.log("liberty_threshold_vectors");
 
@@ -338,25 +370,10 @@ void GTDatabase::ExtractTimingGraph() {
     extract_profile.log("pin_name_map");
     pin_id2cell_type_id.resize(num_pins);
     pin_id2port_offset_id.resize(num_pins);
+    dmp_pin_library_ids.assign(num_pins * MAX_SPLIT, -1);
     pin_is_clk.assign(num_pins, 0);
     STA_pins.resize(num_pins, nullptr);
     pin_capacitance.resize(2 * 3 * num_pins, 0.0f);
-    dmp_pin_input_thresholds.resize(num_pins * MAX_TRAN, 0.5f);
-    dmp_pin_slew_lower_thresholds.resize(num_pins * MAX_TRAN, 0.2f);
-    dmp_pin_slew_upper_thresholds.resize(num_pins * MAX_TRAN, 0.8f);
-    dmp_pin_slew_derates.resize(num_pins * MAX_TRAN, 1.0f);
-    for (int pin_id = 0; pin_id < num_pins; ++pin_id) {
-        for (auto rf : TRAN) {
-            const int attr = static_cast<int>(rf);
-            const int pin_rf = pin_id * MAX_TRAN + attr;
-            const int default_attr = attr;
-            dmp_pin_input_thresholds[pin_rf] = dmp_input_thresholds[default_attr];
-            dmp_pin_slew_lower_thresholds[pin_rf] = dmp_slew_lower_thresholds[default_attr];
-            dmp_pin_slew_upper_thresholds[pin_rf] = dmp_slew_upper_thresholds[default_attr];
-            dmp_pin_slew_derates[pin_rf] = dmp_slew_derates[default_attr];
-        }
-    }
-    extract_profile.log("default_pin_thresholds");
     for (auto& gppin : gpdb.getPins()) {
         int pin_id = gppin.getId();
         string pin_name = gppin.getName();
@@ -378,16 +395,14 @@ void GTDatabase::ExtractTimingGraph() {
             auto& dbcell = rawdb.cells[ori_node_id];
             LibertyCell* liberty_cell = dbcell->ctype()->liberty_cell;
             pin_id2cell_type_id[pin_id] = dbcell->ctype()->libcell();
+            for_each_el(el) {
+                LibertyCell* corner_liberty_cell = cell_libs_[el]->get_cell(dbcell->ctype()->name);
+                dmp_pin_library_ids[pin_id * MAX_SPLIT + static_cast<int>(el)] =
+                    register_dmp_library(corner_liberty_cell);
+            }
             if (!liberty_cell) {
                 pin_id2port_offset_id[pin_id] = 0;
                 continue;
-            }
-            for (auto rf : TRAN) {
-                const int pin_rf = pin_id * MAX_TRAN + static_cast<int>(rf);
-                dmp_pin_input_thresholds[pin_rf] = liberty_cell->input_threshold_pct[rf];
-                dmp_pin_slew_lower_thresholds[pin_rf] = liberty_cell->slew_lower_threshold_pct[rf];
-                dmp_pin_slew_upper_thresholds[pin_rf] = liberty_cell->slew_upper_threshold_pct[rf];
-                dmp_pin_slew_derates[pin_rf] = liberty_cell->slew_derate_from_library;
             }
             pin_id2port_offset_id[pin_id] = liberty_cell->ports_map_[pin_macro_name];
             int pin_port_offset = pin_id2port_offset_id[pin_id];
@@ -651,14 +666,13 @@ void GTDatabase::ExtractTimingGraph() {
     timing_raw_db.dmp_slew_lower_thresholds = torch::from_blob(dmp_slew_lower_thresholds.data(), {NUM_ATTR}, float_options).contiguous().to(device);
     timing_raw_db.dmp_slew_upper_thresholds = torch::from_blob(dmp_slew_upper_thresholds.data(), {NUM_ATTR}, float_options).contiguous().to(device);
     timing_raw_db.dmp_slew_derates = torch::from_blob(dmp_slew_derates.data(), {NUM_ATTR}, float_options).contiguous().to(device);
-    timing_raw_db.dmp_timing_output_thresholds = torch::from_blob(dmp_timing_output_thresholds.data(), {static_cast<int>(dmp_timing_output_thresholds.size())}, float_options).contiguous().to(device);
-    timing_raw_db.dmp_timing_slew_lower_thresholds = torch::from_blob(dmp_timing_slew_lower_thresholds.data(), {static_cast<int>(dmp_timing_slew_lower_thresholds.size())}, float_options).contiguous().to(device);
-    timing_raw_db.dmp_timing_slew_upper_thresholds = torch::from_blob(dmp_timing_slew_upper_thresholds.data(), {static_cast<int>(dmp_timing_slew_upper_thresholds.size())}, float_options).contiguous().to(device);
-    timing_raw_db.dmp_timing_slew_derates = torch::from_blob(dmp_timing_slew_derates.data(), {static_cast<int>(dmp_timing_slew_derates.size())}, float_options).contiguous().to(device);
-    timing_raw_db.dmp_pin_input_thresholds = torch::from_blob(dmp_pin_input_thresholds.data(), {static_cast<int>(dmp_pin_input_thresholds.size())}, float_options).contiguous().to(device);
-    timing_raw_db.dmp_pin_slew_lower_thresholds = torch::from_blob(dmp_pin_slew_lower_thresholds.data(), {static_cast<int>(dmp_pin_slew_lower_thresholds.size())}, float_options).contiguous().to(device);
-    timing_raw_db.dmp_pin_slew_upper_thresholds = torch::from_blob(dmp_pin_slew_upper_thresholds.data(), {static_cast<int>(dmp_pin_slew_upper_thresholds.size())}, float_options).contiguous().to(device);
-    timing_raw_db.dmp_pin_slew_derates = torch::from_blob(dmp_pin_slew_derates.data(), {static_cast<int>(dmp_pin_slew_derates.size())}, float_options).contiguous().to(device);
+    timing_raw_db.dmp_timing_library_ids = torch::from_blob(dmp_timing_library_ids.data(), {static_cast<int>(dmp_timing_library_ids.size())}, options).contiguous().to(device);
+    timing_raw_db.dmp_pin_library_ids = torch::from_blob(dmp_pin_library_ids.data(), {static_cast<int>(dmp_pin_library_ids.size())}, options).contiguous().to(device);
+    timing_raw_db.dmp_library_input_thresholds = torch::from_blob(dmp_library_input_thresholds.data(), {static_cast<int>(dmp_library_input_thresholds.size())}, float_options).contiguous().to(device);
+    timing_raw_db.dmp_library_output_thresholds = torch::from_blob(dmp_library_output_thresholds.data(), {static_cast<int>(dmp_library_output_thresholds.size())}, float_options).contiguous().to(device);
+    timing_raw_db.dmp_library_slew_lower_thresholds = torch::from_blob(dmp_library_slew_lower_thresholds.data(), {static_cast<int>(dmp_library_slew_lower_thresholds.size())}, float_options).contiguous().to(device);
+    timing_raw_db.dmp_library_slew_upper_thresholds = torch::from_blob(dmp_library_slew_upper_thresholds.data(), {static_cast<int>(dmp_library_slew_upper_thresholds.size())}, float_options).contiguous().to(device);
+    timing_raw_db.dmp_library_slew_derates = torch::from_blob(dmp_library_slew_derates.data(), {static_cast<int>(dmp_library_slew_derates.size())}, float_options).contiguous().to(device);
     gputimer_log_cuda_mem_info("GTDatabase::ExtractTimingGraph after_liberty_tensors");
     extract_profile.log("liberty_tensors");
 

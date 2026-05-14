@@ -21,6 +21,8 @@ peak sampled GPU memory about 77.3/77.7 GiB
 
 - Removed dead per-slot thresholds and waveform scratch arrays
   (`k*`, `p*`, `A/B/D`, `rd/t0/dt`, `ceff`, `vo_*`, `dmp_alg_kind`).
+- Replaced per-pin/per-timing threshold copies with pin/timing library-id
+  maps plus compact per-library threshold arrays.
 - `set_driving_cell` now stores only source metadata; direct-net computes
   virtual local state on the fly.
 - Compact endpoint pin slack storage.
@@ -39,6 +41,7 @@ ariane 1.07x, bsg_chip 2.55x, NV_NVDLA_partition_c 1.61x
 mempool_tile_wrap 1.11x, mempool_group 3.51x
 ```
 
-2026-05-14 local-state cleanup smoke passed:
-visible ariane -0.510/-1456.030, bsg_chip -0.447/-10281.189;
-blind ariane -0.956/-237.935.
+2026-05-14 direct cleanup smoke passed after build/install:
+visible ariane -0.510/-1456.030, 17.16s, RSS 1854560 KB;
+visible bsg_chip -0.447/-10281.189, 38.74s, RSS 7849524 KB;
+prior blind ariane -0.956/-237.935.

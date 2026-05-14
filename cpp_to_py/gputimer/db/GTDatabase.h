@@ -155,14 +155,13 @@ public:
     vector<float> dmp_slew_lower_thresholds;
     vector<float> dmp_slew_upper_thresholds;
     vector<float> dmp_slew_derates;
-    vector<float> dmp_timing_output_thresholds;
-    vector<float> dmp_timing_slew_lower_thresholds;
-    vector<float> dmp_timing_slew_upper_thresholds;
-    vector<float> dmp_timing_slew_derates;
-    vector<float> dmp_pin_input_thresholds;
-    vector<float> dmp_pin_slew_lower_thresholds;
-    vector<float> dmp_pin_slew_upper_thresholds;
-    vector<float> dmp_pin_slew_derates;
+    vector<int> dmp_timing_library_ids;
+    vector<int> dmp_pin_library_ids;
+    vector<float> dmp_library_input_thresholds;
+    vector<float> dmp_library_output_thresholds;
+    vector<float> dmp_library_slew_lower_thresholds;
+    vector<float> dmp_library_slew_upper_thresholds;
+    vector<float> dmp_library_slew_derates;
     vector<DrivingCellSource> driving_cell_sources;
 
     vector<int> pin_id2cell_type_id;
@@ -370,14 +369,13 @@ public:
     torch::Tensor dmp_slew_lower_thresholds;
     torch::Tensor dmp_slew_upper_thresholds;
     torch::Tensor dmp_slew_derates;
-    torch::Tensor dmp_timing_output_thresholds;
-    torch::Tensor dmp_timing_slew_lower_thresholds;
-    torch::Tensor dmp_timing_slew_upper_thresholds;
-    torch::Tensor dmp_timing_slew_derates;
-    torch::Tensor dmp_pin_input_thresholds;
-    torch::Tensor dmp_pin_slew_lower_thresholds;
-    torch::Tensor dmp_pin_slew_upper_thresholds;
-    torch::Tensor dmp_pin_slew_derates;
+    torch::Tensor dmp_timing_library_ids;
+    torch::Tensor dmp_pin_library_ids;
+    torch::Tensor dmp_library_input_thresholds;
+    torch::Tensor dmp_library_output_thresholds;
+    torch::Tensor dmp_library_slew_lower_thresholds;
+    torch::Tensor dmp_library_slew_upper_thresholds;
+    torch::Tensor dmp_library_slew_derates;
 };
 
 }  // namespace gt
