@@ -19,7 +19,7 @@ class GPULutAllocator;
 
 enum DmpAlgKind { DMP_ALG_CAP = 0, DMP_ALG_ZERO_C2 = 1, DMP_ALG_PI = 2 };
 
-struct dmp_model {
+struct DmpModel {
     const char **pin_names;
     const char **net_names;
     int num_pins, num_nets, num_arcs, num_tests;
@@ -90,7 +90,7 @@ struct dmp_model {
     const double vl_ = 0.2;
     const double vh_ = 0.8;
     const int MAX_ITER = 20;
-    dmp_model() : num_pins(0), num_nets(0), num_arcs(0), num_tests(0), pin_names(nullptr),
+    DmpModel() : num_pins(0), num_nets(0), num_arcs(0), num_tests(0), pin_names(nullptr),
                   flat_net2pin_start_map(nullptr), flat_net2pin_map(nullptr), pin2net_map(nullptr),
                   C1(nullptr), C2(nullptr), r_pi(nullptr), timer_ceff(nullptr),
                   dmp_pin_slot_count(0), dmp_slot_capacity(0), dmp_work_slot_capacity(0),
@@ -130,7 +130,7 @@ struct dmp_model {
                   explicit_rc(false),
                   clock_period(0.0), d_allocator(nullptr), res_unit(1.0f), cap_unit(1.0f) {}
     
-    ~dmp_model();
+    ~DmpModel();
 
     // CUDA_DEV void compute_pi_model(int net_id, int el_rf); 
     CUDA_DEV double y0(double t, double rd, double cl);
@@ -180,7 +180,7 @@ struct dmp_model {
     // float *C1;
     // float *C2;
     // float *r_pi;
-    dmp_model(GPUTimer* timer);
+    DmpModel(GPUTimer* timer);
     void allocate_timing_scratch();
     void release_rc_transient();
     void release_after_timing();

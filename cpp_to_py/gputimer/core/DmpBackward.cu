@@ -1,11 +1,11 @@
-#include "DmpBackwardKernels.cuh"
+#include "DmpKernels.cuh"
 #include "DmpCudaUtils.cuh"
 
 #include <cmath>
 
 namespace gt {
 
-__device__ __forceinline__ bool dmpBackwardIsIdealClockTimingArc(const dmp_model* dmp_db,
+__device__ __forceinline__ bool dmpBackwardIsIdealClockTimingArc(const DmpModel* dmp_db,
                                                                  int timing_id,
                                                                  int from_pin_id) {
     return dmp_db->ideal_clock &&
@@ -14,7 +14,7 @@ __device__ __forceinline__ bool dmpBackwardIsIdealClockTimingArc(const dmp_model
            timing_id >= 0;
 }
 
-__device__ __forceinline__ float dmpBackwardIdealClockEdgeTime(const dmp_model* dmp_db,
+__device__ __forceinline__ float dmpBackwardIdealClockEdgeTime(const DmpModel* dmp_db,
                                                                int timing_id) {
     if (timing_id >= 0 &&
         dmp_db->d_allocator->d_is_falling_edge_triggered[timing_id] &&
@@ -24,7 +24,7 @@ __device__ __forceinline__ float dmpBackwardIdealClockEdgeTime(const dmp_model* 
     return 0.0f;
 }
 
-__device__ void dmp_model::updatePinRat(int arc_id, float *from_rats){
+__device__ void DmpModel::updatePinRat(int arc_id, float *from_rats){
     int from_pin_id = timing_arc_from_pin_id[arc_id];
     for (int ti = 0; ti < DMP_PIN_GROUP_SIZE; ti++) {
         const int i = ti & 0b111;
@@ -37,7 +37,7 @@ __device__ void dmp_model::updatePinRat(int arc_id, float *from_rats){
         }
     }
 }
-__device__ void dmp_model::propagateRAT(int arc_id, float *from_rats){
+__device__ void DmpModel::propagateRAT(int arc_id, float *from_rats){
     const int i = threadIdx.x & (DMP_PIN_GROUP_SIZE - 1);
     int arc_type = arc_types[arc_id];
     int from_pin_id = timing_arc_from_pin_id[arc_id];
@@ -63,7 +63,7 @@ __device__ void dmp_model::propagateRAT(int arc_id, float *from_rats){
         from_rats[i] = rat;
     }    
 }
-__device__ void dmp_model::propagatePinBack(int level_idx, float *from_rats){
+__device__ void DmpModel::propagatePinBack(int level_idx, float *from_rats){
         index_type from_pin_id = level_list[level_idx];
         const int lane = threadIdx.x & (DMP_PIN_GROUP_SIZE - 1);
         const int warp_lane = threadIdx.x & 31;
@@ -84,7 +84,7 @@ __device__ void dmp_model::propagatePinBack(int level_idx, float *from_rats){
             __syncwarp(group_mask);
         }
 }
-__global__ void propagatePinBack_dmp(dmp_model* dmp_db, int level_start_offset, int num_pins_level){
+__global__ void dmpBackwardKernel(DmpModel* dmp_db, int level_start_offset, int num_pins_level){
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int pin_idx = idx >> 3;
     extern __shared__ float from_rats[];

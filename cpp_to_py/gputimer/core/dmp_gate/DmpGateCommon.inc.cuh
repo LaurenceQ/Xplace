@@ -196,14 +196,14 @@ __device__ __forceinline__ double dmpLibraryThresholdArrayValue(const float* val
                                        : fallback;
 }
 
-__device__ __forceinline__ int dmpTimingLibraryId(const dmp_model* dmp_db,
+__device__ __forceinline__ int dmpTimingLibraryId(const DmpModel* dmp_db,
                                                   int timing_id) {
     return (dmp_db->dmp_timing_library_ids && timing_id >= 0)
                ? dmp_db->dmp_timing_library_ids[timing_id]
                : -1;
 }
 
-__device__ __forceinline__ int dmpPinLibraryId(const dmp_model* dmp_db,
+__device__ __forceinline__ int dmpPinLibraryId(const DmpModel* dmp_db,
                                                int pin_id,
                                                int attr) {
     const int el = attr >> 1;
@@ -212,7 +212,7 @@ __device__ __forceinline__ int dmpPinLibraryId(const dmp_model* dmp_db,
                : -1;
 }
 
-__device__ __forceinline__ void dmpSanitizeThresholds(const dmp_model* dmp_db,
+__device__ __forceinline__ void dmpSanitizeThresholds(const DmpModel* dmp_db,
                                                       double& vl,
                                                       double& vh) {
     if (vh <= vl) {
@@ -221,7 +221,7 @@ __device__ __forceinline__ void dmpSanitizeThresholds(const dmp_model* dmp_db,
     }
 }
 
-__device__ __forceinline__ void dmpLoadPinThresholds(const dmp_model* dmp_db,
+__device__ __forceinline__ void dmpLoadPinThresholds(const DmpModel* dmp_db,
                                                      int pin_id,
                                                      int attr,
                                                      double& vth,
@@ -253,7 +253,7 @@ __device__ __forceinline__ void dmpLoadPinThresholds(const dmp_model* dmp_db,
     dmpSanitizeThresholds(dmp_db, vl, vh);
 }
 
-__device__ __forceinline__ void dmpDriverLibraryThresholds(const dmp_model* dmp_db,
+__device__ __forceinline__ void dmpDriverLibraryThresholds(const DmpModel* dmp_db,
                                                           int library_id,
                                                           int attr,
                                                           double& vth,
@@ -313,7 +313,7 @@ enum DmpDrivingCellCounter {
     DMP_DRIVING_CELL_COUNTER_COUNT = 7
 };
 
-__device__ bool dmp_model::updateLoadWinner(int net_arc_id,
+__device__ bool DmpModel::updateLoadWinner(int net_arc_id,
                                             int load_attr,
                                             float wire_delay,
                                             float load_slew) {
@@ -335,7 +335,7 @@ __device__ bool dmp_model::updateLoadWinner(int net_arc_id,
     return packed_slew > old_slew || packed_delay > old_delay;
 }
 
-__device__ bool dmp_model::updateAtWinner(int to_slot,
+__device__ bool DmpModel::updateAtWinner(int to_slot,
                                           float at,
                                           bool pick_max,
                                           int from_pin_id,
@@ -366,7 +366,7 @@ __device__ __forceinline__ void dmpGateNetPairCount(unsigned long long* counts,
     }
 }
 
-__device__ __forceinline__ void dmpThresholdAdjustCuda(const dmp_model* dmp_db,
+__device__ __forceinline__ void dmpThresholdAdjustCuda(const DmpModel* dmp_db,
                                                        int load_pin_id,
                                                        int load_attr,
                                                        double driver_vth,
@@ -404,7 +404,7 @@ __device__ __forceinline__ void dmpThresholdAdjustCuda(const dmp_model* dmp_db,
     load_slew *= ((load_delta / load_derate) / (driver_delta / driver_derate));
 }
 
-__device__ __forceinline__ void dmpInputPortDelaySlewCuda(const dmp_model* dmp_db,
+__device__ __forceinline__ void dmpInputPortDelaySlewCuda(const DmpModel* dmp_db,
                                                           int load_pin_id,
                                                           int load_attr,
                                                           double source_slew,

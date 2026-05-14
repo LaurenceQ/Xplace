@@ -1,4 +1,4 @@
-#include "DmpCeff.h"
+#include "DmpModel.h"
 #include "GPUTimer.h"
 #include "utils.cuh"
 
@@ -135,7 +135,7 @@ static void print_dmp_rc_kernel_profile(const char* name,
     fflush(stdout);
 }
 
-__host__ void dmp_model::initialize_rc(const std::vector<int>& host_edge_from,
+__host__ void DmpModel::initialize_rc(const std::vector<int>& host_edge_from,
                const std::vector<int>& host_edge_to,
                const std::vector<int>& host_flat_net2node_start_map,
                const std::vector<int>& host_flat_net2edge_start_map,
@@ -214,7 +214,7 @@ __host__ void dmp_model::initialize_rc(const std::vector<int>& host_edge_from,
         cudaMemset(root_dist, -1, num_nodes * sizeof(int));
       }
 
-__host__ void dmp_model::initialize_rc_explicit(
+__host__ void DmpModel::initialize_rc_explicit(
                const std::vector<int>& host_edge_from,
                const std::vector<int>& host_edge_to,
                const std::vector<int>& host_flat_net2node_start_map,
@@ -308,7 +308,7 @@ void GPUTimer::initialize_dmp_rc(
                   float unit_to_micron,
                   float rf,
                   float cf){
-    h_dmp_db = new dmp_model(this);
+    h_dmp_db = new DmpModel(this);
     h_dmp_db -> initialize_rc(host_edge_from,
                               host_edge_to,
                               host_flat_net2node_start_map,
@@ -322,8 +322,8 @@ void GPUTimer::initialize_dmp_rc(
                               unit_to_micron,
                               rf,
                               cf);
-    cudaMalloc(&dmp_db, sizeof(dmp_model));
-    cudaMemcpy(dmp_db, h_dmp_db, sizeof(dmp_model), cudaMemcpyHostToDevice);
+    cudaMalloc(&dmp_db, sizeof(DmpModel));
+    cudaMemcpy(dmp_db, h_dmp_db, sizeof(DmpModel), cudaMemcpyHostToDevice);
    
 }
 
@@ -345,7 +345,7 @@ void GPUTimer::initialize_dmp_rc_explicit(
     }
     logger.info("DMP explicit RC time scale: res_unit=%.5E cap_unit=%.5E time_unit=%.5E factor=%.5E",
                 res_unit, cap_unit, time_unit(), rc_time_factor);
-    h_dmp_db = new dmp_model(this);
+    h_dmp_db = new DmpModel(this);
     h_dmp_db -> initialize_rc_explicit(host_edge_from,
                                        host_edge_to,
                                        host_flat_net2node_start_map,
@@ -358,12 +358,12 @@ void GPUTimer::initialize_dmp_rc_explicit(
                                        num_nets,
                                        num_nodes,
                                        num_edges);
-    cudaMalloc(&dmp_db, sizeof(dmp_model));
-    cudaMemcpy(dmp_db, h_dmp_db, sizeof(dmp_model), cudaMemcpyHostToDevice);
+    cudaMalloc(&dmp_db, sizeof(DmpModel));
+    cudaMemcpy(dmp_db, h_dmp_db, sizeof(DmpModel), cudaMemcpyHostToDevice);
    
 }
 
-__device__ __forceinline__ void dmp_model::calc_dmp_rc(){
+__device__ __forceinline__ void DmpModel::calc_dmp_rc(){
     const int idx = blockIdx.x;
     if (idx < num_nets) {
         int nst = flat_net2node_start_map[idx];
@@ -441,11 +441,11 @@ __device__ __forceinline__ void dmp_model::calc_dmp_rc(){
     }
 }
 
-__global__ void calc_dmp_rc(dmp_model* dmp_rc_){
+__global__ void calc_dmp_rc(DmpModel* dmp_rc_){
     dmp_rc_->calc_dmp_rc();
 }
 
-__device__ __forceinline__ void dmp_model::propagate_dmp_rc(){
+__device__ __forceinline__ void DmpModel::propagate_dmp_rc(){
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int cond = threadIdx.y;
     if (idx < num_nets) {
@@ -523,18 +523,18 @@ __device__ __forceinline__ void dmp_model::propagate_dmp_rc(){
     }        
 }
 
-__global__ void propagate_rc_dmp(dmp_model* dmp_rc_){
+__global__ void propagate_rc_dmp(DmpModel* dmp_rc_){
     dmp_rc_->propagate_dmp_rc();
 }
 
-void calc_res_cap_dmp(dmp_model* dmp_rc_, int num_nets){
+void calc_res_cap_dmp(DmpModel* dmp_rc_, int num_nets){
     // Implementation of the function using dmp_rc_
     int thread_count = 64;
     clear_stale_cuda_error("calc_res_cap_dmp");
     const bool profile_kernels = dmp_rc_kernel_profile_enabled();
-    dmp_model h_dmp;
+    DmpModel h_dmp;
     if (profile_kernels) {
-        gpuErrchk(cudaMemcpy(&h_dmp, dmp_rc_, sizeof(dmp_model), cudaMemcpyDeviceToHost));
+        gpuErrchk(cudaMemcpy(&h_dmp, dmp_rc_, sizeof(DmpModel), cudaMemcpyDeviceToHost));
         h_dmp.owns_allocations = false;
     }
     cudaEvent_t start = nullptr;
@@ -567,23 +567,23 @@ void calc_res_cap_dmp(dmp_model* dmp_rc_, int num_nets){
     }
 }
 
-// void flatten_rc_tree_dmp(dmp_model* dmp_rc_){
+// void flatten_rc_tree_dmp(DmpModel* dmp_rc_){
 //     // Implementation of the function using dmp_rc_
 //     int thread_count = 64;
 //     flatten_rc_dmp<<<dmp_rc_ -> num_nets, thread_count>>>(dmp_rc_);
 // }
 
 
-void propagate_rc_tree_dmp(dmp_model* dmp_rc_, int num_nets){
+void propagate_rc_tree_dmp(DmpModel* dmp_rc_, int num_nets){
     // Implementation of the function using dmp_rc_
     int thread_count = 64;
     dim3 block_size(thread_count, NUM_ATTR);
     int num_blocks = (num_nets + thread_count - 1) / thread_count;
     clear_stale_cuda_error("propagate_rc_tree_dmp");
     const bool profile_kernels = dmp_rc_kernel_profile_enabled();
-    dmp_model h_dmp;
+    DmpModel h_dmp;
     if (profile_kernels) {
-        gpuErrchk(cudaMemcpy(&h_dmp, dmp_rc_, sizeof(dmp_model), cudaMemcpyDeviceToHost));
+        gpuErrchk(cudaMemcpy(&h_dmp, dmp_rc_, sizeof(DmpModel), cudaMemcpyDeviceToHost));
         h_dmp.owns_allocations = false;
     }
     cudaEvent_t start = nullptr;
@@ -617,7 +617,7 @@ void propagate_rc_tree_dmp(dmp_model* dmp_rc_, int num_nets){
 
 }
 
-void debug_dump_dmp_rc_net_cuda(dmp_model* h_dmp_db,
+void debug_dump_dmp_rc_net_cuda(DmpModel* h_dmp_db,
                                 int net_id,
                                 const std::vector<std::string>& net_names,
                                 const std::vector<std::string>& pin_names){

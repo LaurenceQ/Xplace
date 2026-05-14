@@ -17,7 +17,7 @@ class TimingArc;
 class TimingTorchRawDB;
 class GTDatabase;
 class GPULutAllocator;
-class dmp_model;
+class DmpModel;
 
 struct HostRcGraph {
     std::vector<int> edge_from;
@@ -268,8 +268,8 @@ public:
     void init_dmp_rc_route_segments(const std::string& file);
     void debug_dump_dmp_rc_net(const std::string& net_name);
     void print_pinLoad();
-    dmp_model* dmp_db = nullptr;
-    dmp_model* h_dmp_db = nullptr;
+    DmpModel* dmp_db = nullptr;
+    DmpModel* h_dmp_db = nullptr;
     void* dmp_forward_schedule = nullptr;
     bool dmp_debug_on = false;
     void set_dmp_debug_flag(bool flag){dmp_debug_on = flag;}

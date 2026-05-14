@@ -1,4 +1,4 @@
-#include "DmpDebug.cuh"
+#include "DmpKernels.cuh"
 #include "DmpCudaUtils.cuh"
 
 #include <algorithm>
@@ -6,7 +6,7 @@
 #include <vector>
 
 namespace gt {
-__global__ void dmp_debug_count_kernel(dmp_model* dmp_db, unsigned long long* counts, int total) {
+__global__ void dmp_debug_count_kernel(DmpModel* dmp_db, unsigned long long* counts, int total) {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= total) return;
     const int pin_total = dmp_db->num_pins * NUM_ATTR;
@@ -30,9 +30,9 @@ __global__ void dmp_debug_count_kernel(dmp_model* dmp_db, unsigned long long* co
     }
 }
 
-void dmp_debug_print_counts(dmp_model* dmp_db, const char* label) {
-    dmp_model h_dmp;
-    gpuErrchk(cudaMemcpy(&h_dmp, dmp_db, sizeof(dmp_model), cudaMemcpyDeviceToHost));
+void dmp_debug_print_counts(DmpModel* dmp_db, const char* label) {
+    DmpModel h_dmp;
+    gpuErrchk(cudaMemcpy(&h_dmp, dmp_db, sizeof(DmpModel), cudaMemcpyDeviceToHost));
     h_dmp.owns_allocations = false;
     const int pin_total = h_dmp.num_pins * NUM_ATTR;
     const int arc_total = h_dmp.num_arcs * 2 * NUM_ATTR;
@@ -86,9 +86,9 @@ void dmp_debug_print_counts(dmp_model* dmp_db, const char* label) {
            h_counts[9], test_total);
 }
 
-void dmp_debug_print_first_level_sample(dmp_model* dmp_db, int level_idx, index_type level_start_offset) {
-    dmp_model h_dmp;
-    gpuErrchk(cudaMemcpy(&h_dmp, dmp_db, sizeof(dmp_model), cudaMemcpyDeviceToHost));
+void dmp_debug_print_first_level_sample(DmpModel* dmp_db, int level_idx, index_type level_start_offset) {
+    DmpModel h_dmp;
+    gpuErrchk(cudaMemcpy(&h_dmp, dmp_db, sizeof(DmpModel), cudaMemcpyDeviceToHost));
     h_dmp.owns_allocations = false;
     index_type to_pin = -1;
     index_type arc_start = -1;
@@ -152,11 +152,11 @@ static int dmp_hist_bucket(int degree) {
     return 6;
 }
 
-void dmp_debug_print_parallel_stats(dmp_model* dmp_db,
+void dmp_debug_print_parallel_stats(DmpModel* dmp_db,
                                     const vector<int>& level_list_end_cpu,
                                     const char* label) {
-    dmp_model h_dmp;
-    gpuErrchk(cudaMemcpy(&h_dmp, dmp_db, sizeof(dmp_model), cudaMemcpyDeviceToHost));
+    DmpModel h_dmp;
+    gpuErrchk(cudaMemcpy(&h_dmp, dmp_db, sizeof(DmpModel), cudaMemcpyDeviceToHost));
     h_dmp.owns_allocations = false;
     if (h_dmp.num_pins <= 0 || h_dmp.num_arcs < 0 || level_list_end_cpu.empty()) {
         printf("[DMP PARALLEL STATS] %s skip invalid dimensions pins=%d arcs=%d levels=%zu\n",

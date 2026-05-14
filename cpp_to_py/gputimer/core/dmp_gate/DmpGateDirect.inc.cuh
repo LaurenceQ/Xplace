@@ -101,7 +101,7 @@ __device__ __forceinline__ void dmpVlFuncCached(int alg,
     dy = vl_dt;
 }
 
-__device__ double dmpFindRootVlCached(const dmp_model* dmp_db,
+__device__ double dmpFindRootVlCached(const DmpModel* dmp_db,
                                       int alg,
                                       double k0,
                                       double k1,
@@ -263,7 +263,7 @@ __device__ __forceinline__ void dmpVoFuncCached(int alg,
     dy = vo_dt;
 }
 
-__device__ double dmpFindRootVoCached(const dmp_model* dmp_db,
+__device__ double dmpFindRootVoCached(const DmpModel* dmp_db,
                                       int alg,
                                       double k0,
                                       double k1,
@@ -333,7 +333,7 @@ __device__ double dmpFindRootVoCached(const dmp_model* dmp_db,
     return nanf("");
 }
 
-__device__ __forceinline__ bool dmpFindDriverDelaySlewCached(const dmp_model* dmp_db,
+__device__ __forceinline__ bool dmpFindDriverDelaySlewCached(const DmpModel* dmp_db,
                                                              int alg,
                                                              double k0,
                                                              double k1,
@@ -411,7 +411,7 @@ struct DmpLocalGateState {
     bool dmp_valid;
 };
 
-__device__ __forceinline__ DmpGateLaneContext dmpMakeGateLaneContextDirect(dmp_model* dmp_db,
+__device__ __forceinline__ DmpGateLaneContext dmpMakeGateLaneContextDirect(DmpModel* dmp_db,
                                                                            int timing_id,
                                                                            int input_rf,
                                                                            int to_attr,
@@ -454,7 +454,7 @@ __device__ __forceinline__ DmpGateLaneContext dmpMakeGateLaneContextDirect(dmp_m
     return ctx;
 }
 
-__device__ __forceinline__ bool dmpLocalGateModelRd(dmp_model* dmp_db,
+__device__ __forceinline__ bool dmpLocalGateModelRd(DmpModel* dmp_db,
                                                     const DmpGateLaneContext& ctx,
                                                     double cap1,
                                                     double d1,
@@ -479,7 +479,7 @@ __device__ __forceinline__ bool dmpLocalGateModelRd(dmp_model* dmp_db,
     return isfinite(rd) && rd > 0.0;
 }
 
-__device__ __forceinline__ int dmpSelectLocalAlg(const dmp_model* dmp_db,
+__device__ __forceinline__ int dmpSelectLocalAlg(const DmpModel* dmp_db,
                                                  const DmpLocalGateState& state) {
     if (!isfinite(state.rd) || !isfinite(state.c1) || !isfinite(state.c2) ||
         !isfinite(state.rpi) || state.rd <= 0.0 || state.c1 <= 0.0 ||
@@ -563,7 +563,7 @@ __device__ __forceinline__ bool dmpLocalInitPi(DmpLocalGateState& state) {
            isfinite(state.A) && isfinite(state.B) && isfinite(state.D);
 }
 
-__device__ bool dmpFindDriverParamsLocalOnePole(dmp_model* dmp_db,
+__device__ bool dmpFindDriverParamsLocalOnePole(DmpModel* dmp_db,
                                                 const DmpGateLaneContext& ctx,
                                                 DmpLocalGateState& state,
                                                 double fixed_ceff) {
@@ -615,7 +615,7 @@ __device__ bool dmpFindDriverParamsLocalOnePole(dmp_model* dmp_db,
     return false;
 }
 
-__device__ bool dmpFindDriverParamsLocalPi(dmp_model* dmp_db,
+__device__ bool dmpFindDriverParamsLocalPi(DmpModel* dmp_db,
                                            const DmpGateLaneContext& ctx,
                                            DmpLocalGateState& state,
                                            double initial_ceff) {
@@ -716,7 +716,7 @@ __device__ bool dmpFindDriverParamsLocalPi(dmp_model* dmp_db,
     return false;
 }
 
-__device__ __forceinline__ void dmpInitLocalGateState(dmp_model* dmp_db,
+__device__ __forceinline__ void dmpInitLocalGateState(DmpModel* dmp_db,
                                                       DmpLocalGateState& state) {
     state = {};
     state.alg = DMP_ALG_CAP;
@@ -735,7 +735,7 @@ __device__ __forceinline__ void dmpInitLocalGateState(dmp_model* dmp_db,
     state.dmp_valid = false;
 }
 
-__device__ __forceinline__ bool dmpComputeLocalGateStateForSlot(dmp_model* dmp_db,
+__device__ __forceinline__ bool dmpComputeLocalGateStateForSlot(DmpModel* dmp_db,
                                                                 const DmpGateLaneContext& ctx,
                                                                 int rc_slot,
                                                                 DmpLocalGateState& state) {
@@ -863,7 +863,7 @@ __device__ __forceinline__ bool dmpComputeLocalGateStateForSlot(dmp_model* dmp_d
     return isfinite(state.gate_delay) && isfinite(state.vo_slew);
 }
 
-__device__ __forceinline__ bool dmpComputeLocalGateState(dmp_model* dmp_db,
+__device__ __forceinline__ bool dmpComputeLocalGateState(DmpModel* dmp_db,
                                                          int arc_id,
                                                          int lane,
                                                          DmpLocalGateState& state) {
@@ -892,7 +892,7 @@ __device__ __forceinline__ bool dmpComputeLocalGateState(dmp_model* dmp_db,
     return dmpComputeLocalGateStateForSlot(dmp_db, ctx, to_slot, state);
 }
 
-__device__ __forceinline__ bool dmpComputeDrivingCellLocalState(dmp_model* dmp_db,
+__device__ __forceinline__ bool dmpComputeDrivingCellLocalState(DmpModel* dmp_db,
                                                                int pin_slot,
                                                                int timing_id,
                                                                int input_rf,
@@ -912,7 +912,7 @@ __device__ __forceinline__ bool dmpComputeDrivingCellLocalState(dmp_model* dmp_d
     return dmpComputeLocalGateStateForSlot(dmp_db, ctx, pin_slot, state);
 }
 
-__device__ __forceinline__ bool dmpUpdateSlewWinnerValue(dmp_model* dmp_db,
+__device__ __forceinline__ bool dmpUpdateSlewWinnerValue(DmpModel* dmp_db,
                                                          int to_slot,
                                                          float slew,
                                                          bool pick_max) {
@@ -924,7 +924,7 @@ __device__ __forceinline__ bool dmpUpdateSlewWinnerValue(dmp_model* dmp_db,
     return packed > old;
 }
 
-__device__ __forceinline__ void dmpLoadDelaySlewFromLocalState(dmp_model* dmp_db,
+__device__ __forceinline__ void dmpLoadDelaySlewFromLocalState(DmpModel* dmp_db,
                                                                const DmpLocalGateState& state,
                                                                int net_arc_id,
                                                                int load_attr,
@@ -1047,7 +1047,7 @@ __device__ __forceinline__ void dmpLoadDelaySlewFromLocalState(dmp_model* dmp_db
                            wire_delay, load_slew);
 }
 
-__device__ void dmp_model::propagateLoadSlewDelay() {
+__device__ void DmpModel::propagateLoadSlewDelay() {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int attr = idx & 0b11;
     const int arc_id = arc_ids[idx];
@@ -1187,7 +1187,7 @@ __device__ void dmp_model::propagateLoadSlewDelay() {
     }
 }
 
-__global__ void propagateDirectGateNetDelaySlewAndAT_dmp(dmp_model* dmp_db,
+__global__ void dmpGateKernel(DmpModel* dmp_db,
                                                         const index_type* level_arc_list,
                                                         int num_level_arcs,
                                                         unsigned long long* debug_counts) {
@@ -1267,7 +1267,7 @@ __global__ void propagateDirectGateNetDelaySlewAndAT_dmp(dmp_model* dmp_db,
     }
 }
 
-__global__ void applyDrivingCellSourceSlewKernel(dmp_model* dmp_db,
+__global__ void applyDrivingCellSourceSlewKernel(DmpModel* dmp_db,
                                                  const int* pin_ids,
                                                  const int* timing_ids,
                                                  const int* input_rfs,
@@ -1359,5 +1359,104 @@ __global__ void applyDrivingCellSourceSlewKernel(dmp_model* dmp_db,
                state.t0_value,
                state.dt_value,
                state.ceff_value);
+    }
+}
+
+void apply_dmp_driving_cell_source_slew_cuda(DmpModel* dmp_db,
+                                             const std::vector<int>& pin_ids,
+                                             const std::vector<int>& timing_ids,
+                                             const std::vector<int>& input_rfs,
+                                             const std::vector<float>& input_slews) {
+    const int num_sources = static_cast<int>(pin_ids.size());
+    const int total = num_sources * NUM_ATTR;
+    const bool profile_kernels = dmp_kernel_profile_enabled();
+    const bool collect_counts = profile_kernels || dmp_timing_debug_enabled();
+    if (num_sources == 0 || total == 0) {
+        if (collect_counts) {
+            printf("[DMP DRIVING CELL] sources=0 lanes=0 applied=0 skipped=0 cap=0 zero_c2=0 pi=0 dmp_valid=0 fallback=0\n");
+            fflush(stdout);
+        }
+        return;
+    }
+
+    int* d_pin_ids = nullptr;
+    int* d_timing_ids = nullptr;
+    int* d_input_rfs = nullptr;
+    float* d_input_slews = nullptr;
+    unsigned long long* d_counts = nullptr;
+    unsigned long long h_counts[DMP_DRIVING_CELL_COUNTER_COUNT] = {0};
+
+    gpuErrchk(cudaMalloc(&d_pin_ids, sizeof(int) * num_sources));
+    gpuErrchk(cudaMalloc(&d_timing_ids, sizeof(int) * total));
+    gpuErrchk(cudaMalloc(&d_input_rfs, sizeof(int) * total));
+    gpuErrchk(cudaMalloc(&d_input_slews, sizeof(float) * total));
+    if (collect_counts) {
+        gpuErrchk(cudaMalloc(&d_counts, sizeof(h_counts)));
+    }
+    gpuErrchk(cudaMemcpy(d_pin_ids, pin_ids.data(), sizeof(int) * num_sources, cudaMemcpyHostToDevice));
+    gpuErrchk(cudaMemcpy(d_timing_ids, timing_ids.data(), sizeof(int) * total, cudaMemcpyHostToDevice));
+    gpuErrchk(cudaMemcpy(d_input_rfs, input_rfs.data(), sizeof(int) * total, cudaMemcpyHostToDevice));
+    gpuErrchk(cudaMemcpy(d_input_slews, input_slews.data(), sizeof(float) * total, cudaMemcpyHostToDevice));
+    if (collect_counts) {
+        gpuErrchk(cudaMemset(d_counts, 0, sizeof(h_counts)));
+    }
+
+    cudaEvent_t start = nullptr;
+    cudaEvent_t stop = nullptr;
+    if (profile_kernels) {
+        dmp_event_create(&start, &stop);
+        gpuErrchk(cudaEventRecord(start));
+    }
+    applyDrivingCellSourceSlewKernel<<<DMP_TIMING_BLOCK_NUMBER(total), DMP_TIMING_BLOCK_SIZE>>>(dmp_db,
+                                                                                               d_pin_ids,
+                                                                                               d_timing_ids,
+                                                                                               d_input_rfs,
+                                                                                               d_input_slews,
+                                                                                               num_sources,
+                                                                                               d_counts);
+    gpuErrchk(cudaPeekAtLastError());
+    float elapsed_ms = 0.0f;
+    if (profile_kernels) {
+        gpuErrchk(cudaEventRecord(stop));
+        gpuErrchk(cudaDeviceSynchronize());
+        gpuErrchk(cudaEventElapsedTime(&elapsed_ms, start, stop));
+        gpuErrchk(cudaEventDestroy(start));
+        gpuErrchk(cudaEventDestroy(stop));
+        cudaGetLastError();
+    }
+    if (collect_counts) {
+        gpuErrchk(cudaMemcpy(h_counts, d_counts, sizeof(h_counts), cudaMemcpyDeviceToHost));
+
+        printf("[DMP DRIVING CELL] sources=%d lanes=%d applied=%llu skipped=%llu cap=%llu zero_c2=%llu pi=%llu dmp_valid=%llu fallback=%llu\n",
+               num_sources,
+               total,
+               h_counts[DMP_DRIVING_CELL_APPLIED],
+               h_counts[DMP_DRIVING_CELL_SKIPPED],
+               h_counts[DMP_DRIVING_CELL_CAP],
+               h_counts[DMP_DRIVING_CELL_ZERO_C2],
+               h_counts[DMP_DRIVING_CELL_PI],
+               h_counts[DMP_DRIVING_CELL_DMP_VALID],
+               h_counts[DMP_DRIVING_CELL_FALLBACK]);
+    }
+    if (profile_kernels) {
+        printf("[DMP KERNEL PROFILE] name=applyDrivingCellSourceSlewKernel launches=1 total_ms=%.3f avg_us=%.3f max_ms=%.3f work_items=%d blocks=%d block=(%d,1) work_per_ms=%.1f\n",
+               elapsed_ms,
+               static_cast<double>(elapsed_ms) * 1000.0,
+               elapsed_ms,
+               total,
+               DMP_TIMING_BLOCK_NUMBER(total),
+               DMP_TIMING_BLOCK_SIZE,
+               elapsed_ms > 0.0f ? static_cast<double>(total) / static_cast<double>(elapsed_ms) : 0.0);
+    }
+    if (collect_counts || profile_kernels) {
+        fflush(stdout);
+    }
+
+    cudaFree(d_pin_ids);
+    cudaFree(d_timing_ids);
+    cudaFree(d_input_rfs);
+    cudaFree(d_input_slews);
+    if (d_counts != nullptr) {
+        cudaFree(d_counts);
     }
 }

@@ -41,7 +41,7 @@ ariane 1.07x, bsg_chip 2.55x, NV_NVDLA_partition_c 1.61x
 mempool_tile_wrap 1.11x, mempool_group 3.51x
 ```
 
-2026-05-14 direct cleanup smoke passed after build/install:
-visible ariane -0.510/-1456.030, 17.16s, RSS 1854560 KB;
-visible bsg_chip -0.447/-10281.189, 38.74s, RSS 7849524 KB;
+2026-05-14 DMP file cleanup smoke passed after build/install:
+visible ariane -0.510/-1456.030, 11.58s, RSS 1856028 KB;
+visible bsg_chip -0.447/-10281.189, 33.34s, RSS 7846836 KB;
 prior blind ariane -0.956/-237.935.

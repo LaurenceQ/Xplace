@@ -1,4 +1,4 @@
-// #include "DmpCeff.h"
+// #include "DmpModel.h"
 #include "GPUTimer.h"
 #include "common/utils/utils.h"
 #include "common/db/Database.h"
@@ -48,14 +48,14 @@ static void release_host_rc_graph_storage(HostRcGraph& graph)
     release_vector_storage(graph.includes_pin_caps);
 }
 
-void compute_pi_model_cuda(dmp_model* dmp_db, int num_nets);
+void compute_pi_model_cuda(DmpModel* dmp_db, int num_nets);
 // void GPUTimer::compute_pi_model(){
 //     assert(dmp_db != nullptr);
 //     compute_pi_model_cuda(dmp_db, num_nets);
 // }
 
 void update_timing_dmp_cuda(GPUTimer* timer);
-void print_pinLoad_cuda(dmp_model* dmp_db, vector<int> level_list_end_cpu, vector<string> pin_names);
+void print_pinLoad_cuda(DmpModel* dmp_db, vector<int> level_list_end_cpu, vector<string> pin_names);
 void GPUTimer::update_timing_dmp(){
     if (dmp_progress_enabled()) {
         printf("Update timing DMP started.\n");
@@ -74,15 +74,15 @@ void GPUTimer::print_pin_id_name(){
 }
 
 
-void calc_res_cap_dmp(dmp_model* dmp_db, int num_nets);
-void propagate_rc_tree_dmp(dmp_model* dmp_db, int num_nets);
-void dmp_prepare_timing_after_rc(dmp_model* h_dmp_db, dmp_model* dmp_db);
-void apply_dmp_driving_cell_source_slew_cuda(dmp_model* dmp_db,
+void calc_res_cap_dmp(DmpModel* dmp_db, int num_nets);
+void propagate_rc_tree_dmp(DmpModel* dmp_db, int num_nets);
+void dmp_prepare_timing_after_rc(DmpModel* h_dmp_db, DmpModel* dmp_db);
+void apply_dmp_driving_cell_source_slew_cuda(DmpModel* dmp_db,
                                              const std::vector<int>& pin_ids,
                                              const std::vector<int>& timing_ids,
                                              const std::vector<int>& input_rfs,
                                              const std::vector<float>& input_slews);
-void debug_dump_dmp_rc_net_cuda(dmp_model* h_dmp_db,
+void debug_dump_dmp_rc_net_cuda(DmpModel* h_dmp_db,
                                 int net_id,
                                 const std::vector<std::string>& net_names,
                                 const std::vector<std::string>& pin_names);

@@ -1,8 +1,6 @@
-#include "DmpCeff.h"
-#include "DmpBackwardKernels.cuh"
+#include "DmpModel.h"
 #include "DmpCudaUtils.cuh"
-#include "DmpDebug.cuh"
-#include "DmpGateKernels.cuh"
+#include "DmpKernels.cuh"
 #include "gputiming.h"
 
 #include <algorithm>
@@ -61,12 +59,12 @@ enum DmpKernelProfileId {
 
 static void dmp_init_kernel_profiles(DmpKernelProfile profiles[DMP_PROFILE_COUNT])
 {
-    profiles[DMP_PROFILE_GATE_DELAY_SLEW].name = "propagateDirectGateNetDelaySlewAndAT_dmp";
-    profiles[DMP_PROFILE_DIRECT_NET].name = "propagateNetArcSlewDelay_dmp";
-    profiles[DMP_PROFILE_NET_DELAY_FINALIZE].name = "finalizeNetDelayWinnersAndPropagateAT_dmp";
-    profiles[DMP_PROFILE_AT_FINALIZE].name = "finalizePinWinners_dmp";
-    profiles[DMP_PROFILE_ARC_TEST].name = "propagatePinTests_dmp";
-    profiles[DMP_PROFILE_BACKWARD].name = "propagatePinBack_dmp";
+    profiles[DMP_PROFILE_GATE_DELAY_SLEW].name = "dmpGateKernel";
+    profiles[DMP_PROFILE_DIRECT_NET].name = "dmpDirectNetKernel";
+    profiles[DMP_PROFILE_NET_DELAY_FINALIZE].name = "dmpNetWinnerKernel";
+    profiles[DMP_PROFILE_AT_FINALIZE].name = "dmpPinWinnerKernel";
+    profiles[DMP_PROFILE_ARC_TEST].name = "dmpTestKernel";
+    profiles[DMP_PROFILE_BACKWARD].name = "dmpBackwardKernel";
 }
 
 static bool dmp_root_profile_enabled()
@@ -140,7 +138,7 @@ static void dmp_print_kernel_profiles(const DmpKernelProfile profiles[DMP_PROFIL
     fflush(stdout);
 }
 
-static DmpForwardArcLevels build_forward_arc_levels(dmp_model* dmp_db,
+static DmpForwardArcLevels build_forward_arc_levels(DmpModel* dmp_db,
                                                     const vector<int>& level_list_end_cpu) {
     DmpForwardArcLevels result;
     result.gate_arc_end.reserve(level_list_end_cpu.size());
@@ -150,8 +148,8 @@ static DmpForwardArcLevels build_forward_arc_levels(dmp_model* dmp_db,
     result.net_arc_end.push_back(0);
     result.direct_net_arc_end.push_back(0);
 
-    dmp_model h_dmp;
-    gpuErrchk(cudaMemcpy(&h_dmp, dmp_db, sizeof(dmp_model), cudaMemcpyDeviceToHost));
+    DmpModel h_dmp;
+    gpuErrchk(cudaMemcpy(&h_dmp, dmp_db, sizeof(DmpModel), cudaMemcpyDeviceToHost));
     h_dmp.owns_allocations = false;
     const bool log_schedule = dmp_kernel_profile_enabled() || dmp_timing_debug_enabled();
     if (h_dmp.num_pins <= 0 || h_dmp.num_arcs < 0 || level_list_end_cpu.empty()) {
@@ -331,15 +329,15 @@ static DmpForwardArcLevels& dmp_get_forward_schedule(GPUTimer* timer)
 
 void update_timing_dmp_cuda(GPUTimer* timer){
 
-    dmp_model* dmp_db = timer->dmp_db;
+    DmpModel* dmp_db = timer->dmp_db;
     const vector<int>& level_list_end_cpu = timer->level_list_end_cpu;
 
     dmp_clear_stale_cuda_error("DMP timing entry");
     const bool profile_kernels = dmp_kernel_profile_enabled();
     const bool profile_roots = dmp_root_profile_enabled();
     const bool debug_timing = dmp_timing_debug_enabled();
-    dmp_model h_entry_dmp;
-    gpuErrchk(cudaMemcpy(&h_entry_dmp, dmp_db, sizeof(dmp_model), cudaMemcpyDeviceToHost));
+    DmpModel h_entry_dmp;
+    gpuErrchk(cudaMemcpy(&h_entry_dmp, dmp_db, sizeof(DmpModel), cudaMemcpyDeviceToHost));
     h_entry_dmp.owns_allocations = false;
     if (h_entry_dmp.pin_at_winner != nullptr && h_entry_dmp.dmp_pin_slot_count > 0) {
         gpuErrchk(cudaMemset(h_entry_dmp.pin_at_winner, 0,
@@ -492,7 +490,7 @@ void update_timing_dmp_cuda(GPUTimer* timer){
             const int gate_blocks = DMP_TIMING_BLOCK_NUMBER(gate_work_items);
             cudaEvent_t kernel_start, kernel_stop;
             start_kernel_profile(&kernel_start, &kernel_stop);
-            propagateDirectGateNetDelaySlewAndAT_dmp<<<gate_blocks, DMP_TIMING_BLOCK_SIZE>>>(dmp_db,
+            dmpGateKernel<<<gate_blocks, DMP_TIMING_BLOCK_SIZE>>>(dmp_db,
                                                                                             forward_arc_levels->d_forward_gate_arc_list + level_gate_start,
                                                                                             num_gate_arcs_level,
                                                                                             d_gate_net_pair_debug_counts);
@@ -508,7 +506,7 @@ void update_timing_dmp_cuda(GPUTimer* timer){
             const int direct_net_blocks = DMP_TIMING_BLOCK_NUMBER(direct_net_work_items);
             cudaEvent_t kernel_start, kernel_stop;
             start_kernel_profile(&kernel_start, &kernel_stop);
-            propagateNetArcSlewDelay_dmp<<<direct_net_blocks, DMP_TIMING_BLOCK_SIZE>>>(dmp_db,
+            dmpDirectNetKernel<<<direct_net_blocks, DMP_TIMING_BLOCK_SIZE>>>(dmp_db,
                                                                                        forward_arc_levels->d_forward_direct_net_arc_list + level_direct_net_start,
                                                                                        num_direct_net_arcs_level);
             finish_forward_cuda(DMP_PROFILE_DIRECT_NET,
@@ -524,7 +522,7 @@ void update_timing_dmp_cuda(GPUTimer* timer){
             const int net_delay_finalize_blocks = DMP_TIMING_BLOCK_NUMBER(net_delay_finalize_work_items);
             cudaEvent_t kernel_start, kernel_stop;
             start_kernel_profile(&kernel_start, &kernel_stop);
-            finalizeNetDelayWinnersAndPropagateAT_dmp<<<net_delay_finalize_blocks, DMP_TIMING_BLOCK_SIZE>>>(dmp_db,
+            dmpNetWinnerKernel<<<net_delay_finalize_blocks, DMP_TIMING_BLOCK_SIZE>>>(dmp_db,
                                                                                                             forward_arc_levels->d_forward_net_arc_list + level_net_start,
                                                                                                             num_net_arcs_level);
             finish_forward_cuda(DMP_PROFILE_NET_DELAY_FINALIZE,
@@ -539,7 +537,7 @@ void update_timing_dmp_cuda(GPUTimer* timer){
         const int at_finalize_blocks = DMP_TIMING_BLOCK_NUMBER(at_finalize_work_items);
         cudaEvent_t kernel_start, kernel_stop;
         start_kernel_profile(&kernel_start, &kernel_stop);
-        finalizePinWinners_dmp<<<at_finalize_blocks, DMP_TIMING_BLOCK_SIZE>>>(dmp_db,
+        dmpPinWinnerKernel<<<at_finalize_blocks, DMP_TIMING_BLOCK_SIZE>>>(dmp_db,
                                                                               level_start_offset,
                                                                               num_pins_level);
         finish_forward_cuda(DMP_PROFILE_AT_FINALIZE,
@@ -550,7 +548,7 @@ void update_timing_dmp_cuda(GPUTimer* timer){
                             kernel_stop);
         forward_at_finalize_launches++;
         start_kernel_profile(&kernel_start, &kernel_stop);
-        propagatePinTests_dmp<<<pin_blocks, DMP_TIMING_BLOCK_SIZE>>>(dmp_db, level_start_offset, num_pins_level);
+        dmpTestKernel<<<pin_blocks, DMP_TIMING_BLOCK_SIZE>>>(dmp_db, level_start_offset, num_pins_level);
         finish_forward_cuda(DMP_PROFILE_ARC_TEST,
                             "arc-test",
                             pin_work_items,
@@ -631,7 +629,7 @@ void update_timing_dmp_cuda(GPUTimer* timer){
             dmp_event_create(&level_start, &level_stop);
             gpuErrchk(cudaEventRecord(level_start));
         }
-        propagatePinBack_dmp<<<blocks, DMP_TIMING_BLOCK_SIZE, DMP_TIMING_BLOCK_SIZE * sizeof(float)>>>(dmp_db, level_start_offset, num_pins_level);
+        dmpBackwardKernel<<<blocks, DMP_TIMING_BLOCK_SIZE, DMP_TIMING_BLOCK_SIZE * sizeof(float)>>>(dmp_db, level_start_offset, num_pins_level);
 
         cudaError_t launch_error = cudaPeekAtLastError();
         if (launch_error != cudaSuccess) {

@@ -1,4 +1,4 @@
-#include "DmpCeff.h"
+#include "DmpModel.h"
 #include "DmpCudaUtils.cuh"
 #include "GPUTimer.h"
 #include "gputiming.h"
@@ -196,7 +196,7 @@ static bool dmpDeferTimingAlloc()
              value[0] == 'f' || value[0] == 'F' ||
              value[0] == 'n' || value[0] == 'N');
 }
-__host__ dmp_model::dmp_model(GPUTimer* timer)
+__host__ DmpModel::DmpModel(GPUTimer* timer)
         : flat_net2pin_start_map(timer -> flat_net2pin_start_map), 
         flat_net2pin_map(timer -> flat_net2pin_map), 
         pin2net_map(timer -> pin2net_map),
@@ -370,7 +370,7 @@ __host__ dmp_model::dmp_model(GPUTimer* timer)
     delete[] host_net_ptrs;
 }
 
-void dmp_model::allocate_timing_scratch()
+void DmpModel::allocate_timing_scratch()
 {
     if (pin_at_winner != nullptr) {
         return;
@@ -409,7 +409,7 @@ void dmp_model::allocate_timing_scratch()
     }
 }
 
-void dmp_model::release_rc_transient()
+void DmpModel::release_rc_transient()
 {
     cudaFree(edge_from);
     cudaFree(edge_to);
@@ -452,7 +452,7 @@ void dmp_model::release_rc_transient()
     }
 }
 
-void dmp_model::release_after_timing()
+void DmpModel::release_after_timing()
 {
     cudaFree(pin_at_winner);
     cudaFree(pin_slew_winner);
@@ -485,25 +485,25 @@ void dmp_model::release_after_timing()
     }
 }
 
-void dmp_prepare_timing_after_rc(dmp_model* h_dmp_db, dmp_model* dmp_db)
+void dmp_prepare_timing_after_rc(DmpModel* h_dmp_db, DmpModel* dmp_db)
 {
     if (h_dmp_db == nullptr || dmp_db == nullptr) {
         return;
     }
     h_dmp_db->release_rc_transient();
     h_dmp_db->allocate_timing_scratch();
-    gpuErrchk(cudaMemcpy(dmp_db, h_dmp_db, sizeof(dmp_model), cudaMemcpyHostToDevice));
+    gpuErrchk(cudaMemcpy(dmp_db, h_dmp_db, sizeof(DmpModel), cudaMemcpyHostToDevice));
 }
 
-void dmp_release_after_timing(dmp_model* h_dmp_db, dmp_model* dmp_db)
+void dmp_release_after_timing(DmpModel* h_dmp_db, DmpModel* dmp_db)
 {
     if (!dmpDeferTimingAlloc() || h_dmp_db == nullptr || dmp_db == nullptr) {
         return;
     }
     h_dmp_db->release_after_timing();
-    gpuErrchk(cudaMemcpy(dmp_db, h_dmp_db, sizeof(dmp_model), cudaMemcpyHostToDevice));
+    gpuErrchk(cudaMemcpy(dmp_db, h_dmp_db, sizeof(DmpModel), cudaMemcpyHostToDevice));
 }
-__host__ dmp_model::~dmp_model(){
+__host__ DmpModel::~DmpModel(){
     if(owns_allocations){
         if (C1) cudaFree(C1);
         if (C2) cudaFree(C2);
@@ -521,12 +521,12 @@ __host__ dmp_model::~dmp_model(){
 }
 void GPUTimer::initialize_dmp_model(){
     // cudaMemcpy(h_dmp_rc_, dmp_rc_, sizeof(dmp_rc), cudaMemcpyDeviceToHost);
-    h_dmp_db = new dmp_model(this);
-    cudaMalloc(&dmp_db, sizeof(dmp_model));
-    cudaMemcpy(dmp_db, h_dmp_db, sizeof(dmp_model), cudaMemcpyHostToDevice);
+    h_dmp_db = new DmpModel(this);
+    cudaMalloc(&dmp_db, sizeof(DmpModel));
+    cudaMemcpy(dmp_db, h_dmp_db, sizeof(DmpModel), cudaMemcpyHostToDevice);
     
 }
-// __device__ void dmp_model::compute_pi_model(int net_id, int el_rf){
+// __device__ void DmpModel::compute_pi_model(int net_id, int el_rf){
 //     int start_id = flat_net2pin_start_map[net_id];
 //     int end_id = flat_net2pin_start_map[net_id + 1];
 //     int root = flat_net2pin_map[start_id];
@@ -557,7 +557,7 @@ void GPUTimer::initialize_dmp_model(){
 
 // }
 
-// __global__ void compute_pi_model_kernel(dmp_model *dmp_db){
+// __global__ void compute_pi_model_kernel(DmpModel *dmp_db){
 //     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 //     int net_id = idx >> 2;
 //     int el_rf = idx & (NUM_ATTR - 1);
@@ -565,12 +565,12 @@ void GPUTimer::initialize_dmp_model(){
 //         dmp_db -> compute_pi_model(net_id, el_rf);
 //     }
 // }
-// void compute_pi_model_cuda(dmp_model *dmp_db, int num_nets){
+// void compute_pi_model_cuda(DmpModel *dmp_db, int num_nets){
 //     compute_pi_model_kernel<<<BLOCK_NUMBER(num_nets * NUM_ATTR), BLOCK_SIZE>>>(dmp_db);
 // }
 
 
-void print_pinLoad_cuda(dmp_model* dmp_db, vector<int> level_list_end_cpu, vector<std::string> pin_names){
+void print_pinLoad_cuda(DmpModel* dmp_db, vector<int> level_list_end_cpu, vector<std::string> pin_names){
     int total_num_pins = level_list_end_cpu.back();
     assert(total_num_pins == (int)pin_names.size());
     float* pinLoad_host = new float[total_num_pins * NUM_ATTR];
@@ -581,8 +581,8 @@ void print_pinLoad_cuda(dmp_model* dmp_db, vector<int> level_list_end_cpu, vecto
     float* pinRat_host = new float[total_num_pins * NUM_ATTR];
     int* level_pin_list_host = new int[total_num_pins];
     int* backward_arc_list_end_host = new int[total_num_pins + 1];
-    dmp_model* dmp_db_host = new dmp_model();
-    cudaMemcpy(dmp_db_host, dmp_db, sizeof(dmp_model), cudaMemcpyDeviceToHost);
+    DmpModel* dmp_db_host = new DmpModel();
+    cudaMemcpy(dmp_db_host, dmp_db, sizeof(DmpModel), cudaMemcpyDeviceToHost);
     dmp_db_host->owns_allocations = false;
     cudaMemcpy(backward_arc_list_end_host, dmp_db_host->pin_backward_arc_list_end, sizeof(int) * (total_num_pins + 1), cudaMemcpyDeviceToHost);
     int num_arcs = backward_arc_list_end_host[total_num_pins];

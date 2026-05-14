@@ -1,4 +1,4 @@
-#include "DmpGateKernels.cuh"
+#include "DmpKernels.cuh"
 #include "DmpCudaUtils.cuh"
 #include "DmpWaveform.cuh"
 #include "gputiming.h"
@@ -14,6 +14,5 @@ namespace gt {
 #include "dmp_gate/DmpGateCellModel.inc.cuh"
 #include "dmp_gate/DmpGatePropagation.inc.cuh"
 #include "dmp_gate/DmpGateDirect.inc.cuh"
-#include "dmp_gate/DmpGateHost.inc.cuh"
 
 } // namespace gt

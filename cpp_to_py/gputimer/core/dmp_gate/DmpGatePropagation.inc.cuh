@@ -1,4 +1,4 @@
-__device__ __forceinline__ bool dmpIsIdealClockTimingArc(const dmp_model* dmp_db,
+__device__ __forceinline__ bool dmpIsIdealClockTimingArc(const DmpModel* dmp_db,
                                                          int timing_id,
                                                          int from_pin_id) {
     return dmp_db->ideal_clock &&
@@ -7,7 +7,7 @@ __device__ __forceinline__ bool dmpIsIdealClockTimingArc(const dmp_model* dmp_db
            timing_id >= 0;
 }
 
-__device__ __forceinline__ float dmpClockPeriodForPin(const dmp_model* dmp_db,
+__device__ __forceinline__ float dmpClockPeriodForPin(const DmpModel* dmp_db,
                                                       int pin_id) {
     if (dmp_db->pin_clock_periods != nullptr && pin_id >= 0) {
         const float period = dmp_db->pin_clock_periods[pin_id];
@@ -18,7 +18,7 @@ __device__ __forceinline__ float dmpClockPeriodForPin(const dmp_model* dmp_db,
     return dmp_db->clock_period;
 }
 
-__device__ __forceinline__ float dmpClockPeriodForTest(const dmp_model* dmp_db,
+__device__ __forceinline__ float dmpClockPeriodForTest(const DmpModel* dmp_db,
                                                        int test_id) {
     if (dmp_db->test_clock_periods != nullptr && test_id >= 0) {
         const float period = dmp_db->test_clock_periods[test_id];
@@ -29,7 +29,7 @@ __device__ __forceinline__ float dmpClockPeriodForTest(const dmp_model* dmp_db,
     return dmp_db->clock_period;
 }
 
-__device__ __forceinline__ float dmpIdealClockEdgeTime(const dmp_model* dmp_db,
+__device__ __forceinline__ float dmpIdealClockEdgeTime(const DmpModel* dmp_db,
                                                        int timing_id,
                                                        int from_pin_id) {
     const bool latch_clock_arc = timing_id >= 0 &&
@@ -57,7 +57,7 @@ __device__ __forceinline__ float dmpIdealClockEdgeTime(const dmp_model* dmp_db,
     return nanf("");
 }
 
-__device__ __forceinline__ float dmpIdealClockSlew(const dmp_model* dmp_db,
+__device__ __forceinline__ float dmpIdealClockSlew(const DmpModel* dmp_db,
                                                    int from_pin_id,
                                                    int attr) {
     if (dmp_db->pin_clock_slews != nullptr && from_pin_id >= 0 && attr >= 0) {
@@ -69,7 +69,7 @@ __device__ __forceinline__ float dmpIdealClockSlew(const dmp_model* dmp_db,
     return 0.0f;
 }
 
-__device__ void dmp_model::propagateTest(){
+__device__ void DmpModel::propagateTest(){
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int i = idx & 0b111;
     int arc_id = arc_ids[idx];
@@ -124,7 +124,7 @@ __device__ void dmp_model::propagateTest(){
         }
     }
 }
-__device__ void dmp_model::propagatePinTests(int to_pin_idx){
+__device__ void DmpModel::propagatePinTests(int to_pin_idx){
     if (clock_period <= 0) {
         return;
     }
@@ -136,7 +136,7 @@ __device__ void dmp_model::propagatePinTests(int to_pin_idx){
     }
 }
 
-__global__ void propagatePinTests_dmp(dmp_model* dmp_db, int level_start_offset, int num_pins_level){
+__global__ void dmpTestKernel(DmpModel* dmp_db, int level_start_offset, int num_pins_level){
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int pin_id = idx >> 3;
     if(pin_id < num_pins_level){
@@ -144,7 +144,7 @@ __global__ void propagatePinTests_dmp(dmp_model* dmp_db, int level_start_offset,
     }
 }
 
-__global__ void propagateNetArcSlewDelay_dmp(dmp_model* dmp_db,
+__global__ void dmpDirectNetKernel(DmpModel* dmp_db,
                                              const index_type* level_arc_list,
                                              int num_level_arcs){
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -158,7 +158,7 @@ __global__ void propagateNetArcSlewDelay_dmp(dmp_model* dmp_db,
     }
 }
 
-__global__ void finalizePinWinners_dmp(dmp_model* dmp_db,
+__global__ void dmpPinWinnerKernel(DmpModel* dmp_db,
                                        int level_start_offset,
                                        int num_pins_level) {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -199,7 +199,7 @@ __global__ void finalizePinWinners_dmp(dmp_model* dmp_db,
     dmp_db->pin_slew_winner[to_slot] = 0ULL;
 }
 
-__global__ void finalizeNetDelayWinnersAndPropagateAT_dmp(dmp_model* dmp_db,
+__global__ void dmpNetWinnerKernel(DmpModel* dmp_db,
                                                           const index_type* level_arc_list,
                                                           int num_level_arcs) {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
