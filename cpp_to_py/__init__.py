@@ -1,4 +1,5 @@
 import torch
+
 __all__ = [
     "dct_cuda",
     "flute_cpp",
@@ -11,7 +12,7 @@ __all__ = [
     "gpudp",
     "routedp",
     "gputimer",
-    "wirelength_timing_cuda"
+    "wirelength_timing_cuda",
 ]
 from .cpybin import (
     dct_cuda,
@@ -25,6 +26,5 @@ from .cpybin import (
     gpudp,
     routedp,
     gputimer,
-    wirelength_timing_cuda
+    wirelength_timing_cuda,
 )
-

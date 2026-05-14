@@ -1,8 +1,10 @@
 import os
 import time
 import torch
-from cpp_to_py import gputimer
 import numpy as np
+from .ext_loader import load_cpybin
+
+gputimer = load_cpybin("gputimer")
 
 
 class MetricRecorder:
@@ -461,7 +463,7 @@ def merged_wl_loss_grad_timing(
     deterministic,
     cache_hpwl=True,
 ):
-    from cpp_to_py import wirelength_timing_cuda
+    wirelength_timing_cuda = load_cpybin("wirelength_timing_cuda")
 
     (
         partial_wa_wl,

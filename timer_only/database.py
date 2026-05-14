@@ -2,7 +2,7 @@ import torch
 import collections
 import copy
 import math
-from utils.io_parser import IOParser
+from .io_parser import IOParser
 
 
 def load_dataset(args, logger, params):

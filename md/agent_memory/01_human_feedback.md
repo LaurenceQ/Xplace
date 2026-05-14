@@ -2,21 +2,33 @@
 
 ## Scope
 
-- The user wants changes in Xplace, not `xplace_dmp` or standalone flows.
-- Do not modify placement/access-point code unless the task explicitly requires it. The final goal is OpenROAD global-route segment RC/timing alignment.
-- Current immediate goal: align sky130 RAT/slack and WNS/TNS across many cases. Do not stop at AT/slew or RC-only agreement.
-- Do not touch unrelated dirty files or revert user changes.
+- Work in `/research/d7/ascstd/qkduan25/Xplace`.
+- Do not switch to `xplace_dmp` or standalone timer unless explicitly asked.
+- Do not revert user changes or unrelated dirty files.
 - Do not commit unless explicitly asked.
 
-## OpenROAD Sidecar
+## Style
 
-- For OpenROAD-side dumps, use `/research/d7/ascstd/qkduan25/GNNTimer/openroad/src/MyDump.cc`.
-- Do not change the "pure" OpenROAD flow beyond extra sidecar dump functions.
-- Keep one dump command name for GR RC: `my_dump_gr_rc`.
+- Be concrete. Report exact WNS/TNS, wall time, RSS, GPU memory, and paths.
+- Do not guess when memory/logs can answer the question.
+- Do not rerun OpenROAD unless the user asks; use saved matrix/reference logs.
+- Do not add debug prints or profile logs by default.
 
-## Communication
+## Acceptance
 
-- Avoid guessing. When unsure about OpenROAD semantics, inspect OpenROAD code or compare dumped intermediate values.
-- The user cares about semantic equivalence first: RC graph, pin caps, AT/RAT/slack, and endpoint-level comparisons.
-- Report concrete numeric deltas when claiming alignment.
-- When comparing OpenROAD CSV/report pins to Xplace pins, handle name normalization explicitly before drawing conclusions. Pin-name mismatch has been a recurring source of false bugs.
+- Timing: Xplace direct `--route_segments` matches CRPR-off OpenROAD WNS/TNS
+  within 1%.
+- Performance: target is 4x end-to-end speedup over OpenROAD with lower memory.
+- Optimize small/mid cases first; large cases should benefit later.
+
+## OpenROAD Reference
+
+- Binary: `/research/d7/ascstd/qkduan25/OpenROAD/build/bin/openroad`.
+- Disable CRPR with `sta::set_crpr_enabled 0` and
+  `set ::sta_crpr_enabled 0`.
+- Current reference logs are under `openroad_gr_logs_skip_fanout300`.
+
+## Proxy
+
+- Keep Codex/MCP subprocesses on `http://127.0.0.1:7891`.
+- Use `cdx` or `/home/qkduan25/bin/codex` for new local sessions.

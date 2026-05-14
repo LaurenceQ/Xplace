@@ -1,84 +1,12 @@
 import glob
-import hashlib
-import json
 import os
-import re
-from src.database import load_dataset
+from .database import load_dataset
 
-
-FAKERAM_RE = re.compile(r"\bfakeram45_[A-Za-z0-9_]+")
-
-
-def _used_fakeram_cells(def_path):
-    used = set()
-    if not os.path.exists(def_path):
-        return used
-    try:
-        stat = os.stat(def_path)
-        cache_dir = os.environ.get(
-            "XPLACE_PLATFORM_CACHE_DIR",
-            os.path.join("result", "platform_cache"),
-        )
-        os.makedirs(cache_dir, exist_ok=True)
-        digest = hashlib.sha1(os.path.abspath(def_path).encode("utf-8")).hexdigest()[:16]
-        cache_path = os.path.join(
-            cache_dir,
-            f"{os.path.basename(def_path)}.{digest}.fakeram.json",
-        )
-        if os.path.exists(cache_path):
-            with open(cache_path, "r") as f:
-                payload = json.load(f)
-            if (
-                payload.get("size") == stat.st_size
-                and payload.get("mtime_ns") == stat.st_mtime_ns
-            ):
-                return set(payload.get("cells", []))
-    except Exception:
-        cache_path = ""
-        stat = None
-    with open(def_path, "r", errors="replace") as f:
-        for line in f:
-            if "fakeram45_" not in line:
-                continue
-            used.update(FAKERAM_RE.findall(line))
-    if cache_path and stat is not None:
-        try:
-            tmp_path = cache_path + ".tmp"
-            with open(tmp_path, "w") as f:
-                json.dump(
-                    {
-                        "size": stat.st_size,
-                        "mtime_ns": stat.st_mtime_ns,
-                        "cells": sorted(used),
-                    },
-                    f,
-                    separators=(",", ":"),
-                )
-            os.replace(tmp_path, cache_path)
-        except Exception:
-            pass
-    return used
-
-
-def _filter_unused_fakeram_files(paths, used_fakerams):
-    if not used_fakerams:
-        return [path for path in paths if "fakeram" not in os.path.basename(path).lower()]
-    kept = []
-    for path in paths:
-        base = os.path.basename(path)
-        if "fakeram" not in base.lower():
-            kept.append(path)
-            continue
-        stem = os.path.splitext(base)[0]
-        if stem in used_fakerams:
-            kept.append(path)
-    return kept
 
 def load_design(args,logger):
     # params = find_design_params(args, logger)
     # todo: 改一个新的get_custom_json_params
     # params = get_custom_json_params(args, logger)
-    import json
     arg_dict = vars(args)
     # with open(args.custom_json, 'r') as f:
     #     params = json.load(f)
@@ -143,12 +71,6 @@ def load_design(args,logger):
 
     if "benchmark" not in params.keys():
         raise ValueError("Cannot find 'benchmark' in args.custom_path")
-    if direct_rc_mode and "def" in params:
-        used_fakerams = _used_fakeram_cells(params["def"])
-        if "lefs" in params:
-            params["lefs"] = _filter_unused_fakeram_files(params["lefs"], used_fakerams)
-        if "libs" in params:
-            params["libs"] = _filter_unused_fakeram_files(params["libs"], used_fakerams)
     if "design_name" not in params.keys():
         raise ValueError("Cannot find 'design_name' in args.custom_path")
     args.dataset = params["benchmark"]

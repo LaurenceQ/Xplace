@@ -1,11 +1,14 @@
 import time
 import os
+import sys
+import argparse
+import datetime
 import torch
-from utils import *
-from src import Flute, GPUTimer
-from src import load_design, ParamScheduler
-from src.detail_placement import run_lg, detail_placement_main
-from pdb import set_trace as bp
+from timer_only.logger import setup_logger
+from timer_only.tools import set_random_seed, str2bool
+from timer_only.flute import Flute
+from timer_only.timing_opt import GPUTimer
+from timer_only.read_platform import load_design
 
 def getArgs():
     parser = argparse.ArgumentParser('sizer')
@@ -72,6 +75,16 @@ def getArgs():
     parser.add_argument('--decay_factor', type=float, default=0.3, help='decay factor of timing weight')
     parser.add_argument('--decay_boost', type=float, default=3, help='dynamic decay boost factor')
     parser.add_argument('--gr_rc', type=str, default='', help='OpenROAD my_dump_gr_rc output for DMP RC')
+    parser.add_argument('--route_segments', type=str, default='', help='OpenROAD write_global_route_segments output for direct DMP RC')
+    parser.add_argument('--debug_dump_rc_net', type=str, default='', help='dump one net RC after loading --gr_rc and/or --route_segments, then exit')
+    parser.add_argument('--debug_pin_timing', action='append', default=[], help='print AT/RAT/slack/slew/load for one pin after timing')
+    parser.add_argument('--debug_report_path_pin', action='append', default=[], help='print report_path for one endpoint pin after timing')
+    parser.add_argument('--debug_dump_endpoint_tests', type=str, default='', help='write per-test timing details for --debug_endpoint_test_pin endpoint pins')
+    parser.add_argument('--debug_endpoint_test_pin', action='append', default=[], help='endpoint pin to include in --debug_dump_endpoint_tests')
+    parser.add_argument('--debug_dump_endpoint_slacks', type=str, default='', help='write unique endpoint pin slack CSV after timing')
+    parser.add_argument('--debug_report_k_path', type=int, default=0, help='debug only: print top-K late-fall timing paths after timing')
+    parser.add_argument('--timer_verbose', type=str2bool, default=False, help='print verbose timer progress messages')
+    parser.add_argument('--fast_exit_after_timing', type=str2bool, default=False, help='direct timing only: opt-in fast process exit after reporting results')
     parser.add_argument('--wire_resistance_per_micron', type=float, default=2.4222e-02 * 1e3, help='unit wire resistance ohm/um, normalized across all layers. setup.sh kohm/um (follows last lib read by openroad)')
     parser.add_argument('--wire_capacitance_per_micron', type=float, default=1.2918e-01 * 1e-15, help='unit wire capacitance F/um, normalized across all layers. setup.sh fF/um (follows last lib read by openroad)')
     # parser.add_argument('--wire_resistance_per_micron', type=float, default=5.235, help='unit wire resistance, normalized across all layers')
@@ -181,6 +194,12 @@ def compare_opr_vs_ml(gputimer, infer_file, logger):
 def main():
     Flute.register(8)
     args = getArgs()
+    if args.route_segments or args.gr_rc:
+        os.environ.setdefault("GPUTIMER_DISABLE_REF_TIMING_TENSORS", "1")
+        os.environ.setdefault("GPUTIMER_DISABLE_STATE_BACKUP_TENSORS", "1")
+        os.environ.setdefault("GPUTIMER_EMPTY_CACHE_AFTER_GTDB", "1")
+        os.environ.setdefault("DMP_DEFER_TIMING_ALLOC", "1")
+        os.environ.setdefault("DMP_FORCE_PIN_FALLBACK", "1")
     logger = setup_logger(args, sys.argv)
 
     set_random_seed(args)
@@ -188,13 +207,40 @@ def main():
     device = torch.device(
         "cuda:{}".format(args.gpu) if torch.cuda.is_available() else "cpu"
     )
-    data = data.to(device)
-    data = data.preprocess()
+    if args.route_segments or args.gr_rc:
+        data = data.to_timing_device(device)
+        data = data.preprocess_timing()
+    else:
+        data = data.to(device)
+        data = data.preprocess()
+    if args.route_segments:
+        params["route_segments"] = args.route_segments
     if args.gr_rc:
         params["gr_rc"] = args.gr_rc
     gputimer = GPUTimer(data, rawdb, gpdb, params, args)
+    if args.route_segments or args.gr_rc:
+        data = None
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     # gputimer.timer.set_ideal_clock(True)
-    if args.gr_rc:
+    if args.debug_dump_rc_net:
+        if args.gr_rc:
+            gputimer.debug_dump_openroad_gr_rc_net(args.gr_rc, args.debug_dump_rc_net)
+        if args.route_segments:
+            gputimer.debug_dump_openroad_route_segments_rc_net(args.route_segments, args.debug_dump_rc_net)
+        return
+    if args.route_segments:
+        if not os.path.exists(args.route_segments):
+            raise FileNotFoundError(f"OpenROAD route segment file not found: {args.route_segments}")
+        if args.gr_rc:
+            if not os.path.exists(args.gr_rc):
+                raise FileNotFoundError(f"OpenROAD GR RC dump not found: {args.gr_rc}")
+            logger.info(f"Comparing raw route-segment RC against OpenROAD GR RC TSV: {args.gr_rc}")
+            gputimer.debug_compare_openroad_route_segments_rc(args.gr_rc, args.route_segments)
+        logger.info(f"Running DMP timing with OpenROAD route segments: {args.route_segments}")
+        gputimer.update_timing_dmp_route_segments(args.route_segments)
+        label = "DMP route-segment RC evaluation"
+    elif args.gr_rc:
         if not os.path.exists(args.gr_rc):
             raise FileNotFoundError(f"OpenROAD GR RC dump not found: {args.gr_rc}")
         logger.info(f"Running DMP timing with OpenROAD GR RC: {args.gr_rc}")
@@ -208,7 +254,72 @@ def main():
         label = "DMP SPEF evaluation"
     wns_early, tns_early, wns_late, tns_late = gputimer.report_timing_slack()
     logger.info("%s: wns_early: %.3f, tns_early: %.3f, wns_late: %.3f, tns_late: %.3f" % (label, wns_early, tns_early, wns_late, tns_late))
-    gputimer.timer.report_K_path(2, 1, 1, True)
+    time_to_ns = gputimer.timer.time_unit() * 1e9
+    for pin_name in args.debug_pin_timing:
+        try:
+            idx = gputimer.pin_names.index(pin_name)
+            at = (gputimer.timer.report_pin_at()[idx] * time_to_ns).detach().cpu().tolist()
+            rat = (gputimer.timer.report_pin_rat()[idx] * time_to_ns).detach().cpu().tolist()
+            slew = (gputimer.timer.report_pin_slew()[idx] * time_to_ns).detach().cpu().tolist()
+            load = gputimer.timer.report_pin_load()[idx].detach().cpu().tolist()
+            slack = [r - a for a, r in zip(at, rat)]
+            logger.info(
+                f"DEBUG_PIN_TIMING {pin_name} idx={idx} AT(ns)={at} "
+                f"RAT(ns)={rat} slack(ns)={slack} slew(ns)={slew} load={load}"
+            )
+        except ValueError:
+            logger.info(f"DEBUG_PIN_TIMING {pin_name} not found")
+    for pin_name in args.debug_report_path_pin:
+        try:
+            logger.info(f"DEBUG_REPORT_PATH {pin_name} late-fall")
+            gputimer.report_path(pin_name, 1, 1, True)
+        except ValueError:
+            logger.info(f"DEBUG_REPORT_PATH {pin_name} not found")
+    if args.debug_dump_endpoint_tests:
+        gputimer.timer.debug_dump_endpoint_tests(args.debug_dump_endpoint_tests, args.debug_endpoint_test_pin)
+    if args.debug_dump_endpoint_slacks:
+        import csv
+        endpoint_pin_slack = None
+        if hasattr(gputimer.timer, "report_endpoint_pin_slack"):
+            endpoint_pin_slack = (gputimer.timer.report_endpoint_pin_slack() * time_to_ns).detach().cpu()
+        pin_slack = (gputimer.timer.report_pin_slack() * time_to_ns).detach().cpu()
+        pin_at = (gputimer.timer.report_pin_at() * time_to_ns).detach().cpu()
+        pin_rat = (gputimer.timer.report_pin_rat() * time_to_ns).detach().cpu()
+        rows = []
+        if endpoint_pin_slack is not None and endpoint_pin_slack.numel() > 0:
+            endpoint_ids = []
+            for pin_id in range(endpoint_pin_slack.shape[0]):
+                slacks = endpoint_pin_slack[pin_id]
+                valid = torch.isfinite(slacks) & (slacks < 1.0e20)
+                if torch.any(valid).item():
+                    endpoint_ids.append(pin_id)
+        else:
+            endpoint_ids = torch.unique(gputimer.timer.endpoints_index()).detach().cpu().tolist()
+        for pin_id in endpoint_ids:
+            slacks = (endpoint_pin_slack[pin_id] if endpoint_pin_slack is not None and endpoint_pin_slack.numel() > 0
+                      else pin_slack[pin_id]).tolist()
+            pin_slacks = pin_slack[pin_id].tolist()
+            late_slack = min(slacks[2], slacks[3])
+            rows.append((late_slack, pin_id, slacks, pin_slacks, pin_at[pin_id].tolist(), pin_rat[pin_id].tolist()))
+        rows.sort(key=lambda x: x[0])
+        with open(args.debug_dump_endpoint_slacks, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["pin_id", "pin_name", "endpoint_slack_er", "endpoint_slack_ef",
+                             "endpoint_slack_lr", "endpoint_slack_lf",
+                             "pin_slack_er", "pin_slack_ef", "pin_slack_lr", "pin_slack_lf",
+                             "at_er", "at_ef", "at_lr", "at_lf",
+                             "rat_er", "rat_ef", "rat_lr", "rat_lf"])
+            for _, pin_id, slacks, pin_slacks, at, rat in rows:
+                writer.writerow([pin_id, gputimer.pin_names[pin_id], *slacks, *pin_slacks, *at, *rat])
+        logger.info(f"DEBUG_DUMP_ENDPOINT_SLACKS wrote {len(rows)} rows to {args.debug_dump_endpoint_slacks}")
+    if args.debug_report_k_path > 0:
+        gputimer.timer.report_K_path(args.debug_report_k_path, 1, 1, True)
+    if (args.route_segments or args.gr_rc) and args.fast_exit_after_timing:
+        for handler in logger.handlers:
+            handler.flush()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
     # spef_infer = f"./TimingPredict/infer_results/02_gpu_order/{args.designName}.infer"
     # opr_infer  = f"./synthetic_data/infer_results/05_netconv_sage_16400/{args.designName}.infer"
     # opr_infer  = f"./synthetic_data/infer_results/00_gcn_sky130/{args.designName}.infer"

@@ -1,6 +1,8 @@
 import torch
-from cpp_to_py import io_parser
 import os
+from .ext_loader import load_cpybin
+
+io_parser = load_cpybin("io_parser")
 
 class IOParser(object):
     def __init__(self) -> None:

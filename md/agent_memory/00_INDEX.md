@@ -1,62 +1,46 @@
 # Xplace Agent Memory Index
 
-This directory stores durable notes for long-running
-Xplace/GPUTimer/OpenROAD alignment work. Read this file after `AGENTS.md`, then
-open only the files relevant to the current task.
+Active scope: ISPD2025 Xplace/GPUTimer direct `--route_segments` timing,
+runtime, CPU memory, and GPU memory versus CRPR-off OpenROAD.
+
+Read this file after `AGENTS.md`. Then open only the focused file needed for
+the question; do not grep all logs first.
+
+## Read Order
+
+- Timing correctness: `02_openroad_gr_rc_alignment.md`, then
+  `06_case_status.md`, then `05_current_case_debugging.md`.
+- bsg/NVDLA/ariane skip-fanout: `07_skip_fanout_policy.md`, then
+  `05_current_case_debugging.md`.
+- DMP branch / arc-level: `08_dmp_fallback_branch.md`.
+- Speed or memory: `09_speed_memory_status.md`.
+- Commands and paths: `04_tools.md`.
+- Trap check before edits: `03_pitfalls.md`.
+- Memory maintenance: `11_memory_policy.md`.
 
 ## Active Files
 
-- `01_human_feedback.md`: user preferences, hard constraints, and repeated
-  corrections.
-- `02_openroad_gr_rc_alignment.md`: active ISPD2025 OpenROAD global-route
-  segment timing-alignment target, verified facts, scope, and success criteria.
-- `03_pitfalls.md`: mistakes and semantic traps to check before changing
-  timing, RC, Liberty parsing, or OpenROAD segment flows.
-- `04_tools.md`: active ISPD2025 paths, OpenROAD binaries, segment reference
-  scripts, and build/run notes.
+- `01_human_feedback.md`: user constraints, repo scope, communication rules.
+- `02_openroad_gr_rc_alignment.md`: current timing target and references.
+- `03_pitfalls.md`: high-risk mistakes to avoid.
+- `04_tools.md`: canonical paths and minimal run commands.
+- `05_current_case_debugging.md`: case-specific triage notes.
+- `06_case_status.md`: current pass/fail and speed rows.
+- `07_skip_fanout_policy.md`: missing-high-fanout fallback settings.
+- `08_dmp_fallback_branch.md`: full arc-level vs hybrid/fused fallback facts.
+- `09_speed_memory_status.md`: current optimization state and bottlenecks.
+- `10_artifacts.md`: important summaries, logs, and evidence locations.
+- `11_memory_policy.md`: rules for adding, deleting, merging, and splitting
+  memory notes after important conclusions.
 
-## Archived Memory
+## Do Not Confuse
 
-Previous sky130 no-CRPR CSV alignment memory was copied to:
+- 1% timing pass/fail is separate from 4x speed pass/fail.
+- `bsg_chip` timing passes with missing-high-fanout skip `300`.
+- `visible/NV_NVDLA_partition_c` and `blind/ariane` need skip `0`.
+- `mempool_group/cluster` need skip `300` for memory/time.
 
-```text
-/research/d7/ascstd/qkduan25/Xplace/md/agent_memory/archive/sky130_no_crpr_2026-05-12
-```
+## Archive
 
-Use that archive only when returning to sky130 CSV work. It is no longer the
-active target.
-
-## Current Priority
-
-The active target is now ISPD2025 OpenROAD global-route segment timing
-alignment:
-
-```text
-/research/d7/ascstd/qkduan25/contest25/ISPD2025_benchmarks
-```
-
-Task definition:
-
-- Use OpenROAD-generated global-route segment files as the reference route/RC
-  input.
-- Read the same segments into Xplace/GPUTimer.
-- Disable OpenROAD CRPR/CPPR for reference timing.
-- Compare no-CRPR slack, WNS, and TNS against OpenROAD.
-- Start from visible `ariane`, then expand only after the smallest case is
-  understood.
-
-Primary OpenROAD reference binary for this task:
-
-```text
-/research/d7/ascstd/qkduan25/OpenROAD/build/bin/openroad
-```
-
-OpenROAD CRPR must be disabled explicitly in reference Tcl:
-
-```tcl
-sta::set_crpr_enabled 0
-set ::sta_crpr_enabled 0
-```
-
-Do not claim alignment from RC graph loading alone. Alignment means WNS/TNS and
-endpoint slack agree on the same global-route segment input with CRPR disabled.
+`archive/` contains older sky130 and historical notes. Do not read it unless
+explicitly returning to that work.
