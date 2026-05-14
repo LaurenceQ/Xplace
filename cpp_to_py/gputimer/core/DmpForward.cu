@@ -19,23 +19,12 @@ struct DmpForwardArcLevels {
     vector<int> net_arc_end;
     vector<index_type> direct_net_arc_list;
     vector<int> direct_net_arc_end;
-    vector<index_type> pair_gate_arc_list;
-    vector<index_type> pair_net_arc_list;
-    vector<int> pair_end;
-    vector<index_type> valid_pair_gate_arc_list;
-    vector<index_type> valid_pair_net_arc_list;
-    vector<uint8_t> valid_pair_lane_list;
-    vector<int> valid_pair_end;
     int max_level_gate_arcs = 0;
     int max_gate_level = -1;
     int max_level_net_arcs = 0;
     int max_net_level = -1;
     int max_level_direct_net_arcs = 0;
     int max_direct_net_level = -1;
-    int max_level_pairs = 0;
-    int max_pair_level = -1;
-    int max_level_valid_pairs = 0;
-    int max_valid_pair_level = -1;
     int scratch_capacity_items = 0;
     int num_pins = 0;
     int num_arcs = 0;
@@ -43,13 +32,7 @@ struct DmpForwardArcLevels {
     index_type* d_forward_gate_arc_list = nullptr;
     index_type* d_forward_net_arc_list = nullptr;
     index_type* d_forward_direct_net_arc_list = nullptr;
-    index_type* d_forward_pair_gate_arc_list = nullptr;
-    index_type* d_forward_pair_net_arc_list = nullptr;
-    index_type* d_valid_pair_gate_arc_list = nullptr;
-    index_type* d_valid_pair_net_arc_list = nullptr;
-    uint8_t* d_valid_pair_lane_list = nullptr;
     bool uploaded = false;
-    bool build_pairs = true;
 };
 
 static constexpr int DMP_GNP_DEBUG_COUNTERS = 4;
@@ -68,31 +51,21 @@ struct DmpKernelProfile {
 
 enum DmpKernelProfileId {
     DMP_PROFILE_GATE_DELAY_SLEW = 0,
-    DMP_PROFILE_GATE_AT,
-    DMP_PROFILE_GATE_NET_PAIR,
     DMP_PROFILE_DIRECT_NET,
     DMP_PROFILE_NET_DELAY_FINALIZE,
-    DMP_PROFILE_NET_AT,
     DMP_PROFILE_AT_FINALIZE,
-    DMP_PROFILE_SLEW_FINALIZE,
     DMP_PROFILE_ARC_TEST,
-    DMP_PROFILE_PIN_FALLBACK,
     DMP_PROFILE_BACKWARD,
     DMP_PROFILE_COUNT
 };
 
 static void dmp_init_kernel_profiles(DmpKernelProfile profiles[DMP_PROFILE_COUNT])
 {
-    profiles[DMP_PROFILE_GATE_DELAY_SLEW].name = "propagateArcDelaySlewAndAT_dmp";
-    profiles[DMP_PROFILE_GATE_AT].name = "propagateArcAT_dmp(gate)";
-    profiles[DMP_PROFILE_GATE_NET_PAIR].name = "propagateGateNetPairValid_dmp";
+    profiles[DMP_PROFILE_GATE_DELAY_SLEW].name = "propagateFusedGateNetDelaySlewAndAT_dmp";
     profiles[DMP_PROFILE_DIRECT_NET].name = "propagateNetArcSlewDelay_dmp";
     profiles[DMP_PROFILE_NET_DELAY_FINALIZE].name = "finalizeNetDelayWinnersAndPropagateAT_dmp";
-    profiles[DMP_PROFILE_NET_AT].name = "propagateArcAT_dmp(net)";
     profiles[DMP_PROFILE_AT_FINALIZE].name = "finalizePinWinners_dmp";
-    profiles[DMP_PROFILE_SLEW_FINALIZE].name = "finalizeSlewWinners_dmp";
     profiles[DMP_PROFILE_ARC_TEST].name = "propagatePinTests_dmp";
-    profiles[DMP_PROFILE_PIN_FALLBACK].name = "propagatePin_dmp";
     profiles[DMP_PROFILE_BACKWARD].name = "propagatePinBack_dmp";
 }
 
@@ -167,47 +140,15 @@ static void dmp_print_kernel_profiles(const DmpKernelProfile profiles[DMP_PROFIL
     fflush(stdout);
 }
 
-static bool dmp_host_transition_defined(const GPULutAllocator* allocator,
-                                        int timing_id,
-                                        int input_rf,
-                                        int output_rf)
-{
-    if (allocator == nullptr || timing_id < 0 || timing_id >= allocator->num_timings ||
-        input_rf < 0 || output_rf < 0) {
-        return false;
-    }
-    if (allocator->is_rising_edge_triggered[timing_id] && input_rf != 0) {
-        return false;
-    }
-    if (allocator->is_falling_edge_triggered[timing_id] && input_rf != 1) {
-        return false;
-    }
-    const int sense = allocator->timing_sense[timing_id];
-    if (sense == 1 && input_rf != output_rf) {
-        return false;
-    }
-    if (sense == 2 && input_rf == output_rf) {
-        return false;
-    }
-    return true;
-}
-
 static DmpForwardArcLevels build_forward_arc_levels(dmp_model* dmp_db,
-                                                    const vector<int>& level_list_end_cpu,
-                                                    const GPULutAllocator* allocator,
-                                                    bool build_pairs) {
+                                                    const vector<int>& level_list_end_cpu) {
     DmpForwardArcLevels result;
-    result.build_pairs = build_pairs;
     result.gate_arc_end.reserve(level_list_end_cpu.size());
     result.net_arc_end.reserve(level_list_end_cpu.size());
     result.direct_net_arc_end.reserve(level_list_end_cpu.size());
-    result.pair_end.reserve(level_list_end_cpu.size());
-    result.valid_pair_end.reserve(level_list_end_cpu.size());
     result.gate_arc_end.push_back(0);
     result.net_arc_end.push_back(0);
     result.direct_net_arc_end.push_back(0);
-    result.pair_end.push_back(0);
-    result.valid_pair_end.push_back(0);
 
     dmp_model h_dmp;
     gpuErrchk(cudaMemcpy(&h_dmp, dmp_db, sizeof(dmp_model), cudaMemcpyDeviceToHost));
@@ -215,7 +156,7 @@ static DmpForwardArcLevels build_forward_arc_levels(dmp_model* dmp_db,
     const bool log_schedule = dmp_kernel_profile_enabled() || dmp_timing_debug_enabled();
     if (h_dmp.num_pins <= 0 || h_dmp.num_arcs < 0 || level_list_end_cpu.empty()) {
         if (log_schedule) {
-            printf("[DMP FORWARD ARC LEVEL] skip build invalid dimensions pins=%d arcs=%d levels=%zu\n",
+            printf("[DMP FORWARD SCHEDULE] skip build invalid dimensions pins=%d arcs=%d levels=%zu\n",
                    h_dmp.num_pins, h_dmp.num_arcs, level_list_end_cpu.size());
         }
         return result;
@@ -230,7 +171,6 @@ static DmpForwardArcLevels build_forward_arc_levels(dmp_model* dmp_db,
     vector<index_type> fanin_arcs(h_dmp.num_arcs);
     vector<index_type> timing_from(h_dmp.num_arcs);
     vector<int> arc_types(h_dmp.num_arcs);
-    vector<int> timing_arc_id_map(h_dmp.num_arcs * 2);
     if (!level_list.empty()) {
         gpuErrchk(cudaMemcpy(level_list.data(), h_dmp.level_list,
                              sizeof(index_type) * level_list.size(),
@@ -249,9 +189,6 @@ static DmpForwardArcLevels build_forward_arc_levels(dmp_model* dmp_db,
         gpuErrchk(cudaMemcpy(arc_types.data(), h_dmp.arc_types,
                              sizeof(int) * arc_types.size(),
                              cudaMemcpyDeviceToHost));
-        gpuErrchk(cudaMemcpy(timing_arc_id_map.data(), h_dmp.timing_arc_id_map,
-                             sizeof(int) * timing_arc_id_map.size(),
-                             cudaMemcpyDeviceToHost));
     }
 
     for (int level = 0; level + 1 < static_cast<int>(level_list_end_cpu.size()); ++level) {
@@ -260,8 +197,6 @@ static DmpForwardArcLevels build_forward_arc_levels(dmp_model* dmp_db,
         const int gate_before = static_cast<int>(result.gate_arc_list.size());
         const int net_before = static_cast<int>(result.net_arc_list.size());
         const int direct_before = static_cast<int>(result.direct_net_arc_list.size());
-        const int pair_before = static_cast<int>(result.pair_gate_arc_list.size());
-        const int valid_pair_before = static_cast<int>(result.valid_pair_gate_arc_list.size());
         for (int pos = start; pos < end; ++pos) {
             const int pin = level_list[pos];
             for (index_type arc_pos = fanin_end[pin]; arc_pos < fanin_end[pin + 1]; ++arc_pos) {
@@ -282,21 +217,6 @@ static DmpForwardArcLevels build_forward_arc_levels(dmp_model* dmp_db,
                             const int gate_arc = fanin_arcs[src_pos];
                             if (gate_arc >= 0 && gate_arc < h_dmp.num_arcs &&
                                 arc_types[gate_arc] == 1) {
-                                if (build_pairs) {
-                                    result.pair_gate_arc_list.push_back(gate_arc);
-                                    result.pair_net_arc_list.push_back(arc_id);
-                                    for (int lane = 0; lane < DMP_PIN_GROUP_SIZE; ++lane) {
-                                        const int el = lane >> 2;
-                                        const int input_rf = (lane >> 1) & 1;
-                                        const int output_rf = lane & 1;
-                                        const int timing_id = timing_arc_id_map[gate_arc * 2 + el];
-                                        if (dmp_host_transition_defined(allocator, timing_id, input_rf, output_rf)) {
-                                            result.valid_pair_gate_arc_list.push_back(gate_arc);
-                                            result.valid_pair_net_arc_list.push_back(arc_id);
-                                            result.valid_pair_lane_list.push_back(static_cast<uint8_t>(lane));
-                                        }
-                                    }
-                                }
                                 has_gate_driver = true;
                             }
                         }
@@ -310,8 +230,6 @@ static DmpForwardArcLevels build_forward_arc_levels(dmp_model* dmp_db,
         const int level_gate_arcs = static_cast<int>(result.gate_arc_list.size()) - gate_before;
         const int level_net_arcs = static_cast<int>(result.net_arc_list.size()) - net_before;
         const int level_direct_net_arcs = static_cast<int>(result.direct_net_arc_list.size()) - direct_before;
-        const int level_pairs = static_cast<int>(result.pair_gate_arc_list.size()) - pair_before;
-        const int level_valid_pairs = static_cast<int>(result.valid_pair_gate_arc_list.size()) - valid_pair_before;
         if (level_gate_arcs > result.max_level_gate_arcs) {
             result.max_level_gate_arcs = level_gate_arcs;
             result.max_gate_level = level;
@@ -324,43 +242,24 @@ static DmpForwardArcLevels build_forward_arc_levels(dmp_model* dmp_db,
             result.max_level_direct_net_arcs = level_direct_net_arcs;
             result.max_direct_net_level = level;
         }
-        if (level_pairs > result.max_level_pairs) {
-            result.max_level_pairs = level_pairs;
-            result.max_pair_level = level;
-        }
-        if (level_valid_pairs > result.max_level_valid_pairs) {
-            result.max_level_valid_pairs = level_valid_pairs;
-            result.max_valid_pair_level = level;
-        }
         result.gate_arc_end.push_back(static_cast<int>(result.gate_arc_list.size()));
         result.net_arc_end.push_back(static_cast<int>(result.net_arc_list.size()));
         result.direct_net_arc_end.push_back(static_cast<int>(result.direct_net_arc_list.size()));
-        result.pair_end.push_back(static_cast<int>(result.pair_gate_arc_list.size()));
-        result.valid_pair_end.push_back(static_cast<int>(result.valid_pair_gate_arc_list.size()));
     }
 
     if (log_schedule) {
-        printf("[DMP FORWARD ARC LEVEL] built levels=%zu gate_arcs=%zu net_arcs=%zu direct_net_arcs=%zu gate_net_pairs=%zu valid_pair_lanes=%zu invalid_pair_lanes=%zu max_gate=%d@L%d max_net=%d@L%d max_direct_net=%d@L%d max_pairs=%d@L%d max_valid_pair_lanes=%d@L%d scratch_capacity_items=%d enabled=%d\n",
+        printf("[DMP FORWARD SCHEDULE] built levels=%zu gate_arcs=%zu net_arcs=%zu direct_net_arcs=%zu max_gate=%d@L%d max_net=%d@L%d max_direct_net=%d@L%d scratch_capacity_items=%d mode=fused\n",
                result.gate_arc_end.empty() ? 0 : result.gate_arc_end.size() - 1,
                result.gate_arc_list.size(),
                result.net_arc_list.size(),
                result.direct_net_arc_list.size(),
-               result.pair_gate_arc_list.size(),
-               result.valid_pair_gate_arc_list.size(),
-               result.pair_gate_arc_list.size() * static_cast<size_t>(DMP_PIN_GROUP_SIZE) -
-                   result.valid_pair_gate_arc_list.size(),
                result.max_level_gate_arcs,
                result.max_gate_level,
                result.max_level_net_arcs,
                result.max_net_level,
                result.max_level_direct_net_arcs,
                result.max_direct_net_level,
-               result.max_level_pairs,
-               result.max_pair_level,
-               result.max_level_valid_pairs,
-               result.max_valid_pair_level,
-               result.scratch_capacity_items,
-               DMP_FORWARD_ARC_LEVEL ? 1 : 0);
+               result.scratch_capacity_items);
     }
     dmp_clear_stale_cuda_error("build forward arc levels");
     return result;
@@ -388,11 +287,6 @@ static void dmp_upload_forward_schedule(DmpForwardArcLevels& schedule)
     dmp_upload_vector(schedule.gate_arc_list, &schedule.d_forward_gate_arc_list);
     dmp_upload_vector(schedule.net_arc_list, &schedule.d_forward_net_arc_list);
     dmp_upload_vector(schedule.direct_net_arc_list, &schedule.d_forward_direct_net_arc_list);
-    dmp_upload_vector(schedule.pair_gate_arc_list, &schedule.d_forward_pair_gate_arc_list);
-    dmp_upload_vector(schedule.pair_net_arc_list, &schedule.d_forward_pair_net_arc_list);
-    dmp_upload_vector(schedule.valid_pair_gate_arc_list, &schedule.d_valid_pair_gate_arc_list);
-    dmp_upload_vector(schedule.valid_pair_net_arc_list, &schedule.d_valid_pair_net_arc_list);
-    dmp_upload_vector(schedule.valid_pair_lane_list, &schedule.d_valid_pair_lane_list);
     schedule.uploaded = true;
 }
 
@@ -411,33 +305,17 @@ void release_dmp_forward_schedule_cuda(void* schedule_ptr)
     if (schedule->d_forward_direct_net_arc_list != nullptr) {
         gpuErrchk(cudaFree(schedule->d_forward_direct_net_arc_list));
     }
-    if (schedule->d_forward_pair_gate_arc_list != nullptr) {
-        gpuErrchk(cudaFree(schedule->d_forward_pair_gate_arc_list));
-    }
-    if (schedule->d_forward_pair_net_arc_list != nullptr) {
-        gpuErrchk(cudaFree(schedule->d_forward_pair_net_arc_list));
-    }
-    if (schedule->d_valid_pair_gate_arc_list != nullptr) {
-        gpuErrchk(cudaFree(schedule->d_valid_pair_gate_arc_list));
-    }
-    if (schedule->d_valid_pair_net_arc_list != nullptr) {
-        gpuErrchk(cudaFree(schedule->d_valid_pair_net_arc_list));
-    }
-    if (schedule->d_valid_pair_lane_list != nullptr) {
-        gpuErrchk(cudaFree(schedule->d_valid_pair_lane_list));
-    }
     delete schedule;
 }
 
-static DmpForwardArcLevels& dmp_get_forward_schedule(GPUTimer* timer, bool build_pairs)
+static DmpForwardArcLevels& dmp_get_forward_schedule(GPUTimer* timer)
 {
     auto* schedule = reinterpret_cast<DmpForwardArcLevels*>(timer->dmp_forward_schedule);
     const int level_list_size = timer->level_list_end_cpu.empty() ? 0 : timer->level_list_end_cpu.back();
     if (schedule != nullptr &&
         schedule->num_pins == timer->num_pins &&
         schedule->num_arcs == timer->num_arcs &&
-        schedule->level_list_size == level_list_size &&
-        schedule->build_pairs == build_pairs) {
+        schedule->level_list_size == level_list_size) {
         return *schedule;
     }
     if (schedule != nullptr) {
@@ -445,7 +323,7 @@ static DmpForwardArcLevels& dmp_get_forward_schedule(GPUTimer* timer, bool build
         timer->dmp_forward_schedule = nullptr;
     }
     schedule = new DmpForwardArcLevels(
-        build_forward_arc_levels(timer->dmp_db, timer->level_list_end_cpu, timer->allocator, build_pairs));
+        build_forward_arc_levels(timer->dmp_db, timer->level_list_end_cpu));
     dmp_upload_forward_schedule(*schedule);
     timer->dmp_forward_schedule = schedule;
     return *schedule;
@@ -470,13 +348,6 @@ void update_timing_dmp_cuda(GPUTimer* timer){
                              sizeof(float) * h_entry_dmp.dmp_pin_slot_count,
                              cudaMemcpyDeviceToDevice));
     }
-    if (h_entry_dmp.pin_slew_update_lock != nullptr && h_entry_dmp.pin_at_update_lock != nullptr &&
-        h_entry_dmp.dmp_pin_slot_count > 0) {
-        gpuErrchk(cudaMemset(h_entry_dmp.pin_slew_update_lock, 0,
-                             sizeof(int) * h_entry_dmp.dmp_pin_slot_count));
-        gpuErrchk(cudaMemset(h_entry_dmp.pin_at_update_lock, 0,
-                             sizeof(int) * h_entry_dmp.dmp_pin_slot_count));
-    }
     if (h_entry_dmp.pin_at_winner != nullptr && h_entry_dmp.dmp_pin_slot_count > 0) {
         gpuErrchk(cudaMemset(h_entry_dmp.pin_at_winner, 0,
                              sizeof(unsigned long long) * h_entry_dmp.dmp_pin_slot_count));
@@ -496,17 +367,8 @@ void update_timing_dmp_cuda(GPUTimer* timer){
     }
     unsigned long long* d_gate_net_pair_debug_counts = nullptr;
     unsigned long long gate_net_pair_debug_counts[DMP_GNP_DEBUG_COUNTERS] = {0ULL, 0ULL, 0ULL, 0ULL};
-    const bool use_arc_level = DMP_FORWARD_ARC_LEVEL && h_entry_dmp.use_arc_level;
-    DmpForwardArcLevels* forward_arc_levels = nullptr;
-    if (use_arc_level) {
-        forward_arc_levels = &dmp_get_forward_schedule(timer, true);
-    } else if (DMP_FORWARD_ARC_LEVEL) {
-        forward_arc_levels = &dmp_get_forward_schedule(timer, false);
-    }
-    if (debug_timing && forward_arc_levels != nullptr &&
-        ((use_arc_level && !forward_arc_levels->pair_gate_arc_list.empty()) ||
-         h_entry_dmp.use_hybrid_arc_slots ||
-         h_entry_dmp.use_fused_fallback)) {
+    DmpForwardArcLevels* forward_arc_levels = &dmp_get_forward_schedule(timer);
+    if (debug_timing) {
         gpuErrchk(cudaMalloc(&d_gate_net_pair_debug_counts,
                              sizeof(unsigned long long) * DMP_GNP_DEBUG_COUNTERS));
         gpuErrchk(cudaMemset(d_gate_net_pair_debug_counts, 0,
@@ -523,16 +385,10 @@ void update_timing_dmp_cuda(GPUTimer* timer){
     float forward_max_level_ms = 0.0f;
     int forward_max_level = -1;
     int forward_launches = 0;
-    int forward_arc_launches = 0;
     int forward_gate_launches = 0;
-    int forward_gate_at_launches = 0;
-    int forward_pair_launches = 0;
     int forward_direct_net_launches = 0;
-    int forward_net_at_launches = 0;
     int forward_at_finalize_launches = 0;
-    int forward_slew_finalize_launches = 0;
     int forward_net_delay_finalize_launches = 0;
-    int forward_pin_fallback_launches = 0;
     int forward_arc_test_launches = 0;
     DmpKernelProfile kernel_profiles[DMP_PROFILE_COUNT];
     dmp_init_kernel_profiles(kernel_profiles);
@@ -572,32 +428,12 @@ void update_timing_dmp_cuda(GPUTimer* timer){
                                           i + 1 < static_cast<int>(forward_arc_levels->direct_net_arc_end.size()))
                                              ? forward_arc_levels->direct_net_arc_end[i + 1]
                                              : level_direct_net_start;
-        const int level_pair_start = (forward_arc_levels != nullptr &&
-                                      i + 1 < static_cast<int>(forward_arc_levels->pair_end.size()))
-                                         ? forward_arc_levels->pair_end[i]
-                                         : 0;
-        const int level_pair_end = (forward_arc_levels != nullptr &&
-                                    i + 1 < static_cast<int>(forward_arc_levels->pair_end.size()))
-                                       ? forward_arc_levels->pair_end[i + 1]
-                                       : level_pair_start;
-        const int level_valid_pair_start = (forward_arc_levels != nullptr &&
-                                            i + 1 < static_cast<int>(forward_arc_levels->valid_pair_end.size()))
-                                               ? forward_arc_levels->valid_pair_end[i]
-                                               : 0;
-        const int level_valid_pair_end = (forward_arc_levels != nullptr &&
-                                          i + 1 < static_cast<int>(forward_arc_levels->valid_pair_end.size()))
-                                             ? forward_arc_levels->valid_pair_end[i + 1]
-                                             : level_valid_pair_start;
         const int num_gate_arcs_level = level_gate_end - level_gate_start;
         const int num_net_arcs_level = level_net_end - level_net_start;
         const int num_direct_net_arcs_level = level_direct_net_end - level_direct_net_start;
-        const int num_pairs_level = level_pair_end - level_pair_start;
-        const int num_valid_pairs_level = level_valid_pair_end - level_valid_pair_start;
         const int pin_work_items = num_pins_level * DMP_PIN_GROUP_SIZE;
         const int gate_work_items = num_gate_arcs_level * DMP_PIN_GROUP_SIZE;
         const int direct_net_work_items = num_direct_net_arcs_level * DMP_PIN_GROUP_SIZE;
-        const int pair_work_items = num_valid_pairs_level;
-        const int work_items = pin_work_items;
         const int pin_blocks = DMP_TIMING_BLOCK_NUMBER(pin_work_items);
         if (profile_kernels) {
             dmp_clear_stale_cuda_error("before forward launch");
@@ -626,11 +462,10 @@ void update_timing_dmp_cuda(GPUTimer* timer){
             cudaError_t launch_error = cudaPeekAtLastError();
             if (launch_error != cudaSuccess) {
                 fprintf(stderr,
-                        "[DMP CUDA] forward %s launch failed level=%d pin_start=%d pin_count=%d gate=%d net=%d direct_net=%d pairs=%d work=%d blocks=%d block=%d: %s\n",
+                        "[DMP CUDA] forward %s launch failed level=%d pin_start=%d pin_count=%d gate=%d net=%d direct_net=%d work=%d blocks=%d block=%d: %s\n",
                         stage, i, (int)level_start_offset, num_pins_level,
                         num_gate_arcs_level, num_net_arcs_level,
-                        num_direct_net_arcs_level, num_pairs_level,
-                        stage_work_items, stage_blocks,
+                        num_direct_net_arcs_level, stage_work_items, stage_blocks,
                         DMP_TIMING_BLOCK_SIZE, cudaGetErrorString(launch_error));
                 exit(launch_error);
             }
@@ -641,11 +476,10 @@ void update_timing_dmp_cuda(GPUTimer* timer){
             cudaError_t sync_error = cudaDeviceSynchronize();
             if (sync_error != cudaSuccess) {
                 fprintf(stderr,
-                        "[DMP CUDA] forward %s sync failed level=%d pin_start=%d pin_count=%d gate=%d net=%d direct_net=%d pairs=%d work=%d blocks=%d block=%d: %s\n",
+                        "[DMP CUDA] forward %s sync failed level=%d pin_start=%d pin_count=%d gate=%d net=%d direct_net=%d work=%d blocks=%d block=%d: %s\n",
                         stage, i, (int)level_start_offset, num_pins_level,
                         num_gate_arcs_level, num_net_arcs_level,
-                        num_direct_net_arcs_level, num_pairs_level,
-                        stage_work_items, stage_blocks,
+                        num_direct_net_arcs_level, stage_work_items, stage_blocks,
                         DMP_TIMING_BLOCK_SIZE, cudaGetErrorString(sync_error));
                 cudaGetLastError();
                 exit(sync_error);
@@ -661,254 +495,76 @@ void update_timing_dmp_cuda(GPUTimer* timer){
                                       elapsed_ms);
             cudaGetLastError();
         };
-        if (use_arc_level) {
-            if (num_gate_arcs_level > 0) {
-                const int gate_blocks = DMP_TIMING_BLOCK_NUMBER(gate_work_items);
-                cudaEvent_t kernel_start, kernel_stop;
-                start_kernel_profile(&kernel_start, &kernel_stop);
-                propagateArcDelaySlewAndAT_dmp<<<gate_blocks, DMP_TIMING_BLOCK_SIZE>>>(dmp_db,
-                                                                                       forward_arc_levels->d_forward_gate_arc_list + level_gate_start,
-                                                                                       num_gate_arcs_level);
-                finish_forward_cuda(DMP_PROFILE_GATE_DELAY_SLEW,
-                                    "gate-delay-slew-at",
-                                    gate_work_items,
-                                    gate_blocks,
-                                    kernel_start,
-                                    kernel_stop);
-                forward_gate_launches++;
-            }
-            if (num_valid_pairs_level > 0) {
-                const int pair_blocks = DMP_TIMING_BLOCK_NUMBER(pair_work_items);
-                cudaEvent_t kernel_start, kernel_stop;
-                start_kernel_profile(&kernel_start, &kernel_stop);
-                propagateGateNetPairValid_dmp<<<pair_blocks, DMP_TIMING_BLOCK_SIZE>>>(dmp_db,
-                                                                                      forward_arc_levels->d_valid_pair_gate_arc_list + level_valid_pair_start,
-                                                                                      forward_arc_levels->d_valid_pair_net_arc_list + level_valid_pair_start,
-                                                                                      forward_arc_levels->d_valid_pair_lane_list + level_valid_pair_start,
-                                                                                      num_valid_pairs_level,
-                                                                                      d_gate_net_pair_debug_counts);
-                finish_forward_cuda(DMP_PROFILE_GATE_NET_PAIR,
-                                    "gate-net-pair",
-                                    pair_work_items,
-                                    pair_blocks,
-                                    kernel_start,
-                                    kernel_stop);
-                forward_pair_launches++;
-            }
-            if (num_direct_net_arcs_level > 0) {
-                const int direct_net_blocks = DMP_TIMING_BLOCK_NUMBER(direct_net_work_items);
-                cudaEvent_t kernel_start, kernel_stop;
-                start_kernel_profile(&kernel_start, &kernel_stop);
-                propagateNetArcSlewDelay_dmp<<<direct_net_blocks, DMP_TIMING_BLOCK_SIZE>>>(dmp_db,
-                                                                                           forward_arc_levels->d_forward_direct_net_arc_list + level_direct_net_start,
-                                                                                           num_direct_net_arcs_level);
-                finish_forward_cuda(DMP_PROFILE_DIRECT_NET,
-                                    "direct-net",
-                                    direct_net_work_items,
-                                    direct_net_blocks,
-                                    kernel_start,
-                                    kernel_stop);
-                forward_direct_net_launches++;
-            }
-            if (num_net_arcs_level > 0) {
-                const int net_delay_finalize_work_items = num_net_arcs_level * NUM_ATTR;
-                const int net_delay_finalize_blocks = DMP_TIMING_BLOCK_NUMBER(net_delay_finalize_work_items);
-                cudaEvent_t kernel_start, kernel_stop;
-                start_kernel_profile(&kernel_start, &kernel_stop);
-                finalizeNetDelayWinnersAndPropagateAT_dmp<<<net_delay_finalize_blocks, DMP_TIMING_BLOCK_SIZE>>>(dmp_db,
-                                                                                                                forward_arc_levels->d_forward_net_arc_list + level_net_start,
-                                                                                                                num_net_arcs_level);
-                finish_forward_cuda(DMP_PROFILE_NET_DELAY_FINALIZE,
-                                    "net-delay-finalize-at",
-                                    net_delay_finalize_work_items,
-                                    net_delay_finalize_blocks,
-                                    kernel_start,
-                                    kernel_stop);
-                forward_net_delay_finalize_launches++;
-            }
-            const int at_finalize_work_items = num_pins_level * NUM_ATTR;
-            const int at_finalize_blocks = DMP_TIMING_BLOCK_NUMBER(at_finalize_work_items);
+        if (num_gate_arcs_level > 0) {
+            const int gate_blocks = DMP_TIMING_BLOCK_NUMBER(gate_work_items);
             cudaEvent_t kernel_start, kernel_stop;
             start_kernel_profile(&kernel_start, &kernel_stop);
-            finalizePinWinners_dmp<<<at_finalize_blocks, DMP_TIMING_BLOCK_SIZE>>>(dmp_db,
-                                                                                  level_start_offset,
-                                                                                  num_pins_level);
-            finish_forward_cuda(DMP_PROFILE_AT_FINALIZE,
-                                "pin-winner-finalize",
-                                at_finalize_work_items,
-                                at_finalize_blocks,
+            propagateFusedGateNetDelaySlewAndAT_dmp<<<gate_blocks, DMP_TIMING_BLOCK_SIZE>>>(dmp_db,
+                                                                                            forward_arc_levels->d_forward_gate_arc_list + level_gate_start,
+                                                                                            num_gate_arcs_level,
+                                                                                            d_gate_net_pair_debug_counts);
+            finish_forward_cuda(DMP_PROFILE_GATE_DELAY_SLEW,
+                                "fused-gate-net-delay-slew-at",
+                                gate_work_items,
+                                gate_blocks,
                                 kernel_start,
                                 kernel_stop);
-            forward_at_finalize_launches++;
-            start_kernel_profile(&kernel_start, &kernel_stop);
-            propagatePinTests_dmp<<<pin_blocks, DMP_TIMING_BLOCK_SIZE>>>(dmp_db, level_start_offset, num_pins_level);
-            finish_forward_cuda(DMP_PROFILE_ARC_TEST,
-                                "arc-test",
-                                pin_work_items,
-                                pin_blocks,
-                                kernel_start,
-                                kernel_stop);
-            forward_arc_test_launches++;
-        } else if (forward_arc_levels != nullptr) {
-            if (h_entry_dmp.use_fused_fallback) {
-                if (num_gate_arcs_level > 0) {
-                    const int gate_blocks = DMP_TIMING_BLOCK_NUMBER(gate_work_items);
-                    cudaEvent_t kernel_start, kernel_stop;
-                    start_kernel_profile(&kernel_start, &kernel_stop);
-                    propagateFusedGateNetDelaySlewAndAT_dmp<<<gate_blocks, DMP_TIMING_BLOCK_SIZE>>>(dmp_db,
-                                                                                                    forward_arc_levels->d_forward_gate_arc_list + level_gate_start,
-                                                                                                    num_gate_arcs_level,
-                                                                                                    d_gate_net_pair_debug_counts);
-                    finish_forward_cuda(DMP_PROFILE_GATE_DELAY_SLEW,
-                                        "fused-gate-net-delay-slew-at",
-                                        gate_work_items,
-                                        gate_blocks,
-                                        kernel_start,
-                                        kernel_stop);
-                    forward_gate_launches++;
-                }
-                if (num_direct_net_arcs_level > 0) {
-                    const int direct_net_blocks = DMP_TIMING_BLOCK_NUMBER(direct_net_work_items);
-                    cudaEvent_t kernel_start, kernel_stop;
-                    start_kernel_profile(&kernel_start, &kernel_stop);
-                    propagateNetArcSlewDelay_dmp<<<direct_net_blocks, DMP_TIMING_BLOCK_SIZE>>>(dmp_db,
-                                                                                               forward_arc_levels->d_forward_direct_net_arc_list + level_direct_net_start,
-                                                                                               num_direct_net_arcs_level);
-                    finish_forward_cuda(DMP_PROFILE_DIRECT_NET,
-                                        "fused-direct-net",
-                                        direct_net_work_items,
-                                        direct_net_blocks,
-                                        kernel_start,
-                                        kernel_stop);
-                    forward_direct_net_launches++;
-                }
-                if (num_net_arcs_level > 0) {
-                    const int net_delay_finalize_work_items = num_net_arcs_level * NUM_ATTR;
-                    const int net_delay_finalize_blocks = DMP_TIMING_BLOCK_NUMBER(net_delay_finalize_work_items);
-                    cudaEvent_t kernel_start, kernel_stop;
-                    start_kernel_profile(&kernel_start, &kernel_stop);
-                    finalizeNetDelayWinnersAndPropagateAT_dmp<<<net_delay_finalize_blocks, DMP_TIMING_BLOCK_SIZE>>>(dmp_db,
-                                                                                                                    forward_arc_levels->d_forward_net_arc_list + level_net_start,
-                                                                                                                    num_net_arcs_level);
-                    finish_forward_cuda(DMP_PROFILE_NET_DELAY_FINALIZE,
-                                        "fused-net-delay-finalize-at",
-                                        net_delay_finalize_work_items,
-                                        net_delay_finalize_blocks,
-                                        kernel_start,
-                                        kernel_stop);
-                    forward_net_delay_finalize_launches++;
-                }
-                const int at_finalize_work_items = num_pins_level * NUM_ATTR;
-                const int at_finalize_blocks = DMP_TIMING_BLOCK_NUMBER(at_finalize_work_items);
-                cudaEvent_t kernel_start, kernel_stop;
-                start_kernel_profile(&kernel_start, &kernel_stop);
-                finalizePinWinners_dmp<<<at_finalize_blocks, DMP_TIMING_BLOCK_SIZE>>>(dmp_db,
-                                                                                      level_start_offset,
-                                                                                      num_pins_level);
-                finish_forward_cuda(DMP_PROFILE_AT_FINALIZE,
-                                    "fused-pin-winner-finalize",
-                                    at_finalize_work_items,
-                                    at_finalize_blocks,
-                                    kernel_start,
-                                    kernel_stop);
-                forward_at_finalize_launches++;
-                start_kernel_profile(&kernel_start, &kernel_stop);
-                propagatePinTests_dmp<<<pin_blocks, DMP_TIMING_BLOCK_SIZE>>>(dmp_db, level_start_offset, num_pins_level);
-                finish_forward_cuda(DMP_PROFILE_ARC_TEST,
-                                    "fused-arc-test",
-                                    pin_work_items,
-                                    pin_blocks,
-                                    kernel_start,
-                                    kernel_stop);
-                forward_arc_test_launches++;
-            } else {
-                if (num_gate_arcs_level > 0) {
-                    const int gate_blocks = DMP_TIMING_BLOCK_NUMBER(gate_work_items);
-                    cudaEvent_t kernel_start, kernel_stop;
-                    start_kernel_profile(&kernel_start, &kernel_stop);
-                    propagateHybridGateArcDelaySlewAndAT_dmp<<<gate_blocks, DMP_TIMING_BLOCK_SIZE>>>(dmp_db,
-                                                                                                     forward_arc_levels->d_forward_gate_arc_list + level_gate_start,
-                                                                                                     num_gate_arcs_level);
-                    finish_forward_cuda(DMP_PROFILE_GATE_DELAY_SLEW,
-                                        "hybrid-gate-delay-slew-at",
-                                        gate_work_items,
-                                        gate_blocks,
-                                        kernel_start,
-                                        kernel_stop);
-                    forward_gate_launches++;
-                }
-                if (num_net_arcs_level > 0) {
-                    const int net_work_items = num_net_arcs_level * DMP_PIN_GROUP_SIZE;
-                    const int net_blocks = DMP_TIMING_BLOCK_NUMBER(net_work_items);
-                    cudaEvent_t kernel_start, kernel_stop;
-                    start_kernel_profile(&kernel_start, &kernel_stop);
-                    propagateHybridNetArcSlewDelayAndAT_dmp<<<net_blocks, DMP_TIMING_BLOCK_SIZE>>>(dmp_db,
-                                                                                                   forward_arc_levels->d_forward_net_arc_list + level_net_start,
-                                                                                                   num_net_arcs_level,
-                                                                                                   d_gate_net_pair_debug_counts);
-                    finish_forward_cuda(DMP_PROFILE_DIRECT_NET,
-                                        "hybrid-net-slew-delay-at",
-                                        net_work_items,
-                                        net_blocks,
-                                        kernel_start,
-                                        kernel_stop);
-                    forward_direct_net_launches++;
-                }
-                if (num_net_arcs_level > 0 && h_entry_dmp.use_hybrid_arc_slots) {
-                    const int net_delay_finalize_work_items = num_net_arcs_level * NUM_ATTR;
-                    const int net_delay_finalize_blocks = DMP_TIMING_BLOCK_NUMBER(net_delay_finalize_work_items);
-                    cudaEvent_t kernel_start, kernel_stop;
-                    start_kernel_profile(&kernel_start, &kernel_stop);
-                    finalizeNetDelayWinnersAndPropagateAT_dmp<<<net_delay_finalize_blocks, DMP_TIMING_BLOCK_SIZE>>>(dmp_db,
-                                                                                                                    forward_arc_levels->d_forward_net_arc_list + level_net_start,
-                                                                                                                    num_net_arcs_level);
-                    finish_forward_cuda(DMP_PROFILE_NET_DELAY_FINALIZE,
-                                        "hybrid-net-delay-finalize-at",
-                                        net_delay_finalize_work_items,
-                                        net_delay_finalize_blocks,
-                                        kernel_start,
-                                        kernel_stop);
-                    forward_net_delay_finalize_launches++;
-                }
-                if (h_entry_dmp.use_hybrid_arc_slots) {
-                    const int at_finalize_work_items = num_pins_level * NUM_ATTR;
-                    const int at_finalize_blocks = DMP_TIMING_BLOCK_NUMBER(at_finalize_work_items);
-                    cudaEvent_t kernel_start, kernel_stop;
-                    start_kernel_profile(&kernel_start, &kernel_stop);
-                    finalizePinWinners_dmp<<<at_finalize_blocks, DMP_TIMING_BLOCK_SIZE>>>(dmp_db,
-                                                                                          level_start_offset,
-                                                                                          num_pins_level);
-                    finish_forward_cuda(DMP_PROFILE_AT_FINALIZE,
-                                        "hybrid-pin-winner-finalize",
-                                        at_finalize_work_items,
-                                        at_finalize_blocks,
-                                        kernel_start,
-                                        kernel_stop);
-                    forward_at_finalize_launches++;
-                }
-                cudaEvent_t kernel_start, kernel_stop;
-                start_kernel_profile(&kernel_start, &kernel_stop);
-                propagatePinTests_dmp<<<pin_blocks, DMP_TIMING_BLOCK_SIZE>>>(dmp_db, level_start_offset, num_pins_level);
-                finish_forward_cuda(DMP_PROFILE_ARC_TEST,
-                                    "hybrid-arc-test",
-                                    pin_work_items,
-                                    pin_blocks,
-                                    kernel_start,
-                                    kernel_stop);
-                forward_arc_test_launches++;
-            }
-        } else {
-            const int blocks = DMP_TIMING_BLOCK_NUMBER(work_items);
-            cudaEvent_t kernel_start, kernel_stop;
-            start_kernel_profile(&kernel_start, &kernel_stop);
-            propagatePin_dmp<<<blocks, DMP_TIMING_BLOCK_SIZE>>>(dmp_db, level_start_offset, num_pins_level);
-            finish_forward_cuda(DMP_PROFILE_PIN_FALLBACK,
-                                "pin",
-                                work_items,
-                                blocks,
-                                kernel_start,
-                                kernel_stop);
+            forward_gate_launches++;
         }
+        if (num_direct_net_arcs_level > 0) {
+            const int direct_net_blocks = DMP_TIMING_BLOCK_NUMBER(direct_net_work_items);
+            cudaEvent_t kernel_start, kernel_stop;
+            start_kernel_profile(&kernel_start, &kernel_stop);
+            propagateNetArcSlewDelay_dmp<<<direct_net_blocks, DMP_TIMING_BLOCK_SIZE>>>(dmp_db,
+                                                                                       forward_arc_levels->d_forward_direct_net_arc_list + level_direct_net_start,
+                                                                                       num_direct_net_arcs_level);
+            finish_forward_cuda(DMP_PROFILE_DIRECT_NET,
+                                "direct-net",
+                                direct_net_work_items,
+                                direct_net_blocks,
+                                kernel_start,
+                                kernel_stop);
+            forward_direct_net_launches++;
+        }
+        if (num_net_arcs_level > 0) {
+            const int net_delay_finalize_work_items = num_net_arcs_level * NUM_ATTR;
+            const int net_delay_finalize_blocks = DMP_TIMING_BLOCK_NUMBER(net_delay_finalize_work_items);
+            cudaEvent_t kernel_start, kernel_stop;
+            start_kernel_profile(&kernel_start, &kernel_stop);
+            finalizeNetDelayWinnersAndPropagateAT_dmp<<<net_delay_finalize_blocks, DMP_TIMING_BLOCK_SIZE>>>(dmp_db,
+                                                                                                            forward_arc_levels->d_forward_net_arc_list + level_net_start,
+                                                                                                            num_net_arcs_level);
+            finish_forward_cuda(DMP_PROFILE_NET_DELAY_FINALIZE,
+                                "net-delay-finalize-at",
+                                net_delay_finalize_work_items,
+                                net_delay_finalize_blocks,
+                                kernel_start,
+                                kernel_stop);
+            forward_net_delay_finalize_launches++;
+        }
+        const int at_finalize_work_items = num_pins_level * NUM_ATTR;
+        const int at_finalize_blocks = DMP_TIMING_BLOCK_NUMBER(at_finalize_work_items);
+        cudaEvent_t kernel_start, kernel_stop;
+        start_kernel_profile(&kernel_start, &kernel_stop);
+        finalizePinWinners_dmp<<<at_finalize_blocks, DMP_TIMING_BLOCK_SIZE>>>(dmp_db,
+                                                                              level_start_offset,
+                                                                              num_pins_level);
+        finish_forward_cuda(DMP_PROFILE_AT_FINALIZE,
+                            "pin-winner-finalize",
+                            at_finalize_work_items,
+                            at_finalize_blocks,
+                            kernel_start,
+                            kernel_stop);
+        forward_at_finalize_launches++;
+        start_kernel_profile(&kernel_start, &kernel_stop);
+        propagatePinTests_dmp<<<pin_blocks, DMP_TIMING_BLOCK_SIZE>>>(dmp_db, level_start_offset, num_pins_level);
+        finish_forward_cuda(DMP_PROFILE_ARC_TEST,
+                            "arc-test",
+                            pin_work_items,
+                            pin_blocks,
+                            kernel_start,
+                            kernel_stop);
+        forward_arc_test_launches++;
         float level_ms = 0.0f;
         if (profile_kernels) {
             gpuErrchk(cudaEventRecord(level_stop));
@@ -919,11 +575,6 @@ void update_timing_dmp_cuda(GPUTimer* timer){
             forward_total_ms += level_ms;
         }
         forward_launches++;
-        if (use_arc_level) {
-            forward_arc_launches++;
-        } else {
-            forward_pin_fallback_launches++;
-        }
         if (profile_kernels && level_ms > forward_max_level_ms) {
             forward_max_level_ms = level_ms;
             forward_max_level = i;
@@ -944,13 +595,16 @@ void update_timing_dmp_cuda(GPUTimer* timer){
                              cudaMemcpyDeviceToHost));
     }
     if (profile_kernels) {
-        printf("[DMP TIMING PROFILE] forward levels=%d arc_levels=%d gate=%d gate_at=%d pair=%d direct_net=%d net_delay_finalize=%d net_at=%d at_finalize=%d slew_finalize=%d arc_test=%d pin_fallback=%d total_ms=%.3f max_level_ms=%.3f@L%d\n",
-               forward_launches, forward_arc_launches, forward_gate_launches,
-               forward_gate_at_launches, forward_pair_launches, forward_direct_net_launches,
-               forward_net_delay_finalize_launches, forward_net_at_launches,
-               forward_at_finalize_launches, forward_slew_finalize_launches,
+        printf("[DMP TIMING PROFILE] forward levels=%d mode=fused gate=%d direct_net=%d net_delay_finalize=%d at_finalize=%d arc_test=%d total_ms=%.3f max_level_ms=%.3f@L%d\n",
+               forward_launches,
+               forward_gate_launches,
+               forward_direct_net_launches,
+               forward_net_delay_finalize_launches,
+               forward_at_finalize_launches,
                forward_arc_test_launches,
-               forward_pin_fallback_launches, forward_total_ms, forward_max_level_ms, forward_max_level);
+               forward_total_ms,
+               forward_max_level_ms,
+               forward_max_level);
     }
     if (debug_timing) {
         printf("[DMP TIMING PROFILE] gate_net_pair total=%llu invalid_transition_skip=%llu invalid_scratch_skip=%llu finite_submitted=%llu\n",

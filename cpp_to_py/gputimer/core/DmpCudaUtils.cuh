@@ -22,10 +22,6 @@ static constexpr int DMP_TIMING_BLOCK_SIZE = 128;
 static constexpr int DMP_DEBUG_BLOCK_SIZE = 128;
 static constexpr int DMP_PIN_GROUP_SIZE = 2 * NUM_ATTR;
 
-// Arc-level forward uses per-arc DMP scratch slots and locked destination
-// winner writes. Keep the pin fallback compiled for validation.
-static constexpr bool DMP_FORWARD_ARC_LEVEL = true;
-
 inline void dmp_clear_stale_cuda_error(const char* label)
 {
     (void)label;

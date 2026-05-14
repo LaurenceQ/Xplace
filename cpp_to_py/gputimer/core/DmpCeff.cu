@@ -175,17 +175,6 @@ static void dmpCudaMemsetChecked(T* ptr, int value, size_t count, const char* na
     }
 }
 
-static bool dmpForcePinFallback()
-{
-    const char* value = std::getenv("DMP_FORCE_PIN_FALLBACK");
-    if (value == nullptr || value[0] == '\0') {
-        return false;
-    }
-    return !(value[0] == '0' ||
-             value[0] == 'f' || value[0] == 'F' ||
-             value[0] == 'n' || value[0] == 'N');
-}
-
 static bool dmpDeviceNamesEnabled()
 {
     const char* value = std::getenv("GPUTIMER_DMP_DEVICE_NAMES");
@@ -299,49 +288,35 @@ __host__ dmp_model::dmp_model(GPUTimer* timer)
         dmpPrintCudaMemInfo("before_dmp_model_alloc");
     }
     const long long pin_slot_count_ll = static_cast<long long>(num_pins) * NUM_ATTR;
-    const long long arc_slot_count_ll = static_cast<long long>(num_arcs) * 2 * NUM_ATTR;
-    const bool force_pin_fallback = dmpForcePinFallback();
-    use_arc_level = DMP_FORWARD_ARC_LEVEL && !force_pin_fallback;
-    use_fused_fallback = DMP_FORWARD_ARC_LEVEL && force_pin_fallback;
-    use_hybrid_arc_slots = false;
-    dmp_arc_delay_winner_stride = use_fused_fallback ? NUM_ATTR : (2 * NUM_ATTR);
-    const long long slot_capacity_ll = pin_slot_count_ll +
-                                       ((use_arc_level || use_hybrid_arc_slots) ? arc_slot_count_ll : 0);
-    const long long work_slot_capacity_ll = (use_arc_level || use_hybrid_arc_slots)
-                                                ? std::max(pin_slot_count_ll * 2, arc_slot_count_ll)
-                                                : pin_slot_count_ll * 2;
+    dmp_arc_delay_winner_stride = NUM_ATTR;
+    const long long slot_capacity_ll = pin_slot_count_ll;
+    const long long work_slot_capacity_ll = pin_slot_count_ll * 2;
     if (pin_slot_count_ll > std::numeric_limits<int>::max() ||
         slot_capacity_ll > std::numeric_limits<int>::max() ||
         work_slot_capacity_ll > std::numeric_limits<int>::max()) {
         std::fprintf(stderr,
-                     "[DMP INIT] slot capacity exceeds int indexing: pins=%d arcs=%d pin_slots=%lld arc_slots=%lld slot_capacity=%lld work_slot_capacity=%lld\n",
+                     "[DMP INIT] slot capacity exceeds int indexing: pins=%d arcs=%d pin_slots=%lld slot_capacity=%lld work_slot_capacity=%lld\n",
                      num_pins,
                      num_arcs,
                      pin_slot_count_ll,
-                     arc_slot_count_ll,
                      slot_capacity_ll,
                      work_slot_capacity_ll);
         std::exit(cudaErrorInvalidValue);
     }
     dmp_pin_slot_count = static_cast<int>(pin_slot_count_ll);
-    dmp_arc_slot_base = dmp_pin_slot_count;
     dmp_slot_capacity = static_cast<int>(slot_capacity_ll);
     dmp_work_slot_capacity = static_cast<int>(work_slot_capacity_ll);
     if (dmpInitSummaryEnabled()) {
         std::fprintf(stderr,
-                     "[DMP INIT] pins=%d nets=%d arcs=%d tests=%d pin_slots=%d arc_slots=%lld slot_capacity=%d work_slot_capacity=%d arc_delay_winner_stride=%d use_arc_level=%d use_hybrid_arc_slots=%d use_fused_fallback=%d\n",
+                     "[DMP INIT] pins=%d nets=%d arcs=%d tests=%d pin_slots=%d slot_capacity=%d work_slot_capacity=%d arc_delay_winner_stride=%d mode=fused\n",
                      num_pins,
                      num_nets,
                      num_arcs,
                      num_tests,
                      dmp_pin_slot_count,
-                     arc_slot_count_ll,
                      dmp_slot_capacity,
                      dmp_work_slot_capacity,
-                     dmp_arc_delay_winner_stride,
-                     use_arc_level ? 1 : 0,
-                     use_hybrid_arc_slots ? 1 : 0,
-                     use_fused_fallback ? 1 : 0);
+                     dmp_arc_delay_winner_stride);
     }
     k0_ = k1_ = k2_ = k3_ = k4_ = nullptr;
     p1_ = p2_ = p3_ = nullptr;
@@ -350,8 +325,6 @@ __host__ dmp_model::dmp_model(GPUTimer* timer)
     C1 = C2 = r_pi = nullptr;
     ceff = nullptr;
     dmp_alg_kind = nullptr;
-    pin_slew_update_lock = nullptr;
-    pin_at_update_lock = nullptr;
     pin_at_winner = nullptr;
     pin_slew_winner = nullptr;
     arc_delay_winner = nullptr;
@@ -463,17 +436,11 @@ void dmp_model::allocate_timing_scratch()
     dmpCudaMallocChecked(&ceff, dmp_slot_capacity, "ceff");
     gpuErrchk(cudaMemcpy(ceff, timer_ceff, sizeof(float) * dmp_pin_slot_count, cudaMemcpyDeviceToDevice));
     dmpCudaMallocChecked(&dmp_alg_kind, dmp_slot_capacity, "dmp_alg_kind");
-    if (!use_fused_fallback) {
-        dmpCudaMallocChecked(&pin_slew_update_lock, dmp_pin_slot_count, "pin_slew_update_lock");
-        dmpCudaMallocChecked(&pin_at_update_lock, dmp_pin_slot_count, "pin_at_update_lock");
-    }
     dmpCudaMallocChecked(&pin_at_winner, dmp_pin_slot_count, "pin_at_winner");
     dmpCudaMallocChecked(&pin_slew_winner, dmp_pin_slot_count, "pin_slew_winner");
-    if (use_arc_level || use_hybrid_arc_slots || use_fused_fallback) {
-        const long long arc_delay_winner_count_ll =
-            static_cast<long long>(num_arcs) * dmp_arc_delay_winner_stride;
-        dmpCudaMallocChecked(&arc_delay_winner, arc_delay_winner_count_ll, "arc_delay_winner");
-    }
+    const long long arc_delay_winner_count_ll =
+        static_cast<long long>(num_arcs) * dmp_arc_delay_winner_stride;
+    dmpCudaMallocChecked(&arc_delay_winner, arc_delay_winner_count_ll, "arc_delay_winner");
     dmpCudaMallocChecked(&vo_delay_, dmp_slot_capacity, "vo_delay_");
     dmpCudaMallocChecked(&vo_slew_, dmp_slot_capacity, "vo_slew_");
     dmpCudaMallocChecked(&driving_cell_extra_delay_, dmp_slot_capacity, "driving_cell_extra_delay_");
@@ -487,12 +454,6 @@ void dmp_model::allocate_timing_scratch()
     dmpCudaMemsetChecked(vo_slew_, -1, dmp_slot_capacity, "vo_slew_");
     dmpCudaMemsetChecked(driving_cell_extra_delay_, -1, dmp_slot_capacity, "driving_cell_extra_delay_");
     dmpCudaMemsetChecked(dmp_alg_kind, 0, dmp_slot_capacity, "dmp_alg_kind");
-    if (pin_slew_update_lock != nullptr) {
-        dmpCudaMemsetChecked(pin_slew_update_lock, 0, dmp_pin_slot_count, "pin_slew_update_lock");
-    }
-    if (pin_at_update_lock != nullptr) {
-        dmpCudaMemsetChecked(pin_at_update_lock, 0, dmp_pin_slot_count, "pin_at_update_lock");
-    }
     dmpCudaMemsetChecked(pin_at_winner, 0, dmp_pin_slot_count, "pin_at_winner");
     dmpCudaMemsetChecked(pin_slew_winner, 0, dmp_pin_slot_count, "pin_slew_winner");
     if (arc_delay_winner != nullptr) {
@@ -567,8 +528,6 @@ void dmp_model::release_after_timing()
     cudaFree(dt);
     cudaFree(ceff);
     cudaFree(dmp_alg_kind);
-    cudaFree(pin_slew_update_lock);
-    cudaFree(pin_at_update_lock);
     cudaFree(pin_at_winner);
     cudaFree(pin_slew_winner);
     cudaFree(arc_delay_winner);
@@ -589,8 +548,6 @@ void dmp_model::release_after_timing()
     rd_ = t0 = dt = nullptr;
     ceff = nullptr;
     dmp_alg_kind = nullptr;
-    pin_slew_update_lock = nullptr;
-    pin_at_update_lock = nullptr;
     pin_at_winner = nullptr;
     pin_slew_winner = nullptr;
     arc_delay_winner = nullptr;
@@ -649,8 +606,6 @@ __host__ dmp_model::~dmp_model(){
         cudaFree(dt);
         cudaFree(ceff);
         cudaFree(dmp_alg_kind);
-        cudaFree(pin_slew_update_lock);
-        cudaFree(pin_at_update_lock);
         cudaFree(pin_at_winner);
         cudaFree(pin_slew_winner);
         cudaFree(arc_delay_winner);

@@ -32,14 +32,10 @@ struct dmp_model {
     double *rd_, *t0, *dt;
     float *ceff;
     float *timer_ceff;
-    int dmp_pin_slot_count, dmp_arc_slot_base, dmp_slot_capacity, dmp_work_slot_capacity;
+    int dmp_pin_slot_count, dmp_slot_capacity, dmp_work_slot_capacity;
     int dmp_arc_delay_winner_stride;
     bool owns_allocations;
-    bool use_arc_level;
-    bool use_hybrid_arc_slots;
-    bool use_fused_fallback;
     int *dmp_alg_kind;
-    int *pin_slew_update_lock, *pin_at_update_lock;
     unsigned long long *pin_at_winner;
     unsigned long long *pin_slew_winner;
     unsigned long long *arc_delay_winner;
@@ -109,10 +105,9 @@ struct dmp_model {
     dmp_model() : num_pins(0), num_nets(0), num_arcs(0), num_tests(0), pin_names(nullptr),
                   flat_net2pin_start_map(nullptr), flat_net2pin_map(nullptr), pin2net_map(nullptr),
                   C1(nullptr), C2(nullptr), r_pi(nullptr), ceff(nullptr), timer_ceff(nullptr),
-                  dmp_pin_slot_count(0), dmp_arc_slot_base(0), dmp_slot_capacity(0), dmp_work_slot_capacity(0),
-                  dmp_arc_delay_winner_stride(2 * NUM_ATTR),
-                  owns_allocations(false), use_arc_level(true), use_hybrid_arc_slots(false),
-                  use_fused_fallback(false),
+                  dmp_pin_slot_count(0), dmp_slot_capacity(0), dmp_work_slot_capacity(0),
+                  dmp_arc_delay_winner_stride(NUM_ATTR),
+                  owns_allocations(false),
                   level_list(nullptr),
                   pin_forward_arc_list_end(nullptr), pin_forward_arc_list(nullptr),
                   timing_arc_to_pin_id(nullptr),
@@ -120,7 +115,7 @@ struct dmp_model {
                   timing_arc_from_pin_id(nullptr),
                   arc_types(nullptr), arc_id2test_id(nullptr),
                   dmp_alg_kind(nullptr),
-                  pin_slew_update_lock(nullptr), pin_at_update_lock(nullptr), pin_at_winner(nullptr),
+                  pin_at_winner(nullptr),
                   pin_slew_winner(nullptr), arc_delay_winner(nullptr),
                   dmp_input_thresholds(nullptr), dmp_output_thresholds(nullptr),
                   dmp_slew_lower_thresholds(nullptr), dmp_slew_upper_thresholds(nullptr),
@@ -174,8 +169,6 @@ struct dmp_model {
     CUDA_DEV double findVlCrossing(double vth, double t_lower, double t_upper);
     CUDA_DEV double findVlCrossingExplicit(int net_idx, double elmore, double vth, double t_lower, double t_upper);
     CUDA_DEV double findVoCrossing(double vth, double t_lower, double t_upper);
-    CUDA_DEV void loadDelaySlewFromSlot(int src_slot, int net_arc_id, int load_attr,
-                                        double &wire_delay, double &load_slew);
     CUDA_DEV void propagateLoadSlewDelay();
     CUDA_DEV void gateCapDelaySlew(double lc, double &delay, double &slew);
     CUDA_DEV void gateDelays(double ceff, double &t_vth, double &t_vl, double &slew);
@@ -191,24 +184,13 @@ struct dmp_model {
     CUDA_DEV bool findDriverParamsScalar(double delay, double slew, double initial_ceff);
     CUDA_DEV bool findDriverParamsOnePoleScalar(double delay, double slew, double fixed_ceff);
     CUDA_DEV void findDriverDelaySlew(int net_idx, double &delay, double &slew);
-    CUDA_DEV bool updateGateWinner(int to_slot, int src_slot, float slew, bool pick_max, bool dmp_valid, double table_ceff);
     CUDA_DEV bool updateLoadWinner(int net_arc_id, int load_attr, float wire_delay, float load_slew);
-    CUDA_DEV int arcDelayWinnerSlot(int arc_id, int attr) const {
-        if (dmp_arc_delay_winner_stride == NUM_ATTR) {
-            return arc_id * NUM_ATTR + attr;
-        }
-        return arc_id * dmp_arc_delay_winner_stride + ((attr << 1) + (attr & 1));
-    }
+    CUDA_DEV int arcDelayWinnerSlot(int arc_id, int attr) const { return arc_id * NUM_ATTR + attr; }
     CUDA_DEV bool updateAtWinner(int to_slot, float at, bool pick_max, int from_pin_id, int arc_id, int from_attr);
-    CUDA_DEV void propagateGateSlewDelayForArc(int arc_id, int lane, bool lock_scratch = false);
-    CUDA_DEV void propagateGateSlewDelay(bool lock_scratch = false);
-    CUDA_DEV void propagateSlewDelay(bool lock_scratch = false);
-    CUDA_DEV void propagateAT();
     CUDA_DEV void propagateTest();
     CUDA_DEV void propagatePinTests(int to_pin_idx);
     CUDA_DEV void updatePinRat(int arc_id, float *from_rats);
     CUDA_DEV void propagateRAT(int arc_id, float *from_rats);
-    CUDA_DEV void propagatePin(int to_pin_idx);
     CUDA_DEV void propagatePinBack(int level_idx, float *from_rats);
 
     int *edge_from;

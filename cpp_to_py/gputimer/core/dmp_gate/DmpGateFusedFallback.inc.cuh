@@ -163,82 +163,6 @@ __device__ double dmpFindRootVlCached(const dmp_model* dmp_db,
     return nanf("");
 }
 
-__device__ __forceinline__ void dmpLoadDelaySlewFromSlotCached(dmp_model* dmp_db,
-                                                               int src_slot,
-                                                               int net_arc_id,
-                                                               int load_attr,
-                                                               double& wire_delay,
-                                                               double& load_slew) {
-    const int to_pin_id = dmp_db->timing_arc_to_pin_id[net_arc_id];
-    const double elmore = dmp_db->elmore_delay[to_pin_id * NUM_ATTR + load_attr];
-    const double drvr_slew = dmp_db->vo_slew_[src_slot];
-    wire_delay = elmore;
-    load_slew = drvr_slew;
-    if (!isfinite(drvr_slew) || !isfinite(elmore)) {
-        wire_delay = nanf("");
-        load_slew = nanf("");
-        return;
-    }
-
-    const int alg = dmp_db->dmp_alg_kind[src_slot];
-    const double rd = dmp_db->rd_[src_slot];
-    const double t0_value = dmp_db->t0[src_slot];
-    const double dt_value = dmp_db->dt[src_slot];
-    const double vo_delay = dmp_db->vo_delay_[src_slot];
-    const double c1 = dmp_db->C1[src_slot];
-    const double c2 = dmp_db->C2[src_slot];
-    const double rpi = dmp_db->r_pi[src_slot];
-    const bool driver_valid = alg != DMP_ALG_CAP &&
-                              isfinite(rd) && rd > 0.0 &&
-                              isfinite(t0_value) &&
-                              isfinite(dt_value) && dt_value > 0.0 &&
-                              isfinite(vo_delay);
-    double driver_vth, driver_vl, driver_vh, driver_derate;
-    dmpLoadSlotThresholds(dmp_db, src_slot, driver_vth, driver_vl, driver_vh, driver_derate);
-    if (!driver_valid || elmore == 0.0 || elmore < drvr_slew * 1e-3) {
-        dmpThresholdAdjustCuda(dmp_db, to_pin_id, load_attr, driver_vth, driver_vl, driver_vh, driver_derate, wire_delay, load_slew);
-        return;
-    }
-
-    const double k0 = dmp_db->k0_[src_slot];
-    const double k1 = dmp_db->k1_[src_slot];
-    const double k2 = dmp_db->k2_[src_slot];
-    const double k3 = dmp_db->k3_[src_slot];
-    const double k4 = dmp_db->k4_[src_slot];
-    const double p1 = dmp_db->p1_[src_slot];
-    const double p2 = dmp_db->p2_[src_slot];
-    const double t_lower = t0_value;
-    const double t_upper = dmpSlotVoUpperBoundCached(alg, t0_value, dt_value, c1, c2, rpi, rd) + elmore * 2.0;
-    const double load_delay = dmpFindRootVlCached(dmp_db, alg, k0, k1, k2, k3, k4, p1, p2,
-                                                  t0_value, dt_value, elmore, driver_vth, t_lower, t_upper);
-    const double tl = dmpFindRootVlCached(dmp_db, alg, k0, k1, k2, k3, k4, p1, p2,
-                                          t0_value, dt_value, elmore, driver_vl, t_lower, load_delay);
-    const double th = dmpFindRootVlCached(dmp_db, alg, k0, k1, k2, k3, k4, p1, p2,
-                                          t0_value, dt_value, elmore, driver_vh, load_delay, t_upper);
-    double delay1 = load_delay - vo_delay;
-    double slew1 = (th - tl) / driver_derate;
-
-    if (!isfinite(load_delay) || !isfinite(tl) || !isfinite(th) ||
-        !isfinite(slew1) || !isfinite(delay1)) {
-        return;
-    }
-    if (delay1 < 0.0) {
-        if (-delay1 > dmp_db->vth_time_tol * vo_delay) {
-            return;
-        }
-        delay1 = elmore;
-    }
-    if (slew1 < drvr_slew) {
-        if ((drvr_slew - slew1) > dmp_db->vth_time_tol * drvr_slew) {
-            return;
-        }
-        slew1 = drvr_slew;
-    }
-    wire_delay = delay1;
-    load_slew = slew1;
-    dmpThresholdAdjustCuda(dmp_db, to_pin_id, load_attr, driver_vth, driver_vl, driver_vh, driver_derate, wire_delay, load_slew);
-}
-
 struct DmpLocalGateState {
     int alg;
     double k0;
@@ -756,20 +680,9 @@ __device__ __forceinline__ bool dmpUpdateSlewWinnerValue(dmp_model* dmp_db,
     if (!isfinite(slew)) {
         return false;
     }
-    if (dmp_db->pin_slew_winner != nullptr) {
-        const unsigned long long packed = dmpPackWinner(slew, 0u, pick_max);
-        const unsigned long long old = atomicMax(&dmp_db->pin_slew_winner[to_slot], packed);
-        return packed > old;
-    }
-    while (atomicCAS(&dmp_db->pin_slew_update_lock[to_slot], 0, 1) != 0) {
-    }
-    const float old_slew = dmp_db->pinSlew[to_slot];
-    const bool wins = isnan(old_slew) || (pick_max ? (slew > old_slew) : (slew < old_slew));
-    if (wins) {
-        dmp_db->pinSlew[to_slot] = slew;
-    }
-    atomicExch(&dmp_db->pin_slew_update_lock[to_slot], 0);
-    return wins;
+    const unsigned long long packed = dmpPackWinner(slew, 0u, pick_max);
+    const unsigned long long old = atomicMax(&dmp_db->pin_slew_winner[to_slot], packed);
+    return packed > old;
 }
 
 __device__ __forceinline__ void dmpLoadDelaySlewFromLocalState(dmp_model* dmp_db,
@@ -971,42 +884,6 @@ __global__ void propagateFusedGateNetDelaySlewAndAT_dmp(dmp_model* dmp_db,
                                  static_cast<float>(wire_delay),
                                  static_cast<float>(load_slew));
     }
-}
-
-__global__ void propagateGateNetPairValid_dmp(dmp_model* dmp_db,
-                                              const index_type* gate_arc_list,
-                                              const index_type* net_arc_list,
-                                              const uint8_t* lane_list,
-                                              int num_valid_pairs,
-                                              unsigned long long* debug_counts){
-    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= num_valid_pairs) {
-        return;
-    }
-    const int gate_arc_id = gate_arc_list[idx];
-    const int net_arc_id = net_arc_list[idx];
-    const int lane = static_cast<int>(lane_list[idx]);
-    dmpGateNetPairCount(debug_counts, DMP_GNP_TOTAL_CANDIDATES);
-    const int el = lane >> 2;
-    const int output_rf = lane & 1;
-    const int load_attr = (el << 1) | output_rf;
-    const int src_slot = dmp_db->dmp_arc_slot_base + gate_arc_id * DMP_PIN_GROUP_SIZE + lane;
-    if (src_slot >= dmp_db->dmp_slot_capacity) {
-        dmpGateNetPairCount(debug_counts, DMP_GNP_INVALID_SCRATCH_SKIPS);
-        return;
-    }
-    double wire_delay = nanf("");
-    double load_slew = nanf("");
-    dmpLoadDelaySlewFromSlotCached(dmp_db, src_slot, net_arc_id, load_attr, wire_delay, load_slew);
-    if (!isfinite(wire_delay) || !isfinite(load_slew)) {
-        dmpGateNetPairCount(debug_counts, DMP_GNP_INVALID_SCRATCH_SKIPS);
-        return;
-    }
-    dmpGateNetPairCount(debug_counts, DMP_GNP_FINITE_CANDIDATES);
-    dmp_db->updateLoadWinner(net_arc_id,
-                             load_attr,
-                             static_cast<float>(wire_delay),
-                             static_cast<float>(load_slew));
 }
 
 __global__ void applyDrivingCellSourceSlewKernel(dmp_model* dmp_db,

@@ -521,77 +521,6 @@ __device__ bool dmpApplyVirtualDrivingCellSource(dmp_model* dmp_db,
     return isfinite(gate_delay_parasitic) && isfinite(source_slew);
 }
 
-__device__ bool dmp_model::updateGateWinner(int to_slot,
-                                            int src_slot,
-                                            float slew,
-                                            bool pick_max,
-                                            bool dmp_valid,
-                                            double table_ceff) {
-    (void)dmp_valid;
-    (void)table_ceff;
-    if (!isfinite(slew)) {
-        return false;
-    }
-    if ((use_arc_level || use_hybrid_arc_slots) && pin_slew_winner != nullptr) {
-        const unsigned int payload = 0x80000000u | static_cast<unsigned int>(src_slot);
-        const unsigned long long packed = dmpPackWinner(slew, payload, pick_max);
-        const unsigned long long old = atomicMax(&pin_slew_winner[to_slot], packed);
-        return packed > old;
-    }
-    while (atomicCAS(&pin_slew_update_lock[to_slot], 0, 1) != 0) {
-    }
-    float old_slew = pinSlew[to_slot];
-    bool wins = isnan(old_slew) || (pick_max ? (slew > old_slew) : (slew < old_slew));
-    if (wins) {
-        pinSlew[to_slot] = slew;
-        if (dmp_valid) {
-            k0_[to_slot] = k0_[src_slot];
-            k1_[to_slot] = k1_[src_slot];
-            k2_[to_slot] = k2_[src_slot];
-            k3_[to_slot] = k3_[src_slot];
-            k4_[to_slot] = k4_[src_slot];
-            p1_[to_slot] = p1_[src_slot];
-            p2_[to_slot] = p2_[src_slot];
-            p3_[to_slot] = p3_[src_slot];
-            z1_[to_slot] = z1_[src_slot];
-            A_[to_slot] = A_[src_slot];
-            B_[to_slot] = B_[src_slot];
-            D_[to_slot] = D_[src_slot];
-            rd_[to_slot] = rd_[src_slot];
-            t0[to_slot] = t0[src_slot];
-            dt[to_slot] = dt[src_slot];
-            ceff[to_slot] = ceff[src_slot];
-            vo_delay_[to_slot] = vo_delay_[src_slot];
-            vo_slew_[to_slot] = vo_slew_[src_slot];
-            driving_cell_extra_delay_[to_slot] = driving_cell_extra_delay_[src_slot];
-            dmp_alg_kind[to_slot] = dmp_alg_kind[src_slot];
-            if (slot_vth != nullptr) {
-                slot_vth[to_slot] = slot_vth[src_slot];
-                slot_vl[to_slot] = slot_vl[src_slot];
-                slot_vh[to_slot] = slot_vh[src_slot];
-                slot_slew_derate[to_slot] = slot_slew_derate[src_slot];
-            }
-        } else {
-            ceff[to_slot] = table_ceff;
-            rd_[to_slot] = nanf("");
-            t0[to_slot] = nanf("");
-            dt[to_slot] = nanf("");
-            vo_delay_[to_slot] = nanf("");
-            vo_slew_[to_slot] = nanf("");
-            driving_cell_extra_delay_[to_slot] = nanf("");
-            dmp_alg_kind[to_slot] = DMP_ALG_CAP;
-            if (slot_vth != nullptr) {
-                slot_vth[to_slot] = slot_vth[src_slot];
-                slot_vl[to_slot] = slot_vl[src_slot];
-                slot_vh[to_slot] = slot_vh[src_slot];
-                slot_slew_derate[to_slot] = slot_slew_derate[src_slot];
-            }
-        }
-    }
-    atomicExch(&pin_slew_update_lock[to_slot], 0);
-    return wins;
-}
-
 __device__ bool dmp_model::updateLoadWinner(int net_arc_id,
                                             int load_attr,
                                             float wire_delay,
@@ -601,43 +530,17 @@ __device__ bool dmp_model::updateLoadWinner(int net_arc_id,
     }
     const int to_pin_id = timing_arc_to_pin_id[net_arc_id];
     const int to_slot = to_pin_id * NUM_ATTR + load_attr;
-    const int delay_idx = (load_attr << 1) + (load_attr & 1);
     const bool pick_max = (load_attr >> 1) != 0;
 
-    if ((use_arc_level || use_hybrid_arc_slots || use_fused_fallback) &&
-        pin_slew_winner != nullptr &&
-        arc_delay_winner != nullptr) {
-        const unsigned int slew_payload = static_cast<unsigned int>(net_arc_id);
-        const unsigned long long packed_slew = dmpPackWinner(load_slew, slew_payload, pick_max);
-        const unsigned long long old_slew = atomicMax(&pin_slew_winner[to_slot], packed_slew);
+    const unsigned int slew_payload = static_cast<unsigned int>(net_arc_id);
+    const unsigned long long packed_slew = dmpPackWinner(load_slew, slew_payload, pick_max);
+    const unsigned long long old_slew = atomicMax(&pin_slew_winner[to_slot], packed_slew);
 
-        const int delay_slot = arcDelayWinnerSlot(net_arc_id, load_attr);
-        const unsigned int delay_payload = static_cast<unsigned int>(to_slot);
-        const unsigned long long packed_delay = dmpPackWinner(wire_delay, delay_payload, pick_max);
-        const unsigned long long old_delay = atomicMax(&arc_delay_winner[delay_slot], packed_delay);
-        return packed_slew > old_slew || packed_delay > old_delay;
-    }
-
-    while (atomicCAS(&pin_slew_update_lock[to_slot], 0, 1) != 0) {
-    }
-
-    bool changed = false;
-    float old_slew = pinSlew[to_slot];
-    bool slew_wins = isnan(old_slew) || (pick_max ? (load_slew > old_slew) : (load_slew < old_slew));
-    if (slew_wins) {
-        pinSlew[to_slot] = load_slew;
-        changed = true;
-    }
-
-    float old_delay = arcDelay[net_arc_id * 2 * NUM_ATTR + delay_idx];
-    bool delay_wins = isnan(old_delay) || (pick_max ? (wire_delay > old_delay) : (wire_delay < old_delay));
-    if (delay_wins) {
-        arcDelay[net_arc_id * 2 * NUM_ATTR + delay_idx] = wire_delay;
-        changed = true;
-    }
-
-    atomicExch(&pin_slew_update_lock[to_slot], 0);
-    return changed;
+    const int delay_slot = arcDelayWinnerSlot(net_arc_id, load_attr);
+    const unsigned int delay_payload = static_cast<unsigned int>(to_slot);
+    const unsigned long long packed_delay = dmpPackWinner(wire_delay, delay_payload, pick_max);
+    const unsigned long long old_delay = atomicMax(&arc_delay_winner[delay_slot], packed_delay);
+    return packed_slew > old_slew || packed_delay > old_delay;
 }
 
 __device__ bool dmp_model::updateAtWinner(int to_slot,
@@ -649,23 +552,10 @@ __device__ bool dmp_model::updateAtWinner(int to_slot,
     if (!isfinite(at)) {
         return false;
     }
-    if ((use_arc_level || use_hybrid_arc_slots || use_fused_fallback) && pin_at_winner != nullptr) {
-        const unsigned int payload = (static_cast<unsigned int>(arc_id) << 2)
-                                     | static_cast<unsigned int>(from_attr & 0x3);
-        const unsigned long long packed = dmpPackWinner(at, payload, pick_max);
-        const unsigned long long old = atomicMax(&pin_at_winner[to_slot], packed);
-        return packed > old;
-    }
-    while (atomicCAS(&pin_at_update_lock[to_slot], 0, 1) != 0) {
-    }
-    float old_at = pinAt[to_slot];
-    bool wins = isnan(old_at) || (pick_max ? (at > old_at) : (at < old_at));
-    if (wins) {
-        pinAt[to_slot] = at;
-        at_prefix_pin[to_slot] = from_pin_id;
-        at_prefix_arc[to_slot] = arc_id;
-        at_prefix_attr[to_slot] = from_attr;
-    }
-    atomicExch(&pin_at_update_lock[to_slot], 0);
-    return wins;
+    (void)from_pin_id;
+    const unsigned int payload = (static_cast<unsigned int>(arc_id) << 2)
+                                 | static_cast<unsigned int>(from_attr & 0x3);
+    const unsigned long long packed = dmpPackWinner(at, payload, pick_max);
+    const unsigned long long old = atomicMax(&pin_at_winner[to_slot], packed);
+    return packed > old;
 }

@@ -43,7 +43,6 @@ Its `missing_fanout_skip_value()` has the current skip policy.
 ## Key Environment
 
 ```text
-DMP_FORCE_PIN_FALLBACK=1
 GPUTIMER_ROUTE_SEG_MISSING_FANOUT_SKIP=<0|300>
 ```
 

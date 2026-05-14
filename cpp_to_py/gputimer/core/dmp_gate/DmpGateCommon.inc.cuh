@@ -158,18 +158,6 @@ __device__ __forceinline__ void dmpLoadSlotThresholds(const dmp_model* dmp_db,
     int attr = slot & (NUM_ATTR - 1);
     int timing_id = -1;
     int output_rf = attr & 1;
-    if (slot >= dmp_db->dmp_arc_slot_base &&
-        (dmp_db->use_arc_level || dmp_db->use_hybrid_arc_slots)) {
-        const int arc_slot = slot - dmp_db->dmp_arc_slot_base;
-        const int arc_id = arc_slot / DMP_PIN_GROUP_SIZE;
-        const int lane = arc_slot & (DMP_PIN_GROUP_SIZE - 1);
-        const int el = lane >> 2;
-        attr = ((lane & 0b100) >> 1) + (lane & 1);
-        output_rf = attr & 1;
-        if (arc_id >= 0 && arc_id < dmp_db->num_arcs) {
-            timing_id = dmp_db->timing_arc_id_map[arc_id * 2 + el];
-        }
-    }
     vth = dmpTimingThresholdArrayValue(
         dmp_db->dmp_timing_output_thresholds,
         timing_id,
@@ -296,64 +284,6 @@ __device__ __forceinline__ void dmpInputPortDelaySlewCuda(const dmp_model* dmp_d
     const double driver_vh = dmpThresholdArrayValue(dmp_db->dmp_slew_upper_thresholds, load_attr, dmp_db->vh_);
     const double driver_derate = dmpThresholdArrayValue(dmp_db->dmp_slew_derates, load_attr, dmp_db->slew_derate_);
     dmpThresholdAdjustCuda(dmp_db, load_pin_id, load_attr, driver_vth, driver_vl, driver_vh, driver_derate, wire_delay, load_slew);
-}
-
-__device__ void dmp_model::loadDelaySlewFromSlot(int src_slot,
-                                                 int net_arc_id,
-                                                 int load_attr,
-                                                 double &wire_delay,
-                                                 double &load_slew){
-    int to_pin_id = timing_arc_to_pin_id[net_arc_id];
-    double elmore = elmore_delay[to_pin_id * NUM_ATTR + load_attr];
-    double drvr_slew = vo_slew_[src_slot];
-    wire_delay = elmore;
-    load_slew = drvr_slew;
-    if (!isfinite(drvr_slew) || !isfinite(elmore)) {
-        wire_delay = nanf("");
-        load_slew = nanf("");
-        return;
-    }
-
-    bool driver_valid = dmp_alg_kind[src_slot] != DMP_ALG_CAP &&
-                        isfinite(rd_[src_slot]) && rd_[src_slot] > 0.0 &&
-                        isfinite(t0[src_slot]) && isfinite(dt[src_slot]) && dt[src_slot] > 0.0 &&
-                        isfinite(vo_delay_[src_slot]);
-    if (!driver_valid || elmore == 0.0 || elmore < drvr_slew * 1e-3) {
-        double driver_vth, driver_vl, driver_vh, driver_derate;
-        dmpLoadSlotThresholds(this, src_slot, driver_vth, driver_vl, driver_vh, driver_derate);
-        dmpThresholdAdjustCuda(this, to_pin_id, load_attr, driver_vth, driver_vl, driver_vh, driver_derate, wire_delay, load_slew);
-        return;
-    }
-
-    double driver_vth, driver_vl, driver_vh, driver_derate;
-    dmpLoadSlotThresholds(this, src_slot, driver_vth, driver_vl, driver_vh, driver_derate);
-    double t_lower = t0[src_slot];
-    double t_upper = voCrossingUpperBound(src_slot) + elmore * 2.0;
-    double load_delay = findVlCrossingExplicit(src_slot, elmore, driver_vth, t_lower, t_upper);
-    double tl = findVlCrossingExplicit(src_slot, elmore, driver_vl, t_lower, load_delay);
-    double th = findVlCrossingExplicit(src_slot, elmore, driver_vh, load_delay, t_upper);
-    double delay1 = load_delay - vo_delay_[src_slot];
-    double slew1 = (th - tl) / driver_derate;
-
-    if(!isfinite(load_delay) || !isfinite(tl) || !isfinite(th) ||
-       !isfinite(slew1) || !isfinite(delay1)){
-        return;
-    }
-    if(delay1 < 0.0){
-        if(-delay1 > vth_time_tol * vo_delay_[src_slot]){
-            return;
-        }
-        delay1 = elmore;
-    }
-    if(slew1 < drvr_slew){
-        if((drvr_slew - slew1) > vth_time_tol * drvr_slew){
-            return;
-        }
-        slew1 = drvr_slew;
-    }
-    wire_delay = delay1;
-    load_slew = slew1;
-    dmpThresholdAdjustCuda(this, to_pin_id, load_attr, driver_vth, driver_vl, driver_vh, driver_derate, wire_delay, load_slew);
 }
 
 __device__ void dmp_model::propagateLoadSlewDelay(){

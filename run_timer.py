@@ -199,7 +199,6 @@ def main():
         os.environ.setdefault("GPUTIMER_DISABLE_STATE_BACKUP_TENSORS", "1")
         os.environ.setdefault("GPUTIMER_EMPTY_CACHE_AFTER_GTDB", "1")
         os.environ.setdefault("DMP_DEFER_TIMING_ALLOC", "1")
-        os.environ.setdefault("DMP_FORCE_PIN_FALLBACK", "1")
     logger = setup_logger(args, sys.argv)
 
     set_random_seed(args)

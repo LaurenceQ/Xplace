@@ -55,9 +55,8 @@ GPU_MEM_FREE_RE = re.compile(r"cuda_free=([-+0-9.eE]+)\s+GiB")
 GPU_MEM_TOTAL_RE = re.compile(r"cuda_total=([-+0-9.eE]+)\s+GiB")
 DMP_INIT_RE = re.compile(
     r"\[DMP INIT\] pins=(\d+) nets=(\d+) arcs=(\d+) tests=(\d+) "
-    r"pin_slots=(\d+) arc_slots=(\d+) slot_capacity=(\d+) work_slot_capacity=(\d+) "
-    r"arc_delay_winner_stride=(\d+) use_arc_level=(\d+) use_hybrid_arc_slots=(\d+) "
-    r"use_fused_fallback=(\d+)"
+    r"pin_slots=(\d+) slot_capacity=(\d+) work_slot_capacity=(\d+) "
+    r"arc_delay_winner_stride=(\d+) mode=([A-Za-z0-9_]+)"
 )
 
 
@@ -217,12 +216,9 @@ def parse_xplace_phases(log_path: Path) -> dict[str, float | int | str | None]:
         "xplace_peak_cuda_used_gib": None,
         "xplace_min_cuda_free_gib": None,
         "xplace_cuda_total_gib": None,
-        "xplace_use_arc_level": None,
-        "xplace_use_hybrid_arc_slots": None,
-        "xplace_use_fused_fallback": None,
+        "xplace_dmp_mode": None,
         "xplace_missing_fanout_skip": None,
         "xplace_pin_slots": None,
-        "xplace_arc_slots": None,
         "xplace_slot_capacity": None,
     }
     if not log_path.exists():
@@ -271,11 +267,8 @@ def parse_xplace_phases(log_path: Path) -> dict[str, float | int | str | None]:
             dmp = DMP_INIT_RE.search(line)
             if dmp:
                 out["xplace_pin_slots"] = int(dmp.group(5))
-                out["xplace_arc_slots"] = int(dmp.group(6))
-                out["xplace_slot_capacity"] = int(dmp.group(7))
-                out["xplace_use_arc_level"] = int(dmp.group(10))
-                out["xplace_use_hybrid_arc_slots"] = int(dmp.group(11))
-                out["xplace_use_fused_fallback"] = int(dmp.group(12))
+                out["xplace_slot_capacity"] = int(dmp.group(6))
+                out["xplace_dmp_mode"] = dmp.group(9)
     out["xplace_log_total_s"] = max_stamp
     out["xplace_peak_cuda_used_gib"] = max_cuda_used
     out["xplace_min_cuda_free_gib"] = min_cuda_free
@@ -454,7 +447,6 @@ def run_xplace(args: argparse.Namespace, split: str, design: str, log_path: Path
     env = os.environ.copy()
     env.update(
         {
-            "DMP_FORCE_PIN_FALLBACK": "1",
             "GPUTIMER_ROUTE_SEG_MISSING_FANOUT_SKIP": str(missing_fanout_skip),
         }
     )
@@ -571,13 +563,13 @@ def write_outputs(args: argparse.Namespace, rows: list[dict]) -> None:
         if args.xplace_profile:
             f.write(
                 "Xplace command uses direct `--route_segments` with "
-                "`DMP_FORCE_PIN_FALLBACK=1`, `GPUTIMER_MEM_PROFILE=1`, and "
+                "`GPUTIMER_MEM_PROFILE=1` and "
                 "`GPUTIMER_ROUTE_SEG_PROFILE=1`.\n\n"
             )
         else:
             f.write(
-                "Xplace command uses direct `--route_segments` with "
-                "`DMP_FORCE_PIN_FALLBACK=1`; internal profiling logs are disabled by default.\n\n"
+                "Xplace command uses direct `--route_segments`; internal "
+                "profiling logs are disabled by default.\n\n"
             )
         f.write(f"Pass/fail: {pass_count} pass, {fail_count} fail, {len(rows)} total.\n\n")
         f.write(
