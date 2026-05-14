@@ -262,7 +262,6 @@ __host__ DmpModel::DmpModel(GPUTimer* timer)
         dmpPrintCudaMemInfo("before_dmp_model_alloc");
     }
     const long long pin_slot_count_ll = static_cast<long long>(num_pins) * NUM_ATTR;
-    dmp_arc_delay_winner_stride = NUM_ATTR;
     const long long slot_capacity_ll = pin_slot_count_ll;
     const long long work_slot_capacity_ll = pin_slot_count_ll * 2;
     if (pin_slot_count_ll > std::numeric_limits<int>::max() ||
@@ -282,15 +281,14 @@ __host__ DmpModel::DmpModel(GPUTimer* timer)
     dmp_work_slot_capacity = static_cast<int>(work_slot_capacity_ll);
     if (dmpInitSummaryEnabled()) {
         std::fprintf(stderr,
-                     "[DMP INIT] pins=%d nets=%d arcs=%d tests=%d pin_slots=%d slot_capacity=%d work_slot_capacity=%d arc_delay_winner_stride=%d mode=direct\n",
+                     "[DMP INIT] pins=%d nets=%d arcs=%d tests=%d pin_slots=%d slot_capacity=%d work_slot_capacity=%d mode=direct\n",
                      num_pins,
                      num_nets,
                      num_arcs,
                      num_tests,
                      dmp_pin_slot_count,
                      dmp_slot_capacity,
-                     dmp_work_slot_capacity,
-                     dmp_arc_delay_winner_stride);
+                     dmp_work_slot_capacity);
     }
     C1 = C2 = r_pi = nullptr;
     pin_at_winner = nullptr;
@@ -377,16 +375,15 @@ void DmpModel::allocate_timing_scratch()
     }
     if (dmpInitSummaryEnabled()) {
         std::fprintf(stderr,
-                     "[DMP INIT] allocating timing scratch pin_slots=%d slot_capacity=%d work_slot_capacity=%d arc_delay_winner_stride=%d\n",
+                     "[DMP INIT] allocating timing scratch pin_slots=%d slot_capacity=%d work_slot_capacity=%d\n",
                      dmp_pin_slot_count,
                      dmp_slot_capacity,
-                     dmp_work_slot_capacity,
-                     dmp_arc_delay_winner_stride);
+                     dmp_work_slot_capacity);
     }
     dmpCudaMallocChecked(&pin_at_winner, dmp_pin_slot_count, "pin_at_winner");
     dmpCudaMallocChecked(&pin_slew_winner, dmp_pin_slot_count, "pin_slew_winner");
     const long long arc_delay_winner_count_ll =
-        static_cast<long long>(num_arcs) * dmp_arc_delay_winner_stride;
+        static_cast<long long>(num_arcs) * NUM_ATTR;
     dmpCudaMallocChecked(&arc_delay_winner, arc_delay_winner_count_ll, "arc_delay_winner");
     dmpCudaMallocChecked(&driving_cell_timing_id, dmp_pin_slot_count, "driving_cell_timing_id");
     dmpCudaMallocChecked(&driving_cell_input_rf, dmp_pin_slot_count, "driving_cell_input_rf");
@@ -401,7 +398,7 @@ void DmpModel::allocate_timing_scratch()
     if (arc_delay_winner != nullptr) {
         dmpCudaMemsetChecked(arc_delay_winner,
                              0,
-                             static_cast<long long>(num_arcs) * dmp_arc_delay_winner_stride,
+                             static_cast<long long>(num_arcs) * NUM_ATTR,
                              "arc_delay_winner");
     }
     if (dmpInitMemProfileEnabled()) {

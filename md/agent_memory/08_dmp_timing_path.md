@@ -27,10 +27,14 @@ skipped when driver/load library ids match.
 Because `CellLib` merges multiple `.lib` files, DMP ids are deduped by the
 threshold set copied into each `LibertyCell`; Nangate/fakeram stay separate.
 
-Gate implementation files are `Common`, `CellModel`, `Propagation`, and
-`Direct`; host driving-cell wrapper is merged into `Direct`.
-Keep `DmpWaveform.cuh` separate: merging/renaming its exp helper changed
-visible ariane late WNS/TNS from `-0.510/-1456.030` to `-0.546/-1756.678`.
+Forward/backward timing propagation lives in `DmpTiming.cu`.
+Gate files are `Common`, `CellModel`, `Propagation`, and `Direct`; host
+driving-cell wrapper is merged into `Direct`, and prototypes/waveform helpers
+live in `DmpCudaUtils.cuh` after deleting `DmpKernels.cuh`/`DmpWaveform.cuh`.
+`Direct` uses `DmpLocalGateState` for DMP waveform/crossing helpers; do not
+reintroduce per-slot waveform arrays or long helper arg lists.
+Keep the copied `gt::exp2/y/dy` formulas unchanged; moving/renaming that path
+once changed ariane from `-0.510/-1456.030` to `-0.546/-1756.678`.
 
 Removed alternate paths:
 

@@ -41,7 +41,9 @@ ariane 1.07x, bsg_chip 2.55x, NV_NVDLA_partition_c 1.61x
 mempool_tile_wrap 1.11x, mempool_group 3.51x
 ```
 
-2026-05-14 DMP file cleanup smoke passed after build/install:
-visible ariane -0.510/-1456.030, 11.58s, RSS 1856028 KB;
-visible bsg_chip -0.447/-10281.189, 33.34s, RSS 7846836 KB;
-prior blind ariane -0.956/-237.935.
+2026-05-14 DMP cleanup smoke passed after build/install:
+visible ariane stayed `-0.510/-1456.030` after helper state refactor and
+winner/file cleanup; latest smoke 14.17s wall, RSS 1863868 KB.
+`cuobjdump` regs unchanged: gate 180, direct-net 189, driving-cell 170;
+no stack/local spill. `DmpKernels.cuh` and `DmpWaveform.cuh` were merged into
+`DmpCudaUtils.cuh`; `DmpBackward.cu` was merged into `DmpTiming.cu`.

@@ -27,7 +27,6 @@ struct DmpModel {
     double *C1, *C2, *r_pi;
     float *timer_ceff;
     int dmp_pin_slot_count, dmp_slot_capacity, dmp_work_slot_capacity;
-    int dmp_arc_delay_winner_stride;
     bool owns_allocations;
     unsigned long long *pin_at_winner;
     unsigned long long *pin_slew_winner;
@@ -94,7 +93,6 @@ struct DmpModel {
                   flat_net2pin_start_map(nullptr), flat_net2pin_map(nullptr), pin2net_map(nullptr),
                   C1(nullptr), C2(nullptr), r_pi(nullptr), timer_ceff(nullptr),
                   dmp_pin_slot_count(0), dmp_slot_capacity(0), dmp_work_slot_capacity(0),
-                  dmp_arc_delay_winner_stride(NUM_ATTR),
                   owns_allocations(false),
                   level_list(nullptr),
                   pin_forward_arc_list_end(nullptr), pin_forward_arc_list(nullptr),
@@ -141,8 +139,7 @@ struct DmpModel {
                      double &dydt0, double &dyddt, double &dydcl);
     CUDA_DEV void propagateLoadSlewDelay();
     CUDA_DEV bool updateLoadWinner(int net_arc_id, int load_attr, float wire_delay, float load_slew);
-    CUDA_DEV int arcDelayWinnerSlot(int arc_id, int attr) const { return arc_id * NUM_ATTR + attr; }
-    CUDA_DEV bool updateAtWinner(int to_slot, float at, bool pick_max, int from_pin_id, int arc_id, int from_attr);
+    CUDA_DEV bool updateAtWinner(int to_slot, float at, bool pick_max, int arc_id, int from_attr);
     CUDA_DEV void propagateTest();
     CUDA_DEV void propagatePinTests(int to_pin_idx);
     CUDA_DEV void updatePinRat(int arc_id, float *from_rats);

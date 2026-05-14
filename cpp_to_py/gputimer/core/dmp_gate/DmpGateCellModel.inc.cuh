@@ -146,7 +146,7 @@ __device__ __forceinline__ float dmpQueryGateLutNoTransitionCheck(GPULutAllocato
     return dmpGateLutWithMeta(allocator, meta, input_slew, load);
 }
 
-__device__ __forceinline__ void dmpGateCapDelaySlewCached(DmpModel* dmp_db,
+__device__ __forceinline__ void dmpGateCapDelaySlew(DmpModel* dmp_db,
                                                           int timing_id,
                                                           int input_rf,
                                                           int output_rf,

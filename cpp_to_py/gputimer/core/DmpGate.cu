@@ -1,6 +1,4 @@
-#include "DmpKernels.cuh"
 #include "DmpCudaUtils.cuh"
-#include "DmpWaveform.cuh"
 #include "gputiming.h"
 
 #include <cuda_runtime.h>

@@ -211,7 +211,7 @@ __global__ void dmpNetWinnerKernel(DmpModel* dmp_db,
     const int arc_id = level_arc_list[arc_pos];
     const int delay_idx = (attr << 1) + (attr & 1);
     const int delay_slot = arc_id * 2 * NUM_ATTR + delay_idx;
-    const int winner_slot = dmp_db->arcDelayWinnerSlot(arc_id, attr);
+    const int winner_slot = arc_id * NUM_ATTR + attr;
     const bool pick_max = (attr >> 1) != 0;
 
     const unsigned long long packed = dmp_db->arc_delay_winner[winner_slot];
@@ -235,7 +235,6 @@ __global__ void dmpNetWinnerKernel(DmpModel* dmp_db,
     dmp_db->updateAtWinner(to_pin_id * NUM_ATTR + attr,
                            at,
                            pick_max,
-                           from_pin_id,
                            arc_id,
                            attr);
 }

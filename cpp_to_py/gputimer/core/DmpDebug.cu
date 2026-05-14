@@ -1,4 +1,3 @@
-#include "DmpKernels.cuh"
 #include "DmpCudaUtils.cuh"
 
 #include <algorithm>
