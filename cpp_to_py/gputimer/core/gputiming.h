@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vector>
+#include "common/lib/Liberty.h"
 #include "common/lib/Lut.h"
 #include "common/lib/Timing.h"
 
@@ -48,11 +49,11 @@ public:
     int num_timings;
     int *timing_sense;
     int *lut_template_var;
-    bool *is_rising_edge_triggered, *is_falling_edge_triggered, *is_constraint;
+    bool *is_rising_edge_triggered, *is_falling_edge_triggered, *is_constraint, *is_latch_clock_arc;
 
     int *d_timing_sense;
     int *d_lut_template_var;
-    bool *d_is_rising_edge_triggered, *d_is_falling_edge_triggered, *d_is_constraint;
+    bool *d_is_rising_edge_triggered, *d_is_falling_edge_triggered, *d_is_constraint, *d_is_latch_clock_arc;
 
 public:
     GPULutAllocator() = default;
@@ -69,6 +70,7 @@ public:
         is_rising_edge_triggered = new bool[num_timings];
         is_falling_edge_triggered = new bool[num_timings];
         is_constraint = new bool[num_timings];
+        is_latch_clock_arc = new bool[num_timings];
         timing_sense = new int[num_timings];
         num_timings = 0;
         for (auto timing_ptr : timings) {
@@ -82,6 +84,15 @@ public:
             is_rising_edge_triggered[num_timings] = timing.is_rising_edge_triggered();
             is_falling_edge_triggered[num_timings] = timing.is_falling_edge_triggered();
             is_constraint[num_timings] = timing.is_constraint();
+            is_latch_clock_arc[num_timings] = false;
+            if (!timing.is_constraint() &&
+                (timing.is_rising_edge_triggered() || timing.is_falling_edge_triggered())) {
+                // Nangate latch clock-to-Q arcs use enable pin G/GN; DFF clock arcs use CK.
+                // This keeps latch open-edge handling independent of Liberty cell pointer
+                // lifetime in the GPU LUT initialization path.
+                is_latch_clock_arc[num_timings] =
+                    timing.related_port_name_ == "G" || timing.related_port_name_ == "GN";
+            }
             if (timing.timing_sense_ != TimingSense::unknown)
                 timing_sense[num_timings] = static_cast<int>(timing.timing_sense_);
             else
@@ -169,6 +180,7 @@ public:
         cudaMalloc(&d_is_rising_edge_triggered, num_timings * sizeof(bool));
         cudaMalloc(&d_is_falling_edge_triggered, num_timings * sizeof(bool));
         cudaMalloc(&d_is_constraint, num_timings * sizeof(bool));
+        cudaMalloc(&d_is_latch_clock_arc, num_timings * sizeof(bool));
         cudaMalloc(&d_timing_sense, num_timings * sizeof(int));
         cudaMalloc(&d_lut_template_var, 2 * num_luts * sizeof(int));
 
@@ -185,6 +197,7 @@ public:
         cudaMemcpy(d_is_rising_edge_triggered, is_rising_edge_triggered, num_timings * sizeof(bool), cudaMemcpyHostToDevice);
         cudaMemcpy(d_is_falling_edge_triggered, is_falling_edge_triggered, num_timings * sizeof(bool), cudaMemcpyHostToDevice);
         cudaMemcpy(d_is_constraint, is_constraint, num_timings * sizeof(bool), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_is_latch_clock_arc, is_latch_clock_arc, num_timings * sizeof(bool), cudaMemcpyHostToDevice);
         cudaMemcpy(d_timing_sense, timing_sense, num_timings * sizeof(int), cudaMemcpyHostToDevice);
         cudaMemcpy(d_lut_template_var, lut_template_var, 2 * num_luts * sizeof(int), cudaMemcpyHostToDevice);
     }
@@ -201,6 +214,7 @@ public:
         cudaMemcpy(&(d_gpuluts->d_allocated), &d_allocated, sizeof(bool *), cudaMemcpyHostToDevice);
         cudaMemcpy(&(d_gpuluts->d_is_rising_edge_triggered), &d_is_rising_edge_triggered, sizeof(bool *), cudaMemcpyHostToDevice);
         cudaMemcpy(&(d_gpuluts->d_is_falling_edge_triggered), &d_is_falling_edge_triggered, sizeof(bool *), cudaMemcpyHostToDevice);
+        cudaMemcpy(&(d_gpuluts->d_is_latch_clock_arc), &d_is_latch_clock_arc, sizeof(bool *), cudaMemcpyHostToDevice);
         cudaMemcpy(&(d_gpuluts->d_timing_sense), &d_timing_sense, sizeof(int *), cudaMemcpyHostToDevice);
         cudaMemcpy(&(d_gpuluts->d_lut_template_var), &d_lut_template_var, sizeof(int *), cudaMemcpyHostToDevice);
     }
@@ -346,6 +360,7 @@ public:
             delete[] is_rising_edge_triggered;
             delete[] is_falling_edge_triggered;
             delete[] is_constraint;
+            delete[] is_latch_clock_arc;
             delete[] timing_sense;
             cudaFree(d_num_x);
             cudaFree(d_num_y);
@@ -360,6 +375,7 @@ public:
             cudaFree(d_is_rising_edge_triggered);
             cudaFree(d_is_falling_edge_triggered);
             cudaFree(d_is_constraint);
+            cudaFree(d_is_latch_clock_arc);
             cudaFree(d_timing_sense);
         }
     }

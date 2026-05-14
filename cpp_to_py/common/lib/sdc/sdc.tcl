@@ -36,6 +36,12 @@ proc sdc_callback {cmd parsing_result} {
     set_output_delay -
     set_driving_cell -
     set_clock_uncertainty -
+    set_clock_transition -
+    set_clock_latency -
+    set_max_transition -
+    set_case_analysis -
+    set_false_path -
+    set_ideal_network -
     set_load -
     set_units { 
 
@@ -55,6 +61,10 @@ proc sdc_callback {cmd parsing_result} {
     get_clocks -
     get_ports {
       return [join $res(patterns) " "]
+    }
+
+    get_pins {
+      return "__get_pins__ [join $res(patterns) " "]"
     }
 
     all_inputs {
@@ -89,5 +99,3 @@ set json_output [open [lindex $argv 1] w]
 puts -nonewline $json_output [json::write array {*}$gt::sdc_json]
 
 close $json_output
-
-

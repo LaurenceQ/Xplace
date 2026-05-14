@@ -1,0 +1,35 @@
+# Build / generated artifacts
+build/
+build*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.o
+*.so
+*.a
+*.ptx
+*.cubin
+*.fatbin
+
+# Runtime logs / traces / temporary outputs
+*.log
+*.csv
+*.json
+*.bin
+*.npy
+*.pt
+*.pkl
+debug_traces/
+logs/
+output/
+result/
+
+# Python / editor caches
+__pycache__/
+*.pyc
+.vscode/
+.idea/
+
+# Local compiled extension output
+cpybin/

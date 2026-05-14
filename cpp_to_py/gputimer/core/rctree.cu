@@ -47,8 +47,7 @@ __global__ void RCTreeNet(float *x,
             root_cap += pin_cap;
 
             for (int j = 0; j < NUM_ATTR; j++) {
-                float pin_cap_lib =
-                    isnan(pinCap[pin_id * (NUM_ATTR + 2) + j]) ? pinCap[pin_id * (NUM_ATTR + 2) + 4 + (j >> 1)] : pinCap[pin_id * (NUM_ATTR + 2) + j];
+                float pin_cap_lib = pin_cap_attr(pinCap, pin_id, j);
                 float load = pinLoad[pin_id * NUM_ATTR + j];
 
                 pinLoad[pin_id * NUM_ATTR + j] = isnan(load) ? pin_cap + pin_cap_lib : load + pin_cap + pin_cap_lib;
@@ -59,8 +58,7 @@ __global__ void RCTreeNet(float *x,
         }
         // Root
         for (int j = 0; j < NUM_ATTR; j++) {
-            float pin_cap_lib =
-                isnan(pinCap[root * (NUM_ATTR + 2) + j]) ? pinCap[root * (NUM_ATTR + 2) + 4 + (j >> 1)] : pinCap[root * (NUM_ATTR + 2) + j];
+            float pin_cap_lib = pin_cap_attr(pinCap, root, j);
             float load = pinLoad[root * NUM_ATTR + j];
             pinLoad[root * NUM_ATTR + j] = isnan(load) ? root_cap + pin_cap_lib : load + root_cap + pin_cap_lib;
         }
@@ -76,8 +74,7 @@ __global__ void RCTreeNet(float *x,
         for (int i = start_idx + 1; i < end_idx; i++) {
             int pin_id = flat_net2pin_map[i];
             for (int j = 0; j < NUM_ATTR; j++) {
-                float pin_cap_lib =
-                    isnan(pinCap[pin_id * (NUM_ATTR + 2) + j]) ? pinCap[pin_id * (NUM_ATTR + 2) + 4 + (j >> 1)] : pinCap[pin_id * (NUM_ATTR + 2) + j];
+                float pin_cap_lib = pin_cap_attr(pinCap, pin_id, j);
                 float res = pinRootRes[pin_id * NUM_ATTR + j];
                 float cap = pinLoad[pin_id * NUM_ATTR + j];
                 float delay = pinRootDelay[pin_id * NUM_ATTR + j];
@@ -244,6 +241,7 @@ __global__ void propagate_rc_kernel(const int *flat_net2node_start_map,
                                     const float *pinCap,
                                     const float *pinLoad,
                                     const float *node_cap,
+                                    const uint8_t *includes_pin_caps,
                                     float *node_load,
                                     float *node_delay,
                                     float *node_ldelay,
@@ -263,8 +261,9 @@ __global__ void propagate_rc_kernel(const int *flat_net2node_start_map,
             int pin = node2pin_map[node];
             float wire_cap = node_cap[node * NUM_ATTR + cond];
             if (pin != -1) {
-                float pin_cap_lib =
-                    isnan(pinCap[pin * (NUM_ATTR + 2) + cond]) ? pinCap[pin * (NUM_ATTR + 2) + 4 + (cond >> 1)] : pinCap[pin * (NUM_ATTR + 2) + cond];
+                float pin_cap_lib = (!includes_pin_caps || includes_pin_caps[idx] == 0)
+                                        ? pin_cap_attr(pinCap, pin, cond)
+                                        : 0.0f;
                 float pin_load = pinLoad[pin * NUM_ATTR + cond];
                 wire_cap = wire_cap + pin_cap_lib + pin_load;
             }
@@ -284,8 +283,9 @@ __global__ void propagate_rc_kernel(const int *flat_net2node_start_map,
             int pin = node2pin_map[node];
             float wire_cap = node_cap[node * NUM_ATTR + cond];
             if (pin != -1) {
-                float pin_cap_lib =
-                    isnan(pinCap[pin * (NUM_ATTR + 2) + cond]) ? pinCap[pin * (NUM_ATTR + 2) + 4 + (cond >> 1)] : pinCap[pin * (NUM_ATTR + 2) + cond];
+                float pin_cap_lib = (!includes_pin_caps || includes_pin_caps[idx] == 0)
+                                        ? pin_cap_attr(pinCap, pin, cond)
+                                        : 0.0f;
                 float pin_load = pinLoad[pin * NUM_ATTR + cond];
                 wire_cap = wire_cap + pin_cap_lib + pin_load;
             }
@@ -413,6 +413,7 @@ void propagate_rc_tree(std::vector<int> host_edge_from,
                        std::vector<int> host_flat_net2node_start_map,
                        std::vector<int> host_flat_net2edge_start_map,
                        std::vector<int> host_node2pin_map,
+                       std::vector<uint8_t> host_includes_pin_caps,
                        int *node_order,
                        int *parent_node,
                        float *res_parent,
@@ -427,16 +428,23 @@ void propagate_rc_tree(std::vector<int> host_edge_from,
                        int num_nodes,
                        int num_edges) {
     int *edge_from, *edge_to, *flat_net2node_start_map, *flat_net2edge_start_map, *node2pin_map;
+    uint8_t *includes_pin_caps = nullptr;
     cudaMalloc(&edge_from, host_edge_from.size() * sizeof(int));
     cudaMalloc(&edge_to, host_edge_to.size() * sizeof(int));
     cudaMalloc(&flat_net2node_start_map, host_flat_net2node_start_map.size() * sizeof(int));
     cudaMalloc(&flat_net2edge_start_map, host_flat_net2edge_start_map.size() * sizeof(int));
     cudaMalloc(&node2pin_map, host_node2pin_map.size() * sizeof(int));
+    if (!host_includes_pin_caps.empty()) {
+        cudaMalloc(&includes_pin_caps, host_includes_pin_caps.size() * sizeof(uint8_t));
+    }
     cudaMemcpy(edge_from, host_edge_from.data(), host_edge_from.size() * sizeof(int), cudaMemcpyHostToDevice);
     cudaMemcpy(edge_to, host_edge_to.data(), host_edge_to.size() * sizeof(int), cudaMemcpyHostToDevice);
     cudaMemcpy(flat_net2node_start_map, host_flat_net2node_start_map.data(), host_flat_net2node_start_map.size() * sizeof(int), cudaMemcpyHostToDevice);
     cudaMemcpy(flat_net2edge_start_map, host_flat_net2edge_start_map.data(), host_flat_net2edge_start_map.size() * sizeof(int), cudaMemcpyHostToDevice);
     cudaMemcpy(node2pin_map, host_node2pin_map.data(), host_node2pin_map.size() * sizeof(int), cudaMemcpyHostToDevice);
+    if (includes_pin_caps) {
+        cudaMemcpy(includes_pin_caps, host_includes_pin_caps.data(), host_includes_pin_caps.size() * sizeof(uint8_t), cudaMemcpyHostToDevice);
+    }
 
     float *node_load, *node_delay, *node_ldelay, *node_impulse, *node_beta;
 
@@ -464,6 +472,7 @@ void propagate_rc_tree(std::vector<int> host_edge_from,
                                                     pinCap,
                                                     pinLoad,
                                                     node_cap,
+                                                    includes_pin_caps,
                                                     node_load,
                                                     node_delay,
                                                     node_ldelay,
@@ -479,6 +488,7 @@ void propagate_rc_tree(std::vector<int> host_edge_from,
     cudaFree(flat_net2node_start_map);
     cudaFree(flat_net2edge_start_map);
     cudaFree(node2pin_map);
+    if (includes_pin_caps) cudaFree(includes_pin_caps);
 
     cudaFree(node_load);
     cudaFree(node_delay);

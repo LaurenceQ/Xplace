@@ -3,6 +3,16 @@
 #include "gputimer/base.h"
 namespace gt {
 
+__device__ __forceinline__ float pin_cap_attr(const float *pinCap, int pin, int cond) {
+    const int stride = NUM_ATTR + 2;
+    float cap = pinCap[pin * stride + cond];
+    if (!isnan(cap)) {
+        return cap;
+    }
+    cap = pinCap[pin * stride + NUM_ATTR + (cond >> 1)];
+    return isnan(cap) ? 0.0f : cap;
+}
+
 template <typename T>
 __global__ void debugPrint(T *arr, int size) {
     for (int i = 0; i < size; i++) {

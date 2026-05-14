@@ -46,7 +46,15 @@ void checkTimingGraph(index_type* level_list_cpu, int num_pins, vector<std::stri
 }
 
 
+#define CUDA_CHECK(msg) do { \
+    cudaDeviceSynchronize(); \
+    cudaError_t _e = cudaGetLastError(); \
+    if (_e != cudaSuccess) \
+        printf("[levelize] CUDA error at %s (line %d): %s\n", msg, __LINE__, cudaGetErrorString(_e)); \
+} while(0)
+
 void GPUTimer::levelize() {
+    CUDA_CHECK("entry");
     index_type *frontiers, *next_frontiers;
     int *next_num_frontiers, *last_idx;
     int num_frontiers = gtdb.pin_frontiers.size();
@@ -66,6 +74,7 @@ void GPUTimer::levelize() {
         level_list_end_cpu.push_back(total_num_frontiers);
         advanceLevel<<<BLOCK_NUMBER(num_pins), BLOCK_SIZE>>>(
             frontiers, next_frontiers, level_list, pin_fanout_list_end, pin_fanout_list, pin_num_fanin, num_frontiers, next_num_frontiers, last_idx);
+        CUDA_CHECK("advanceLevel");
         cudaMemcpy(&num_frontiers, next_num_frontiers, sizeof(int), cudaMemcpyDeviceToHost);
         device_copy<index_type><<<1, 1>>>(next_frontiers, frontiers, num_frontiers);
         cudaMemset(next_num_frontiers, 0, sizeof(int));
@@ -75,7 +84,7 @@ void GPUTimer::levelize() {
     cudaMemcpy(level_list_end, level_list_end_cpu.data(), level_list_end_cpu.size() * sizeof(index_type), cudaMemcpyHostToDevice);
     index_type *level_list_cpu = new index_type[total_num_frontiers];
     cudaMemcpy(level_list_cpu, level_list, total_num_frontiers * sizeof(index_type), cudaMemcpyDeviceToHost);
-
+    CUDA_CHECK("exit");
     // checkTimingGraph(level_list_cpu, num_pins, gtdb.pin_names);
 }
 

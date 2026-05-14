@@ -1,5 +1,7 @@
 #include "sdc.h"
 
+#include <sstream>
+
 namespace gt::sdc {
 
 std::unique_ptr<char*, std::function<void(char**)>> c_args(const std::vector<std::string>& args) {
@@ -91,6 +93,20 @@ void SDC::read(const std::filesystem::path& path) {
                 commands.emplace_back(std::in_place_type_t<CreateClock>{}, j);
             } else if (c == "set_units") {
                 commands.emplace_back(std::in_place_type_t<SetUnits>{}, j);
+            } else if (c == "set_clock_uncertainty") {
+                commands.emplace_back(std::in_place_type_t<SetClockUncertainty>{}, j);
+            } else if (c == "set_clock_transition") {
+                commands.emplace_back(std::in_place_type_t<SetClockTransition>{}, j);
+            } else if (c == "set_clock_latency") {
+                commands.emplace_back(std::in_place_type_t<SetClockLatency>{}, j);
+            } else if (c == "set_max_transition") {
+                commands.emplace_back(std::in_place_type_t<SetMaxTransition>{}, j);
+            } else if (c == "set_case_analysis") {
+                commands.emplace_back(std::in_place_type_t<SetCaseAnalysis>{}, j);
+            } else if (c == "set_false_path") {
+                commands.emplace_back(std::in_place_type_t<SetFalsePath>{}, j);
+            } else if (c == "set_ideal_network") {
+                commands.emplace_back(std::in_place_type_t<SetIdealNetwork>{}, j);
             } else {
                 logger.error("sdc command %s not supported yet", c);
             }
@@ -291,7 +307,11 @@ CreateClock::CreateClock(const Json& json) {
         } else if (key == "-name") {
             name = itr.value();
         } else if (key == "-waveform") {
-            // TODO
+            std::istringstream iss(unquoted(itr.value()));
+            std::array<float, MAX_TRAN> values{};
+            if (iss >> values[0] >> values[1]) {
+                waveform = values;
+            }
         } else if (key == "port_pin_list") {
             port_pin_list = parse_port(unquoted(itr.value()));
         } else if (key == "command") {
@@ -306,6 +326,142 @@ CreateClock::CreateClock(const Json& json) {
 SetClockUncertainty::SetClockUncertainty(const Json& json) {
     for (auto itr = json.begin(); itr != json.end(); ++itr) {
         if (auto& key = itr.key(); key == "uncertainty") {
+            uncertainty = std::stof(unquoted(itr.value()));
+        } else if (key == "-setup") {
+            setup.emplace();
+        } else if (key == "-hold") {
+            hold.emplace();
+        } else if (key == "object_list") {
+            object_list = parse_port(unquoted(itr.value()));
+        } else if (key == "command") {
+            logger.errorif(itr.value() != command, "wrong command field: %s", itr.value());
+        } else {
+            logger.error("%s: %s not supported", command, std::quoted(key));
+        }
+    }
+}
+
+// Constructor
+SetClockTransition::SetClockTransition(const Json& json) {
+    for (auto itr = json.begin(); itr != json.end(); ++itr) {
+        if (auto& key = itr.key(); key == "transition") {
+            transition = std::stof(unquoted(itr.value()));
+        } else if (key == "-rise") {
+            rise.emplace();
+        } else if (key == "-fall") {
+            fall.emplace();
+        } else if (key == "-min") {
+            min.emplace();
+        } else if (key == "-max") {
+            max.emplace();
+        } else if (key == "clock_list") {
+            clock_list = parse_port(unquoted(itr.value()));
+        } else if (key == "command") {
+            logger.errorif(itr.value() != command, "wrong command field: %s", itr.value());
+        } else {
+            logger.error("%s: %s not supported", command, std::quoted(key));
+        }
+    }
+}
+
+// Constructor
+SetClockLatency::SetClockLatency(const Json& json) {
+    for (auto itr = json.begin(); itr != json.end(); ++itr) {
+        if (auto& key = itr.key(); key == "delay") {
+            delay = std::stof(unquoted(itr.value()));
+        } else if (key == "-rise") {
+            rise.emplace();
+        } else if (key == "-fall") {
+            fall.emplace();
+        } else if (key == "-min") {
+            min.emplace();
+        } else if (key == "-max") {
+            max.emplace();
+        } else if (key == "-source") {
+            source.emplace();
+        } else if (key == "-early") {
+            early.emplace();
+        } else if (key == "-late") {
+            late.emplace();
+        } else if (key == "object_list") {
+            object_list = parse_port(unquoted(itr.value()));
+        } else if (key == "command") {
+            logger.errorif(itr.value() != command, "wrong command field: %s", itr.value());
+        } else {
+            logger.error("%s: %s not supported", command, std::quoted(key));
+        }
+    }
+}
+
+// Constructor
+SetMaxTransition::SetMaxTransition(const Json& json) {
+    for (auto itr = json.begin(); itr != json.end(); ++itr) {
+        if (auto& key = itr.key(); key == "transition_value") {
+            transition_value = std::stof(unquoted(itr.value()));
+        } else if (key == "-clock_path") {
+            clock_path.emplace();
+        } else if (key == "-rise") {
+            rise.emplace();
+        } else if (key == "-fall") {
+            fall.emplace();
+        } else if (key == "object_list") {
+            object_list = parse_port(unquoted(itr.value()));
+        } else if (key == "command") {
+            logger.errorif(itr.value() != command, "wrong command field: %s", itr.value());
+        } else {
+            logger.error("%s: %s not supported", command, std::quoted(key));
+        }
+    }
+}
+
+// Constructor
+SetCaseAnalysis::SetCaseAnalysis(const Json& json) {
+    for (auto itr = json.begin(); itr != json.end(); ++itr) {
+        if (auto& key = itr.key(); key == "value") {
+            value = unquoted(itr.value());
+        } else if (key == "port_pin_list") {
+            port_pin_list = parse_port(unquoted(itr.value()));
+        } else if (key == "command") {
+            logger.errorif(itr.value() != command, "wrong command field: %s", itr.value());
+        } else {
+            logger.error("%s: %s not supported", command, std::quoted(key));
+        }
+    }
+}
+
+// Constructor
+SetFalsePath::SetFalsePath(const Json& json) {
+    for (auto itr = json.begin(); itr != json.end(); ++itr) {
+        if (auto& key = itr.key(); key == "-setup") {
+            setup.emplace();
+        } else if (key == "-hold") {
+            hold.emplace();
+        } else if (key == "-rise") {
+            rise.emplace();
+        } else if (key == "-fall") {
+            fall.emplace();
+        } else if (key == "-from" || key == "-rise_from" || key == "-fall_from") {
+            from = parse_port(unquoted(itr.value()));
+        } else if (key == "-to" || key == "-rise_to" || key == "-fall_to") {
+            to = parse_port(unquoted(itr.value()));
+        } else if (key == "-through" || key == "-rise_through" || key == "-fall_through" ||
+                   key == "-rise_throough" || key == "-fall_throough") {
+            through = parse_port(unquoted(itr.value()));
+        } else if (key == "-comment") {
+            continue;
+        } else if (key == "command") {
+            logger.errorif(itr.value() != command, "wrong command field: %s", itr.value());
+        } else {
+            logger.error("%s: %s not supported", command, std::quoted(key));
+        }
+    }
+}
+
+// Constructor
+SetIdealNetwork::SetIdealNetwork(const Json& json) {
+    for (auto itr = json.begin(); itr != json.end(); ++itr) {
+        if (auto& key = itr.key(); key == "-no_propagate") {
+            no_propagate.emplace();
         } else if (key == "object_list") {
             object_list = parse_port(unquoted(itr.value()));
         } else if (key == "command") {

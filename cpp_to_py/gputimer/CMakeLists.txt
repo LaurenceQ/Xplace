@@ -1,4 +1,5 @@
 # Files
+# NOTE: GLOB_RECURSE caches at configure time — re-run cmake after adding new .cpp files.
 file(GLOB_RECURSE SRC_FILES_GT ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp
                                 ${CMAKE_CURRENT_SOURCE_DIR}/*.hpp)
 file(GLOB_RECURSE SRC_FILES_GT_CUDA ${CMAKE_CURRENT_SOURCE_DIR}/*.cu)
@@ -25,7 +26,7 @@ target_link_libraries(gt PRIVATE torch ${TORCH_PYTHON_LIBRARY} xplace_common io_
 target_compile_options(gt PRIVATE -fPIC)
 target_compile_options(gt PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>")
 
-pybind11_add_module(gputimer MODULE PyBindCppMain.cpp)
+pybind11_add_module(gputimer MODULE NO_EXTRAS PyBindCppMain.cpp)
 
 target_include_directories(gputimer PRIVATE ${TORCH_INCLUDE_DIRS} ${PROJECT_SOURCE_DIR}/cpp_to_py ${FLUTE_MP_INCLUDE_DIR})
 target_link_libraries(gputimer PRIVATE torch ${TORCH_PYTHON_LIBRARY} xplace_common io_parser gt)

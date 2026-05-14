@@ -43,6 +43,3 @@ _backup/
 run_timer_all.log
 lefRWarning.log
 log.log
-
-# cpp_to_py/gputimer is managed as a separate symlinked repo locally.
-cpp_to_py/gputimer

@@ -4,6 +4,7 @@
 #include <torch/extension.h>
 
 #include <memory>
+#include <unordered_set>
 
 #include "common/common.h"
 #include "common/lib/sdc/sdc.h"
@@ -46,25 +47,47 @@ class Clock {
 private:
     std::string _name;
     float _period = .0f;
+    float _rise_edge = .0f;
+    float _fall_edge = .0f;
+    float _latency = .0f;
     int _source_id = -1;
 public:
-    Clock(const std::string& name, float period) : _name(name), _source_id(-1), _period(period) {};
-    Clock(const std::string& name, int source_id, float period) : _name(name), _source_id(source_id), _period(period) {};
-    inline const std::string& name() const;
+    Clock(const std::string& name, float period)
+        : _name(name), _period(period), _fall_edge(period * 0.5f), _source_id(-1) {};
+    Clock(const std::string& name, int source_id, float period)
+        : _name(name), _period(period), _fall_edge(period * 0.5f), _source_id(source_id) {};
+    inline const std::string& name() const { return _name; }
     inline float period() const { return _period; }
-    inline int source_id() { return _source_id; }
+    inline int source_id() const { return _source_id; }
+    inline float rise_edge() const { return _rise_edge + _latency; }
+    inline float fall_edge() const { return _fall_edge + _latency; }
+    inline float waveform_rise_edge() const { return _rise_edge; }
+    inline float waveform_fall_edge() const { return _fall_edge; }
+    inline float latency() const { return _latency; }
+    inline void set_waveform(float rise_edge, float fall_edge) {
+        _rise_edge = rise_edge;
+        _fall_edge = fall_edge;
+    }
+    inline void set_latency(float latency) { _latency = latency; }
 };
 
 class STAPin {
 public:
     vector<index_type> timing_arc_in;
     vector<index_type> timing_arc_out;
-    set<index_type> fanin_pin_ids;
-    set<index_type> fanout_pin_ids;
+    vector<index_type> fanin_pin_ids;
+    vector<index_type> fanout_pin_ids;
 };
 
 class GTDatabase {
 public:
+    struct DrivingCellSource {
+        int pin_id = -1;
+        std::array<int, NUM_ATTR> timing_ids = {-1, -1, -1, -1};
+        std::array<int, NUM_ATTR> input_rfs = {-1, -1, -1, -1};
+        std::array<float, NUM_ATTR> input_slews = {0.0f, 0.0f, 0.0f, 0.0f};
+    };
+
     db::Database& rawdb;
     gp::GPDatabase& gpdb;
     TimingTorchRawDB& timing_raw_db;
@@ -75,6 +98,7 @@ public:
 
 public:
     void ExtractTimingGraph();
+    void preparePinNameMapForSdc(const sdc::SDC& sdc);
     void readSpef(const std::string& file);
     void readSdc(sdc::SDC& sdc);
     void _read_sdc(sdc::SetInputDelay&);
@@ -83,6 +107,13 @@ public:
     void _read_sdc(sdc::SetOutputDelay&);
     void _read_sdc(sdc::SetLoad&);
     void _read_sdc(sdc::CreateClock&);
+    void _read_sdc(sdc::SetClockUncertainty&);
+    void _read_sdc(sdc::SetClockTransition&);
+    void _read_sdc(sdc::SetClockLatency&);
+    void _read_sdc(sdc::SetMaxTransition&);
+    void _read_sdc(sdc::SetCaseAnalysis&);
+    void _read_sdc(sdc::SetFalsePath&);
+    void _read_sdc(sdc::SetIdealNetwork&);
     void _read_sdc(sdc::SetUnits&);
     bool is_redundant_timing(const TimingArc* timing_arc, Split el);
 
@@ -103,16 +134,36 @@ public:
     vector<string> pin_names;
     vector<string> net_names;
     unordered_map<std::string, Clock> clocks;
+    unordered_map<std::string, index_type> pin_name2pin_id;
+    std::unordered_set<std::string> pin_name_map_targets;
+    bool build_full_pin_name_map = false;
     unordered_map<string, index_type> primary_input2pin_id;
     unordered_map<string, index_type> primary_output2pin_id;
 
     vector<STAPin*> STA_pins;
     vector<int> endpoints_id;
+    vector<int> endpoint_unique_pin_ids;
+    vector<int> test_id2_endpoint_id;
+    vector<int> primary_output2_endpoint_id;
 
     vector<int> liberty_cell_type2port_list_end = {0};
     vector<int> liberty_port2timing_list_end = {0};
     vector<float> liberty_port_capacitance;
     vector<TimingArc*> liberty_timing_arcs;
+    vector<float> dmp_input_thresholds;
+    vector<float> dmp_output_thresholds;
+    vector<float> dmp_slew_lower_thresholds;
+    vector<float> dmp_slew_upper_thresholds;
+    vector<float> dmp_slew_derates;
+    vector<float> dmp_timing_output_thresholds;
+    vector<float> dmp_timing_slew_lower_thresholds;
+    vector<float> dmp_timing_slew_upper_thresholds;
+    vector<float> dmp_timing_slew_derates;
+    vector<float> dmp_pin_input_thresholds;
+    vector<float> dmp_pin_slew_lower_thresholds;
+    vector<float> dmp_pin_slew_upper_thresholds;
+    vector<float> dmp_pin_slew_derates;
+    vector<DrivingCellSource> driving_cell_sources;
 
     vector<int> pin_id2cell_type_id;
     vector<int> pin_id2port_offset_id;
@@ -130,7 +181,20 @@ public:
     vector<int> timing_arc_id_map;
     vector<int> arc_types, arc_id2test_id;
     vector<int> test_id2_arc_id;
+    vector<float> test_clock_periods;
+    vector<float> test_setup_uncertainties;
+    vector<float> test_hold_uncertainties;
+    vector<float> pin_clock_periods;
+    vector<float> pin_clock_rise_edges;
+    vector<float> pin_clock_fall_edges;
+    vector<float> pin_clock_slews;
+    vector<float> pin_clock_latency_overrides;
+    unordered_map<std::string, std::array<float, NUM_ATTR>> clock_transitions;
+    unordered_map<std::string, float> clock_setup_uncertainty;
+    unordered_map<std::string, float> clock_hold_uncertainty;
+    vector<array<string, NUM_ATTR>> output_delay_clock_by_pin_attr;
     vector<int> net_is_clock;
+    vector<int> pin_is_clk;  // 1 if pin is a register clock pin (from_pin of test arc)
 
     // Timing Graph
     /// @param primary_inputs                 primary input pins
@@ -237,7 +301,7 @@ public:
     torch::Tensor pinAT;
     torch::Tensor pinImpulse;
     torch::Tensor pinRootDelay;
-
+    torch::Tensor pinGT_AT;
     // Timer RC Tree variables
     /// @param endpoints_id             Index of the endpoints
     /// @param arcDelay                 Delay value of an arc
@@ -250,6 +314,7 @@ public:
 public:
     // vector<float> arcDelay;
     torch::Tensor endpoints_id;
+    torch::Tensor endpoint_unique_pin_ids;
     torch::Tensor arcDelay;
     torch::Tensor pinImpulse_ref;
     torch::Tensor pinLoad_ref;
@@ -289,6 +354,30 @@ public:
     torch::Tensor timing_arc_id_map;
     torch::Tensor arc_id2test_id;
     torch::Tensor test_id2_arc_id;
+    torch::Tensor test_id2_endpoint_id;
+    torch::Tensor primary_output2_endpoint_id;
+    torch::Tensor test_clock_periods;
+    torch::Tensor test_setup_uncertainties;
+    torch::Tensor test_hold_uncertainties;
+    torch::Tensor pin_clock_periods;
+    torch::Tensor pin_clock_rise_edges;
+    torch::Tensor pin_clock_fall_edges;
+    torch::Tensor pin_clock_slews;
+
+    // DMP/OpenROAD library-level thresholds indexed by [el_rf].
+    torch::Tensor dmp_input_thresholds;
+    torch::Tensor dmp_output_thresholds;
+    torch::Tensor dmp_slew_lower_thresholds;
+    torch::Tensor dmp_slew_upper_thresholds;
+    torch::Tensor dmp_slew_derates;
+    torch::Tensor dmp_timing_output_thresholds;
+    torch::Tensor dmp_timing_slew_lower_thresholds;
+    torch::Tensor dmp_timing_slew_upper_thresholds;
+    torch::Tensor dmp_timing_slew_derates;
+    torch::Tensor dmp_pin_input_thresholds;
+    torch::Tensor dmp_pin_slew_lower_thresholds;
+    torch::Tensor dmp_pin_slew_upper_thresholds;
+    torch::Tensor dmp_pin_slew_derates;
 };
 
 }  // namespace gt

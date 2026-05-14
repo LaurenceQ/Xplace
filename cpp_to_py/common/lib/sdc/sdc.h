@@ -134,13 +134,107 @@ struct SetClockUncertainty {
     inline static constexpr auto command = "set_clock_uncertainty";
 
     std::optional<float> uncertainty;
+    std::optional<std::byte> setup;
+    std::optional<std::byte> hold;
     std::optional<Object> object_list;
 
     SetClockUncertainty() = default;
     SetClockUncertainty(const Json&);
 };
 
-using Command = std::variant<SetUnits, SetInputDelay, SetDrivingCell, SetInputTransition, SetOutputDelay, SetLoad, CreateClock>;
+struct SetClockTransition {
+    inline static constexpr auto command = "set_clock_transition";
+
+    std::optional<float> transition;
+    std::optional<std::byte> rise;
+    std::optional<std::byte> fall;
+    std::optional<std::byte> min;
+    std::optional<std::byte> max;
+    std::optional<Object> clock_list;
+
+    SetClockTransition() = default;
+    SetClockTransition(const Json&);
+};
+
+struct SetClockLatency {
+    inline static constexpr auto command = "set_clock_latency";
+
+    std::optional<float> delay;
+    std::optional<std::byte> rise;
+    std::optional<std::byte> fall;
+    std::optional<std::byte> min;
+    std::optional<std::byte> max;
+    std::optional<std::byte> source;
+    std::optional<std::byte> early;
+    std::optional<std::byte> late;
+    std::optional<Object> object_list;
+
+    SetClockLatency() = default;
+    SetClockLatency(const Json&);
+};
+
+struct SetMaxTransition {
+    inline static constexpr auto command = "set_max_transition";
+
+    std::optional<float> transition_value;
+    std::optional<std::byte> clock_path;
+    std::optional<std::byte> rise;
+    std::optional<std::byte> fall;
+    std::optional<Object> object_list;
+
+    SetMaxTransition() = default;
+    SetMaxTransition(const Json&);
+};
+
+struct SetCaseAnalysis {
+    inline static constexpr auto command = "set_case_analysis";
+
+    std::optional<std::string> value;
+    std::optional<Object> port_pin_list;
+
+    SetCaseAnalysis() = default;
+    SetCaseAnalysis(const Json&);
+};
+
+struct SetFalsePath {
+    inline static constexpr auto command = "set_false_path";
+
+    std::optional<std::byte> setup;
+    std::optional<std::byte> hold;
+    std::optional<std::byte> rise;
+    std::optional<std::byte> fall;
+    std::optional<Object> from;
+    std::optional<Object> to;
+    std::optional<Object> through;
+
+    SetFalsePath() = default;
+    SetFalsePath(const Json&);
+};
+
+struct SetIdealNetwork {
+    inline static constexpr auto command = "set_ideal_network";
+
+    std::optional<std::byte> no_propagate;
+    std::optional<Object> object_list;
+
+    SetIdealNetwork() = default;
+    SetIdealNetwork(const Json&);
+};
+
+using Command = std::variant<SetUnits,
+                             SetInputDelay,
+                             SetDrivingCell,
+                             SetInputTransition,
+                             SetOutputDelay,
+                             SetLoad,
+                             CreateClock,
+                             SetClockUncertainty,
+                             SetClockTransition,
+                             SetClockLatency,
+                             SetMaxTransition,
+                             SetCaseAnalysis,
+                             SetFalsePath,
+                             SetIdealNetwork>;
 
 struct SDC {
     std::vector<Command> commands;
