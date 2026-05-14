@@ -26,7 +26,7 @@ from typing import Iterable
 
 REPO = Path(__file__).resolve().parents[1]
 BENCH = Path("/research/d7/ascstd/qkduan25/contest25/ISPD2025_benchmarks")
-PLATFORM = REPO / "tools" / "NanGate45_ISPD_ASAP7"
+PLATFORM = BENCH / "NanGate45"
 OPENROAD = Path("/research/d7/ascstd/qkduan25/OpenROAD/build/bin/openroad")
 XPLACE_PY = Path("/home/qkduan25/.conda/envs/gnn/bin/python")
 OUT = REPO / "result" / "ispd25_direct_route_latest"

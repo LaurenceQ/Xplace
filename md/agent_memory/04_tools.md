@@ -17,7 +17,7 @@ Always run `make install`; Python imports from `cpp_to_py/cpybin`.
 
 ```bash
 python run_timer.py \
-  --platformPath /research/d7/ascstd/qkduan25/Xplace/tools/NanGate45_ISPD_ASAP7 \
+  --platformPath /research/d7/ascstd/qkduan25/contest25/ISPD2025_benchmarks/NanGate45 \
   --designPath /research/d7/ascstd/qkduan25/contest25/ISPD2025_benchmarks/<split> \
   --designName <design> \
   --route_segments /research/d7/ascstd/qkduan25/contest25/ISPD2025_benchmarks/openroad_gr_segments_skip_fanout300/<split>/<design>.route_segments \

@@ -16,7 +16,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 BENCH = Path("/research/d7/ascstd/qkduan25/contest25/ISPD2025_benchmarks")
-PLATFORM = REPO / "tools" / "NanGate45_ISPD_ASAP7"
+PLATFORM = BENCH / "NanGate45"
 DEFAULT_OUT = REPO / "result" / "ispd25_direct_route_latest"
 REF_RE = re.compile(r"^(tns|wns)\s+max\s+([-+0-9.eE]+)\s*$")
 DMP_RE = re.compile(
