@@ -341,13 +341,6 @@ void update_timing_dmp_cuda(GPUTimer* timer){
     dmp_model h_entry_dmp;
     gpuErrchk(cudaMemcpy(&h_entry_dmp, dmp_db, sizeof(dmp_model), cudaMemcpyDeviceToHost));
     h_entry_dmp.owns_allocations = false;
-    if (h_entry_dmp.ceff != nullptr && h_entry_dmp.timer_ceff != nullptr &&
-        h_entry_dmp.dmp_pin_slot_count > 0) {
-        gpuErrchk(cudaMemcpy(h_entry_dmp.ceff,
-                             h_entry_dmp.timer_ceff,
-                             sizeof(float) * h_entry_dmp.dmp_pin_slot_count,
-                             cudaMemcpyDeviceToDevice));
-    }
     if (h_entry_dmp.pin_at_winner != nullptr && h_entry_dmp.dmp_pin_slot_count > 0) {
         gpuErrchk(cudaMemset(h_entry_dmp.pin_at_winner, 0,
                              sizeof(unsigned long long) * h_entry_dmp.dmp_pin_slot_count));
@@ -692,13 +685,6 @@ void update_timing_dmp_cuda(GPUTimer* timer){
         dmp_debug_print_counts(dmp_db, "after backward");
     }
     dmp_clear_stale_cuda_error("DMP timing exit");
-    if (h_entry_dmp.ceff != nullptr && h_entry_dmp.timer_ceff != nullptr &&
-        h_entry_dmp.dmp_pin_slot_count > 0) {
-        gpuErrchk(cudaMemcpy(h_entry_dmp.timer_ceff,
-                             h_entry_dmp.ceff,
-                             sizeof(float) * h_entry_dmp.dmp_pin_slot_count,
-                             cudaMemcpyDeviceToDevice));
-    }
     if (d_gate_net_pair_debug_counts != nullptr) {
         gpuErrchk(cudaFree(d_gate_net_pair_debug_counts));
     }

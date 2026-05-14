@@ -1,17 +1,3 @@
-__device__ __forceinline__ void dmpSetGateScratchFallback(dmp_model* dmp_db,
-                                                          int slot,
-                                                          double table_ceff,
-                                                          double table_slew) {
-    dmp_db->ceff[slot] = table_ceff;
-    dmp_db->rd_[slot] = nanf("");
-    dmp_db->t0[slot] = nanf("");
-    dmp_db->dt[slot] = nanf("");
-    dmp_db->vo_delay_[slot] = nanf("");
-    dmp_db->vo_slew_[slot] = table_slew;
-    dmp_db->driving_cell_extra_delay_[slot] = nanf("");
-    dmp_db->dmp_alg_kind[slot] = DMP_ALG_CAP;
-}
-
 __device__ __forceinline__ bool dmpIsIdealClockTimingArc(const dmp_model* dmp_db,
                                                          int timing_id,
                                                          int from_pin_id) {
@@ -94,7 +80,6 @@ __device__ void dmp_model::propagateTest(){
     if (i < NUM_ATTR) {
         const int el = i >> 1;
         const int rf = i & 1;
-        const int el_rf_rf = (i << 1) + (i & 1);
         if ((timing_arc_id_map[arc_id * 2 + el] == -1) || (isnan(pinSlew[to_pin_id * NUM_ATTR + i]))) return;
         int fel = el ^ 1;  // clock -> data. clock late -> data early (hold)
         int timing_id = timing_arc_id_map[arc_id * 2 + el];
@@ -207,41 +192,9 @@ __global__ void finalizePinWinners_dmp(dmp_model* dmp_db,
         return;
     }
     const unsigned int cmp_key = static_cast<unsigned int>(packed_slew >> 32);
-    const unsigned int payload = static_cast<unsigned int>(packed_slew & 0xffffffffULL);
     const float slew = dmpDecodeWinnerFloat(cmp_key, pick_max);
     if (isfinite(slew)) {
         dmp_db->pinSlew[to_slot] = slew;
-        if ((payload & 0x80000000u) != 0u) {
-            const int src_slot = static_cast<int>(payload & 0x7fffffffu);
-            if (src_slot >= 0 && src_slot < dmp_db->dmp_slot_capacity) {
-                dmp_db->k0_[to_slot] = dmp_db->k0_[src_slot];
-                dmp_db->k1_[to_slot] = dmp_db->k1_[src_slot];
-                dmp_db->k2_[to_slot] = dmp_db->k2_[src_slot];
-                dmp_db->k3_[to_slot] = dmp_db->k3_[src_slot];
-                dmp_db->k4_[to_slot] = dmp_db->k4_[src_slot];
-                dmp_db->p1_[to_slot] = dmp_db->p1_[src_slot];
-                dmp_db->p2_[to_slot] = dmp_db->p2_[src_slot];
-                dmp_db->p3_[to_slot] = dmp_db->p3_[src_slot];
-                dmp_db->z1_[to_slot] = dmp_db->z1_[src_slot];
-                dmp_db->A_[to_slot] = dmp_db->A_[src_slot];
-                dmp_db->B_[to_slot] = dmp_db->B_[src_slot];
-                dmp_db->D_[to_slot] = dmp_db->D_[src_slot];
-                dmp_db->rd_[to_slot] = dmp_db->rd_[src_slot];
-                dmp_db->t0[to_slot] = dmp_db->t0[src_slot];
-                dmp_db->dt[to_slot] = dmp_db->dt[src_slot];
-                dmp_db->ceff[to_slot] = dmp_db->ceff[src_slot];
-                dmp_db->vo_delay_[to_slot] = dmp_db->vo_delay_[src_slot];
-                dmp_db->vo_slew_[to_slot] = dmp_db->vo_slew_[src_slot];
-                dmp_db->driving_cell_extra_delay_[to_slot] = dmp_db->driving_cell_extra_delay_[src_slot];
-                dmp_db->dmp_alg_kind[to_slot] = dmp_db->dmp_alg_kind[src_slot];
-                if (dmp_db->slot_vth != nullptr) {
-                    dmp_db->slot_vth[to_slot] = dmp_db->slot_vth[src_slot];
-                    dmp_db->slot_vl[to_slot] = dmp_db->slot_vl[src_slot];
-                    dmp_db->slot_vh[to_slot] = dmp_db->slot_vh[src_slot];
-                    dmp_db->slot_slew_derate[to_slot] = dmp_db->slot_slew_derate[src_slot];
-                }
-            }
-        }
     }
     dmp_db->pin_slew_winner[to_slot] = 0ULL;
 }

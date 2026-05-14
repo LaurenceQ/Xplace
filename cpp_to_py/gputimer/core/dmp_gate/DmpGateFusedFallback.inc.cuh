@@ -163,6 +163,223 @@ __device__ double dmpFindRootVlCached(const dmp_model* dmp_db,
     return nanf("");
 }
 
+__device__ __forceinline__ double dmpIpiIceffCached(double a,
+                                                    double b,
+                                                    double d,
+                                                    double p1,
+                                                    double p2,
+                                                    double rd,
+                                                    double dt,
+                                                    double ceff_time,
+                                                    double ceff) {
+    const double exp_p1_dt = exp2(-p1 * ceff_time);
+    const double exp_p2_dt = exp2(-p2 * ceff_time);
+    const double exp_dt_rd_ceff = exp2(-ceff_time / (rd * ceff));
+    const double ipi = (a * ceff_time + (b / p1) * (1.0 - exp_p1_dt) +
+                        (d / p2) * (1.0 - exp_p2_dt)) /
+                       (rd * ceff_time * dt);
+    const double iceff = (rd * ceff * ceff_time -
+                          (rd * ceff) * (rd * ceff) * (1.0 - exp_dt_rd_ceff)) /
+                         (rd * ceff_time * dt);
+    return ipi - iceff;
+}
+
+__device__ __forceinline__ void dmpV0Cached(int alg,
+                                            double k0,
+                                            double k1,
+                                            double k2,
+                                            double k3,
+                                            double k4,
+                                            double p1,
+                                            double p2,
+                                            double t,
+                                            double& vo,
+                                            double& dvo_dt) {
+    if (alg == DMP_ALG_CAP) {
+        vo = 0.0;
+        dvo_dt = 0.0;
+        return;
+    }
+    const double exp_p1 = exp2(-p1 * t);
+    if (alg == DMP_ALG_ZERO_C2) {
+        vo = k0 * (k1 + k2 * t + k3 * exp_p1);
+        dvo_dt = k0 * (k2 - k3 * p1 * exp_p1);
+        return;
+    }
+    const double exp_p2 = exp2(-p2 * t);
+    vo = k0 * (k1 + k2 * t + k3 * exp_p1 + k4 * exp_p2);
+    dvo_dt = k0 * (k2 - k3 * p1 * exp_p1 - k4 * p2 * exp_p2);
+}
+
+__device__ __forceinline__ void dmpVoCached(int alg,
+                                            double k0,
+                                            double k1,
+                                            double k2,
+                                            double k3,
+                                            double k4,
+                                            double p1,
+                                            double p2,
+                                            double t0_value,
+                                            double dt_value,
+                                            double t,
+                                            double& vo,
+                                            double& dvo_dt) {
+    const double t1 = t - t0_value;
+    if (t1 <= 0.0) {
+        vo = 0.0;
+        dvo_dt = 0.0;
+    } else if (t1 <= dt_value) {
+        double v0, dv0_dt;
+        dmpV0Cached(alg, k0, k1, k2, k3, k4, p1, p2, t1, v0, dv0_dt);
+        vo = v0 / dt_value;
+        dvo_dt = dv0_dt / dt_value;
+    } else {
+        double v0, dv0_dt;
+        double v0_dt, dv0_dt_dt;
+        dmpV0Cached(alg, k0, k1, k2, k3, k4, p1, p2, t1, v0, dv0_dt);
+        dmpV0Cached(alg, k0, k1, k2, k3, k4, p1, p2, t1 - dt_value, v0_dt, dv0_dt_dt);
+        vo = (v0 - v0_dt) / dt_value;
+        dvo_dt = (dv0_dt - dv0_dt_dt) / dt_value;
+    }
+}
+
+__device__ __forceinline__ void dmpVoFuncCached(int alg,
+                                                double k0,
+                                                double k1,
+                                                double k2,
+                                                double k3,
+                                                double k4,
+                                                double p1,
+                                                double p2,
+                                                double t0_value,
+                                                double dt_value,
+                                                double vth,
+                                                double t,
+                                                double& y,
+                                                double& dy) {
+    double vo, vo_dt;
+    dmpVoCached(alg, k0, k1, k2, k3, k4, p1, p2, t0_value, dt_value, t, vo, vo_dt);
+    y = vo - vth;
+    dy = vo_dt;
+}
+
+__device__ double dmpFindRootVoCached(const dmp_model* dmp_db,
+                                      int alg,
+                                      double k0,
+                                      double k1,
+                                      double k2,
+                                      double k3,
+                                      double k4,
+                                      double p1,
+                                      double p2,
+                                      double t0_value,
+                                      double dt_value,
+                                      double vth,
+                                      double x1,
+                                      double x2) {
+    dmpRootProfileAdd(DMP_ROOT_VO_CALLS, 1ULL);
+    double y1, y2, dy;
+    dmpVoFuncCached(alg, k0, k1, k2, k3, k4, p1, p2, t0_value, dt_value, vth, x1, y1, dy);
+    dmpVoFuncCached(alg, k0, k1, k2, k3, k4, p1, p2, t0_value, dt_value, vth, x2, y2, dy);
+    if (y1 * y2 > 0.0) {
+        dmpRootProfileAdd(DMP_ROOT_VO_BRACKET_FAIL, 1ULL);
+        return nanf("");
+    }
+    if (y1 == 0.0) {
+        dmpRootProfileAdd(DMP_ROOT_VO_SUCCESS, 1ULL);
+        dmpRootProfileAdd(DMP_ROOT_VO_ENDPOINT_HIT, 1ULL);
+        return x1;
+    }
+    if (y2 == 0.0) {
+        dmpRootProfileAdd(DMP_ROOT_VO_SUCCESS, 1ULL);
+        dmpRootProfileAdd(DMP_ROOT_VO_ENDPOINT_HIT, 1ULL);
+        return x2;
+    }
+    if (y1 > 0.0) {
+        const double tmp = x1;
+        x1 = x2;
+        x2 = tmp;
+    }
+    double root = (x1 + x2) / 2.0;
+    double dx_prev = fabs(x2 - x1);
+    double dx = dx_prev;
+    double y;
+    dmpVoFuncCached(alg, k0, k1, k2, k3, k4, p1, p2, t0_value, dt_value, vth, root, y, dy);
+    for (int iter = 0; iter < dmp_db->MAX_ITER; ++iter) {
+        if ((((x2 - root) * dy + y) * ((x1 - root) * dy + y) > 0.0) ||
+            (fabs(2.0 * y) > fabs(dx_prev * dy))) {
+            dx_prev = dx;
+            dx = (x2 - x1) * 0.5;
+            root = x1 + dx;
+        } else {
+            dx_prev = dx;
+            dx = y / dy;
+            root -= dx;
+        }
+        if (fabs(dx) <= dmp_db->x_tol * fabs(root)) {
+            dmpRootProfileAdd(DMP_ROOT_VO_SUCCESS, 1ULL);
+            dmpRootProfileAdd(DMP_ROOT_VO_ITERS, static_cast<unsigned long long>(iter + 1));
+            return root;
+        }
+
+        dmpVoFuncCached(alg, k0, k1, k2, k3, k4, p1, p2, t0_value, dt_value, vth, root, y, dy);
+        if (y < 0.0) {
+            x1 = root;
+        } else {
+            x2 = root;
+        }
+    }
+    dmpRootProfileAdd(DMP_ROOT_VO_MAXITER_FAIL, 1ULL);
+    return nanf("");
+}
+
+__device__ __forceinline__ bool dmpFindDriverDelaySlewCached(const dmp_model* dmp_db,
+                                                             int alg,
+                                                             double k0,
+                                                             double k1,
+                                                             double k2,
+                                                             double k3,
+                                                             double k4,
+                                                             double p1,
+                                                             double p2,
+                                                             double t0_value,
+                                                             double dt_value,
+                                                             double c1,
+                                                             double c2,
+                                                             double rpi,
+                                                             double rd,
+                                                             double driver_vth,
+                                                             double driver_vl,
+                                                             double driver_vh,
+                                                             double driver_derate,
+                                                             double& delay,
+                                                             double& slew) {
+    delay = nanf("");
+    slew = nanf("");
+    if (alg == DMP_ALG_CAP || !isfinite(t0_value) || !isfinite(dt_value) || dt_value <= 0.0 ||
+        !isfinite(rd) || rd <= 0.0 || !isfinite(driver_derate) || driver_derate <= 0.0) {
+        return false;
+    }
+    const double t_upper =
+        dmpSlotVoUpperBoundCached(alg, t0_value, dt_value, c1, c2, rpi, rd);
+    delay = dmpFindRootVoCached(dmp_db, alg, k0, k1, k2, k3, k4, p1, p2,
+                                t0_value, dt_value, driver_vth, t0_value, t_upper);
+    if (!isfinite(delay)) {
+        delay = slew = nanf("");
+        return false;
+    }
+    const double tl = dmpFindRootVoCached(dmp_db, alg, k0, k1, k2, k3, k4, p1, p2,
+                                          t0_value, dt_value, driver_vl, t0_value, delay);
+    const double th = dmpFindRootVoCached(dmp_db, alg, k0, k1, k2, k3, k4, p1, p2,
+                                          t0_value, dt_value, driver_vh, delay, t_upper);
+    if (!isfinite(tl) || !isfinite(th)) {
+        delay = slew = nanf("");
+        return false;
+    }
+    slew = (th - tl) / driver_derate;
+    return isfinite(slew);
+}
+
 struct DmpLocalGateState {
     int alg;
     double k0;
@@ -195,6 +412,7 @@ struct DmpLocalGateState {
 
 __device__ __forceinline__ DmpGateLaneContext dmpMakeGateLaneContextDirect(dmp_model* dmp_db,
                                                                            int timing_id,
+                                                                           int input_rf,
                                                                            int to_attr,
                                                                            int output_rf,
                                                                            float input_slew) {
@@ -233,7 +451,10 @@ __device__ __forceinline__ DmpGateLaneContext dmpMakeGateLaneContextDirect(dmp_m
                                                             to_attr,
                                                             dmp_db->slew_derate_));
 
-    if (ctx.allocator == nullptr || timing_id < 0 || !isfinite(input_slew)) {
+    if (ctx.allocator == nullptr ||
+        timing_id < 0 || input_rf < 0 || output_rf < 0 ||
+        !isfinite(input_slew) ||
+        !ctx.allocator->is_transition_defined(timing_id, input_rf, output_rf)) {
         return ctx;
     }
     const int base_lut_id = ctx.allocator->num_luts_in_timing * timing_id + output_rf;
@@ -514,10 +735,8 @@ __device__ bool dmpFindDriverParamsLocalPi(dmp_model* dmp_db,
     return false;
 }
 
-__device__ __forceinline__ bool dmpComputeLocalGateState(dmp_model* dmp_db,
-                                                         int arc_id,
-                                                         int lane,
-                                                         DmpLocalGateState& state) {
+__device__ __forceinline__ void dmpInitLocalGateState(dmp_model* dmp_db,
+                                                      DmpLocalGateState& state) {
     state = {};
     state.alg = DMP_ALG_CAP;
     state.rd = nanf("");
@@ -532,36 +751,24 @@ __device__ __forceinline__ bool dmpComputeLocalGateState(dmp_model* dmp_db,
     state.driver_vh = dmp_db->vh_;
     state.driver_derate = dmp_db->slew_derate_;
     state.dmp_valid = false;
+}
 
-    const int el = lane >> 2;
-    const int from_attr = lane >> 1;
-    const int to_attr = ((lane & 0b100) >> 1) + (lane & 1);
-    const int input_rf = from_attr & 1;
-    const int output_rf = to_attr & 1;
-    const int from_pin_id = dmp_db->timing_arc_from_pin_id[arc_id];
-    const int to_pin_id = dmp_db->timing_arc_to_pin_id[arc_id];
-    const int to_slot = to_pin_id * NUM_ATTR + to_attr;
-    const int timing_id = dmp_db->timing_arc_id_map[arc_id * 2 + el];
-    if (timing_id < 0 || from_pin_id < 0 || to_pin_id < 0 ||
-        dmp_db->d_allocator == nullptr ||
-        !dmp_db->d_allocator->is_transition_defined(timing_id, input_rf, output_rf)) {
+__device__ __forceinline__ bool dmpComputeLocalGateStateForSlot(dmp_model* dmp_db,
+                                                                const DmpGateLaneContext& ctx,
+                                                                int rc_slot,
+                                                                DmpLocalGateState& state) {
+    dmpInitLocalGateState(dmp_db, state);
+    if (!ctx.valid || rc_slot < 0 || rc_slot >= dmp_db->dmp_pin_slot_count) {
         return false;
     }
 
-    float input_slew = dmp_db->pinSlew[from_pin_id * NUM_ATTR + from_attr];
-    if (dmpIsIdealClockTimingArc(dmp_db, timing_id, from_pin_id) &&
-        !dmp_db->d_allocator->d_is_constraint[timing_id]) {
-        input_slew = dmpIdealClockSlew(dmp_db, from_pin_id, from_attr);
-    }
-    const DmpGateLaneContext ctx =
-        dmpMakeGateLaneContextDirect(dmp_db, timing_id, to_attr, output_rf, input_slew);
     state.driver_vth = ctx.driver_vth;
     state.driver_vl = ctx.driver_vl;
     state.driver_vh = ctx.driver_vh;
     state.driver_derate = ctx.driver_derate;
-    state.c1 = dmp_db->C1[to_slot];
-    state.c2 = dmp_db->C2[to_slot];
-    state.rpi = dmp_db->r_pi[to_slot];
+    state.c1 = dmp_db->C1[rc_slot];
+    state.c2 = dmp_db->C2[rc_slot];
+    state.rpi = dmp_db->r_pi[rc_slot];
     double table_ceff = state.c1 + state.c2;
     double table_delay = nanf("");
     double table_slew = nanf("");
@@ -671,6 +878,55 @@ __device__ __forceinline__ bool dmpComputeLocalGateState(dmp_model* dmp_db,
         state.gate_delay = table_delay;
     }
     return isfinite(state.gate_delay) && isfinite(state.vo_slew);
+}
+
+__device__ __forceinline__ bool dmpComputeLocalGateState(dmp_model* dmp_db,
+                                                         int arc_id,
+                                                         int lane,
+                                                         DmpLocalGateState& state) {
+    const int el = lane >> 2;
+    const int from_attr = lane >> 1;
+    const int to_attr = ((lane & 0b100) >> 1) + (lane & 1);
+    const int input_rf = from_attr & 1;
+    const int output_rf = to_attr & 1;
+    const int from_pin_id = dmp_db->timing_arc_from_pin_id[arc_id];
+    const int to_pin_id = dmp_db->timing_arc_to_pin_id[arc_id];
+    const int to_slot = to_pin_id * NUM_ATTR + to_attr;
+    const int timing_id = dmp_db->timing_arc_id_map[arc_id * 2 + el];
+    if (timing_id < 0 || from_pin_id < 0 || to_pin_id < 0 ||
+        dmp_db->d_allocator == nullptr) {
+        dmpInitLocalGateState(dmp_db, state);
+        return false;
+    }
+
+    float input_slew = dmp_db->pinSlew[from_pin_id * NUM_ATTR + from_attr];
+    if (dmpIsIdealClockTimingArc(dmp_db, timing_id, from_pin_id) &&
+        !dmp_db->d_allocator->d_is_constraint[timing_id]) {
+        input_slew = dmpIdealClockSlew(dmp_db, from_pin_id, from_attr);
+    }
+    const DmpGateLaneContext ctx =
+        dmpMakeGateLaneContextDirect(dmp_db, timing_id, input_rf, to_attr, output_rf, input_slew);
+    return dmpComputeLocalGateStateForSlot(dmp_db, ctx, to_slot, state);
+}
+
+__device__ __forceinline__ bool dmpComputeDrivingCellLocalState(dmp_model* dmp_db,
+                                                               int pin_slot,
+                                                               int timing_id,
+                                                               int input_rf,
+                                                               int output_rf,
+                                                               float input_slew,
+                                                               DmpLocalGateState& state) {
+    const int attr = pin_slot & (NUM_ATTR - 1);
+    if (dmp_db->d_allocator == nullptr || pin_slot < 0 ||
+        pin_slot >= dmp_db->dmp_pin_slot_count ||
+        timing_id < 0 || input_rf < 0 || output_rf < 0 ||
+        !isfinite(input_slew)) {
+        dmpInitLocalGateState(dmp_db, state);
+        return false;
+    }
+    const DmpGateLaneContext ctx =
+        dmpMakeGateLaneContextDirect(dmp_db, timing_id, input_rf, attr, output_rf, input_slew);
+    return dmpComputeLocalGateStateForSlot(dmp_db, ctx, pin_slot, state);
 }
 
 __device__ __forceinline__ bool dmpUpdateSlewWinnerValue(dmp_model* dmp_db,
@@ -806,6 +1062,138 @@ __device__ __forceinline__ void dmpLoadDelaySlewFromLocalState(dmp_model* dmp_db
                            wire_delay, load_slew);
 }
 
+__device__ void dmp_model::propagateLoadSlewDelay() {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int attr = idx & 0b11;
+    const int arc_id = arc_ids[idx];
+    const int from_pin_id = timing_arc_from_pin_id[arc_id];
+    const int to_pin_id = timing_arc_to_pin_id[arc_id];
+    const int from_slot = from_pin_id * NUM_ATTR + attr;
+    const int to_slot = to_pin_id * NUM_ATTR + attr;
+    const double elmore = elmore_delay[to_slot];
+
+    float source_slew = pinSlew[from_slot];
+    const bool has_driving_cell =
+        driving_cell_timing_id != nullptr &&
+        driving_cell_input_rf != nullptr &&
+        driving_cell_input_slew != nullptr &&
+        driving_cell_timing_id[from_slot] >= 0 &&
+        driving_cell_input_rf[from_slot] >= 0 &&
+        isfinite(driving_cell_input_slew[from_slot]);
+    if (isnan(source_slew) && !has_driving_cell) {
+        return;
+    }
+
+    double final_delay = nanf("");
+    double final_slew = nanf("");
+    bool used_driving_cell = false;
+    bool used_dmp_load = false;
+    double debug_extra_delay = nanf("");
+    double debug_vo_delay = nanf("");
+    int debug_alg = DMP_ALG_CAP;
+
+    if (has_driving_cell) {
+        const int timing_id = driving_cell_timing_id[from_slot];
+        const int input_rf = driving_cell_input_rf[from_slot];
+        const int output_rf = attr & 1;
+        const float input_slew = driving_cell_input_slew[from_slot];
+        DmpLocalGateState state;
+        if (dmpComputeDrivingCellLocalState(this,
+                                            from_slot,
+                                            timing_id,
+                                            input_rf,
+                                            output_rf,
+                                            input_slew,
+                                            state)) {
+            double wire_delay = nanf("");
+            double load_slew = nanf("");
+            dmpLoadDelaySlewFromLocalState(this, state, arc_id, attr, wire_delay, load_slew);
+
+            double intrinsic_delay = nanf("");
+            double intrinsic_slew = nanf("");
+            dmpGateCapDelaySlewCached(this,
+                                      timing_id,
+                                      input_rf,
+                                      output_rf,
+                                      input_slew,
+                                      0.0,
+                                      intrinsic_delay,
+                                      intrinsic_slew);
+            if (isfinite(intrinsic_delay) && isfinite(state.gate_delay)) {
+                debug_extra_delay = state.gate_delay - intrinsic_delay;
+                wire_delay += debug_extra_delay;
+            }
+            if (isfinite(wire_delay) && isfinite(load_slew)) {
+                final_delay = wire_delay;
+                final_slew = load_slew;
+                source_slew = static_cast<float>(state.vo_slew);
+                used_driving_cell = true;
+                used_dmp_load = state.dmp_valid;
+                debug_vo_delay = state.vo_delay;
+                debug_alg = state.alg;
+            }
+        }
+    }
+
+    if (!used_driving_cell) {
+        if (isnan(source_slew)) {
+            return;
+        }
+        double driver_vth, driver_vl, driver_vh, driver_derate;
+        dmpLoadSlotThresholds(this, from_slot, driver_vth, driver_vl, driver_vh, driver_derate);
+        final_delay = elmore;
+        final_slew = source_slew;
+        if (pin_is_primary_input != nullptr && pin_is_primary_input[from_pin_id]) {
+            dmpInputPortDelaySlewCuda(this,
+                                      to_pin_id,
+                                      attr,
+                                      source_slew,
+                                      elmore,
+                                      final_delay,
+                                      final_slew);
+        } else {
+            dmpThresholdAdjustCuda(this,
+                                   to_pin_id,
+                                   attr,
+                                   driver_vth,
+                                   driver_vl,
+                                   driver_vh,
+                                   driver_derate,
+                                   final_delay,
+                                   final_slew);
+        }
+    }
+
+    if (!isfinite(final_delay) || !isfinite(final_slew)) {
+        return;
+    }
+    const int delay_idx = (attr << 1) + (attr & 1);
+    pinSlew[to_slot] = static_cast<float>(final_slew);
+    arcDelay[arc_id * 2 * NUM_ATTR + delay_idx] = static_cast<float>(final_delay);
+
+    if (DMP_DIRECT_CLOCK_DEBUG_PRINT &&
+        pin_names != nullptr &&
+        dmpStringEquals(pin_names[from_pin_id], "clk") &&
+        dmpStringEquals(pin_names[to_pin_id], "clkbuf_0_clk:A")) {
+        const float src_at = pinAt[from_slot];
+        const double cand_at = isfinite(src_at) && isfinite(final_delay)
+                                   ? static_cast<double>(src_at) + final_delay
+                                   : nan("");
+        printf("[DMP DIRECT CLOCK] attr=%d source_slew=%.9f load_slew=%.9f elmore=%.9f extra_delay=%.9f vo_delay=%.9f wire_delay=%.9f at=%.9f alg=%d dmp_load=%d driving_cell=%d\n",
+               attr,
+               static_cast<double>(source_slew),
+               final_slew,
+               elmore,
+               debug_extra_delay,
+               debug_vo_delay,
+               final_delay,
+               cand_at,
+               debug_alg,
+               used_dmp_load ? 1 : 0,
+               used_driving_cell ? 1 : 0);
+    }
+}
+
 __global__ void propagateFusedGateNetDelaySlewAndAT_dmp(dmp_model* dmp_db,
                                                         const index_type* level_arc_list,
                                                         int num_level_arcs,
@@ -914,18 +1302,14 @@ __global__ void applyDrivingCellSourceSlewKernel(dmp_model* dmp_db,
 
     const int pin_slot = pin_id * NUM_ATTR + attr;
     const int output_rf = attr & 1;
-    double gate_delay_parasitic = nanf("");
-    double source_slew = nanf("");
-    bool dmp_valid = false;
-    if (!dmpApplyVirtualDrivingCellSource(dmp_db,
-                                          pin_slot,
-                                          timing_id,
-                                          input_rf,
-                                          output_rf,
-                                          input_slews[idx],
-                                          gate_delay_parasitic,
-                                          source_slew,
-                                          dmp_valid)) {
+    DmpLocalGateState state;
+    if (!dmpComputeDrivingCellLocalState(dmp_db,
+                                         pin_slot,
+                                         timing_id,
+                                         input_rf,
+                                         output_rf,
+                                         input_slews[idx],
+                                         state)) {
         if (counts != nullptr) {
             atomicAdd(&counts[DMP_DRIVING_CELL_SKIPPED], 1ULL);
         }
@@ -939,23 +1323,24 @@ __global__ void applyDrivingCellSourceSlewKernel(dmp_model* dmp_db,
                                                             0.0f,
                                                             0);
     const double extra_delay = isfinite(intrinsic_delay)
-                                   ? gate_delay_parasitic - static_cast<double>(intrinsic_delay)
+                                   ? state.gate_delay - static_cast<double>(intrinsic_delay)
                                    : nanf("");
 
-    dmp_db->pinSlew[pin_slot] = static_cast<float>(source_slew);
-    dmp_db->vo_slew_[pin_slot] = source_slew;
-    dmp_db->driving_cell_extra_delay_[pin_slot] = extra_delay;
+    dmp_db->driving_cell_timing_id[pin_slot] = timing_id;
+    dmp_db->driving_cell_input_rf[pin_slot] = input_rf;
+    dmp_db->driving_cell_input_slew[pin_slot] = input_slews[idx];
+    dmp_db->pinSlew[pin_slot] = static_cast<float>(state.vo_slew);
 
     if (counts != nullptr) {
         atomicAdd(&counts[DMP_DRIVING_CELL_APPLIED], 1ULL);
-        if (dmp_db->dmp_alg_kind[pin_slot] == DMP_ALG_ZERO_C2) {
+        if (state.alg == DMP_ALG_ZERO_C2) {
             atomicAdd(&counts[DMP_DRIVING_CELL_ZERO_C2], 1ULL);
-        } else if (dmp_db->dmp_alg_kind[pin_slot] == DMP_ALG_PI) {
+        } else if (state.alg == DMP_ALG_PI) {
             atomicAdd(&counts[DMP_DRIVING_CELL_PI], 1ULL);
         } else {
             atomicAdd(&counts[DMP_DRIVING_CELL_CAP], 1ULL);
         }
-        if (dmp_valid) {
+        if (state.dmp_valid) {
             atomicAdd(&counts[DMP_DRIVING_CELL_DMP_VALID], 1ULL);
         } else {
             atomicAdd(&counts[DMP_DRIVING_CELL_FALLBACK], 1ULL);
@@ -967,19 +1352,19 @@ __global__ void applyDrivingCellSourceSlewKernel(dmp_model* dmp_db,
         dmpStringEquals(dmp_db->pin_names[pin_id], "clk")) {
         printf("[DMP DRIVING CELL DBG] pin=clk attr=%d alg=%d dmp_valid=%d input_slew=%.9f source_slew=%.9f gate_delay=%.9f intrinsic=%.9f extra=%.9f C1=%.9e C2=%.9e rpi=%.9e rd=%.9e t0=%.9e dt=%.9e ceff=%.9e\n",
                attr,
-               dmp_db->dmp_alg_kind[pin_slot],
-               dmp_valid ? 1 : 0,
+               state.alg,
+               state.dmp_valid ? 1 : 0,
                static_cast<double>(input_slews[idx]),
-               source_slew,
-               gate_delay_parasitic,
+               state.vo_slew,
+               state.gate_delay,
                static_cast<double>(intrinsic_delay),
                extra_delay,
-               dmp_db->C1[pin_slot],
-               dmp_db->C2[pin_slot],
-               dmp_db->r_pi[pin_slot],
-               dmp_db->rd_[pin_slot],
-               dmp_db->t0[pin_slot],
-               dmp_db->dt[pin_slot],
-               static_cast<double>(dmp_db->ceff[pin_slot]));
+               state.c1,
+               state.c2,
+               state.rpi,
+               state.rd,
+               state.t0_value,
+               state.dt_value,
+               state.ceff_value);
     }
 }

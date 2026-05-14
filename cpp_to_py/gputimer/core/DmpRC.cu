@@ -675,22 +675,10 @@ void debug_dump_dmp_rc_net_cuda(dmp_model* h_dmp_db,
 
     int root_pin = node2pin_host[0];
     double c1[NUM_ATTR] = {0.0}, c2[NUM_ATTR] = {0.0}, rpi[NUM_ATTR] = {0.0};
-    double rd[NUM_ATTR] = {0.0};
-    float ceff[NUM_ATTR] = {0.0f};
-    double t0[NUM_ATTR] = {0.0}, dt[NUM_ATTR] = {0.0};
-    double vo_delay[NUM_ATTR] = {0.0}, vo_slew[NUM_ATTR] = {0.0};
-    int alg_kind[NUM_ATTR] = {0, 0, 0, 0};
     if (root_pin >= 0) {
         gpuErrchk(cudaMemcpy(c1, h_dmp_db->C1 + root_pin * NUM_ATTR, NUM_ATTR * sizeof(double), cudaMemcpyDeviceToHost));
         gpuErrchk(cudaMemcpy(c2, h_dmp_db->C2 + root_pin * NUM_ATTR, NUM_ATTR * sizeof(double), cudaMemcpyDeviceToHost));
         gpuErrchk(cudaMemcpy(rpi, h_dmp_db->r_pi + root_pin * NUM_ATTR, NUM_ATTR * sizeof(double), cudaMemcpyDeviceToHost));
-        gpuErrchk(cudaMemcpy(rd, h_dmp_db->rd_ + root_pin * NUM_ATTR, NUM_ATTR * sizeof(double), cudaMemcpyDeviceToHost));
-        gpuErrchk(cudaMemcpy(ceff, h_dmp_db->ceff + root_pin * NUM_ATTR, NUM_ATTR * sizeof(float), cudaMemcpyDeviceToHost));
-        gpuErrchk(cudaMemcpy(t0, h_dmp_db->t0 + root_pin * NUM_ATTR, NUM_ATTR * sizeof(double), cudaMemcpyDeviceToHost));
-        gpuErrchk(cudaMemcpy(dt, h_dmp_db->dt + root_pin * NUM_ATTR, NUM_ATTR * sizeof(double), cudaMemcpyDeviceToHost));
-        gpuErrchk(cudaMemcpy(vo_delay, h_dmp_db->vo_delay_ + root_pin * NUM_ATTR, NUM_ATTR * sizeof(double), cudaMemcpyDeviceToHost));
-        gpuErrchk(cudaMemcpy(vo_slew, h_dmp_db->vo_slew_ + root_pin * NUM_ATTR, NUM_ATTR * sizeof(double), cudaMemcpyDeviceToHost));
-        gpuErrchk(cudaMemcpy(alg_kind, h_dmp_db->dmp_alg_kind + root_pin * NUM_ATTR, NUM_ATTR * sizeof(int), cudaMemcpyDeviceToHost));
     }
     uint8_t includes_pin_caps_flag = 0;
     if (h_dmp_db->includes_pin_caps) {
@@ -706,14 +694,6 @@ void debug_dump_dmp_rc_net_cuda(dmp_model* h_dmp_db,
            c1[0], c1[1], c1[2], c1[3],
            c2[0], c2[1], c2[2], c2[3],
            rpi[0], rpi[1], rpi[2], rpi[3]);
-    printf("[DMP RC DUMP] root_dmp alg=(%d,%d,%d,%d) rd=(%.9e,%.9e,%.9e,%.9e) ceff=(%.9e,%.9e,%.9e,%.9e) t0=(%.9e,%.9e,%.9e,%.9e) dt=(%.9e,%.9e,%.9e,%.9e) vo_delay=(%.9e,%.9e,%.9e,%.9e) vo_slew=(%.9e,%.9e,%.9e,%.9e)\n",
-           alg_kind[0], alg_kind[1], alg_kind[2], alg_kind[3],
-           rd[0], rd[1], rd[2], rd[3],
-           ceff[0], ceff[1], ceff[2], ceff[3],
-           t0[0], t0[1], t0[2], t0[3],
-           dt[0], dt[1], dt[2], dt[3],
-           vo_delay[0], vo_delay[1], vo_delay[2], vo_delay[3],
-           vo_slew[0], vo_slew[1], vo_slew[2], vo_slew[3]);
     for (int edge = 0; edge < edge_count; ++edge) {
         printf("[DMP RC DUMP] edge local=%d from=%d to=%d res=%.9e\n",
                edge, edge_from_host[edge] - nst, edge_to_host[edge] - nst,
