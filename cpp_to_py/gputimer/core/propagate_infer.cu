@@ -76,10 +76,6 @@ __device__ void propagateInferAT(
     if (isnan(delay)) return;
 
     float at = pinAt[from_pin_id * NUM_ATTR + fel_rf] + delay;
-    if(to_pin_id == 1049) {
-        printf("Debug: arc_id=%d, from_pin_id=%d, to_pin_id=%d, el=%d, fel_rf=%d, tel_rf=%d, delay=%.3f, fat=%.3f tat=%.3f\n",
-               arc_id, from_pin_id, to_pin_id, el, fel_rf, tel_rf, delay, pinAt[from_pin_id * NUM_ATTR + fel_rf], at);
-    }
     if (isnan(pinAt[to_pin_id * NUM_ATTR + tel_rf]) ||
         ((pinAt[to_pin_id * NUM_ATTR + tel_rf] > at) ^ el)) {
         atomicExch(&pinAt[to_pin_id * NUM_ATTR + tel_rf], at);

@@ -17,7 +17,48 @@ class TimingArc;
 class TimingTorchRawDB;
 class GTDatabase;
 class GPULutAllocator;
+class GPUPowerLutAllocator;
 class DmpModel;
+
+struct GpuPowerExprOpHost {
+    uint8_t op = 0;   // 0=pin, 1=const0, 2=const1, 3=not, 4=and, 5=or, 6=xor
+    int arg = -1;     // physical pin id for op=pin
+};
+
+struct GpuPowerSeqHost {
+    int data_expr_id = -1;
+    int clk_expr_id = -1;
+    int q_pin = -1;
+    int qn_pin = -1;
+    uint8_t is_latch = 0;
+};
+
+struct GpuPowerInternalHost {
+    int internal_power_id = -1;
+    int node_id = -1;
+    int to_pin = -1;
+    int from_pin = -1;
+    int kind = 0;          // 0=input internal_power, 1=output internal_power
+    int duty_mode = 0;     // 0=const1, 1=expr duty, 2=diff duty, 3=const0.5, 4=const0
+    int duty_expr_id = -1;
+    int duty_pin = -1;
+    int denom_group = -1;
+    int positive_unate = 1;
+    float energy_unit = 1.0f;  // Liberty internal_power energy unit in joules.
+};
+
+struct GpuPowerLeakageRowHost {
+    int node_id = -1;
+    int group_id = -1;
+    int leakage_power_id = -1;
+    int when_expr_id = -1;
+    float leakage = 0.0f;  // Watts
+};
+
+struct GpuPowerLeakageGroupHost {
+    int node_id = -1;
+    float cell_leakage = 0.0f;  // Watts
+};
 
 struct HostRcGraph {
     std::vector<int> edge_from;
@@ -37,8 +78,10 @@ struct HostRcGraph {
 
 class GPUTimer {
 public:
-    GPULutAllocator *allocator;
-    GPULutAllocator *d_allocator;
+    GPULutAllocator *allocator = nullptr;
+    GPULutAllocator *d_allocator = nullptr;
+    GPUPowerLutAllocator *power_allocator = nullptr;
+    GPUPowerLutAllocator *d_power_allocator = nullptr;
     GTDatabase& gtdb;
     TimingTorchRawDB& timing_raw_db;
     shared_ptr<GTDatabase> gtdb_holder;
@@ -51,6 +94,7 @@ public:
     // === functions ===
     void initialize();
     void levelize();
+    void levelize_power(const uint8_t* d_is_seq_output_pin);
     void update_rc_timing(torch::Tensor node_lpos, bool record = false, bool load = false, bool conpensation = false);
     void update_rc_timing_flute(torch::Tensor node_lpos, bool record = false);
     void update_rc_timing_spef();
@@ -80,6 +124,25 @@ public:
     torch::Tensor report_pin_slew();
     torch::Tensor report_pin_load();
     torch::Tensor report_delay();
+    tuple<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t> report_power_liberty_inventory();
+    int64_t report_power_seq_inventory();
+    torch::Tensor report_power_internal_lut_cuda_probe();
+    torch::Tensor report_power_activity_cpu();
+    torch::Tensor report_power_activity_cuda();
+    tuple<torch::Tensor, torch::Tensor> report_power_switching_cuda();
+    torch::Tensor report_power_internal_cuda();
+    tuple<torch::Tensor, torch::Tensor, torch::Tensor> report_power_internal_arcs_cuda();
+    torch::Tensor report_power_leakage_cuda();
+    tuple<torch::Tensor, torch::Tensor, torch::Tensor> report_power_leakage_rows_cuda();
+    tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> report_power_total_cuda();
+    torch::Tensor compute_power_activity_cuda(torch::Tensor* inst_switching_cpu,
+                                              torch::Tensor* pin_switching_cpu,
+                                              torch::Tensor* inst_internal_cpu = nullptr,
+                                              torch::Tensor* internal_row_power_cpu = nullptr,
+                                              torch::Tensor* internal_row_meta_cpu = nullptr,
+                                              torch::Tensor* inst_leakage_cpu = nullptr,
+                                              torch::Tensor* leakage_row_power_cpu = nullptr,
+                                              torch::Tensor* leakage_row_meta_cpu = nullptr);
     void debug_dump_endpoint_tests(const std::string& outfile,
                                    const vector<std::string>& endpoint_pin_names);
 
@@ -167,8 +230,12 @@ public:
 
     index_type* primary_outputs;
     TimingArc* liberty_timing_arcs;
-    index_type *level_list_end, *level_list;
+    index_type *level_list_end = nullptr, *level_list = nullptr;
     vector<int> level_list_end_cpu;
+    vector<int> pin_level_cpu;
+    index_type *power_level_list_end = nullptr, *power_level_list = nullptr;
+    vector<int> power_level_list_end_cpu;
+    vector<int> power_pin_level_cpu;
     int* net_is_clock;
     int* pin_is_clk;  // GPU array: 1 if register clock pin, 0 otherwise
 

@@ -1,10 +1,9 @@
 # Xplace Agent Memory Index
 
-Active scope: ISPD2025 Xplace/GPUTimer direct `--route_segments` timing,
-runtime, CPU memory, and GPU memory versus CRPR-off OpenROAD.
+Active scope: ISPD2025 Xplace/GPUTimer direct timing, runtime, memory, and
+power versus OpenROAD references.
 
-Read this file after `AGENTS.md`. Then open only the focused file needed for
-the question; do not grep all logs first.
+Read this after `AGENTS.md`; open focused notes before grepping logs.
 
 ## Read Order
 
@@ -15,6 +14,8 @@ the question; do not grep all logs first.
 - DMP timing path: `08_dmp_timing_path.md`, then
   `12_dmp_arc_vs_fallback_profile.md`.
 - Speed or memory: `09_speed_memory_status.md`.
+- Power flow: `15_power_alignment_flow.md`, then `13_power_merge_status.md`.
+- Hypotheses/results: `14_hypotheses_validation.md`.
 - Commands and paths: `04_tools.md`.
 - Trap check before edits: `03_pitfalls.md`.
 - Memory maintenance: `11_memory_policy.md`.
@@ -35,15 +36,15 @@ the question; do not grep all logs first.
   memory notes after important conclusions.
 - `12_dmp_arc_vs_fallback_profile.md`: arc-level/fallback kernel timings,
   stage timings, and WNS/TNS consistency.
+- `13_power_merge_status.md`: CUDA power merge status and validation.
+- `14_hypotheses_validation.md`: compact hypothesis/test/result log.
+- `15_power_alignment_flow.md`: OpenROAD oracle/cache and compare workflow.
 
 ## Do Not Confuse
 
 - 1% timing pass/fail is separate from 4x speed pass/fail.
 - `bsg_chip` timing passes with missing-high-fanout skip `300`.
-- `visible/NV_NVDLA_partition_c` and `blind/ariane` need skip `0`.
-- `mempool_group/cluster` need skip `300` for memory/time.
+- `visible/NV_NVDLA_partition_c` and `blind/ariane` need skip `0`;
+  `mempool_group/cluster` need skip `300` for memory/time.
 
-## Archive
-
-`archive/` contains older sky130 and historical notes. Do not read it unless
-explicitly returning to that work.
+Archive: `archive/` contains older sky130 and historical notes; read only on request.

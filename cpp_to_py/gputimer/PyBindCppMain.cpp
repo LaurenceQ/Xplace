@@ -115,6 +115,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("report_pin_slew", &gt::GPUTimer::report_pin_slew, py::return_value_policy::move)
         .def("report_pin_load", &gt::GPUTimer::report_pin_load, py::return_value_policy::move)
         .def("report_delay", &gt::GPUTimer::report_delay, py::return_value_policy::move)
+        .def("report_power_liberty_inventory", &gt::GPUTimer::report_power_liberty_inventory)
+        .def("report_power_activity_cpu", &gt::GPUTimer::report_power_activity_cpu, py::return_value_policy::move)
+        .def("report_power_activity_cuda", &gt::GPUTimer::report_power_activity_cuda, py::return_value_policy::move)
+        .def("report_power_switching_cuda", &gt::GPUTimer::report_power_switching_cuda, py::return_value_policy::move)
+        .def("report_power_internal_cuda", &gt::GPUTimer::report_power_internal_cuda, py::return_value_policy::move)
+        .def("report_power_internal_arcs_cuda", &gt::GPUTimer::report_power_internal_arcs_cuda, py::return_value_policy::move)
+        .def("report_power_leakage_cuda", &gt::GPUTimer::report_power_leakage_cuda, py::return_value_policy::move)
+        .def("report_power_leakage_rows_cuda", &gt::GPUTimer::report_power_leakage_rows_cuda, py::return_value_policy::move)
+        .def("report_power_total_cuda", &gt::GPUTimer::report_power_total_cuda, py::return_value_policy::move)
+        .def("report_power_seq_inventory", &gt::GPUTimer::report_power_seq_inventory)
+        .def("report_power_internal_lut_cuda_probe", &gt::GPUTimer::report_power_internal_lut_cuda_probe, py::return_value_policy::move)
         .def("debug_dump_endpoint_tests",
              &gt::GPUTimer::debug_dump_endpoint_tests,
              py::arg("outfile"),

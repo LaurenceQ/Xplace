@@ -33,6 +33,8 @@ class LibertyCell;
 class LibertyPort;
 class TimingArc;
 class Lut;
+class InternalPower;
+class LeakagePower;
 };  // namespace gt
 
 namespace gt {
@@ -148,8 +150,14 @@ public:
 
     vector<int> liberty_cell_type2port_list_end = {0};
     vector<int> liberty_port2timing_list_end = {0};
+    vector<int> liberty_port2internal_power_list_end = {0};
+    vector<int> liberty_cell_type2leakage_power_list_end = {0};
     vector<float> liberty_port_capacitance;
     vector<TimingArc*> liberty_timing_arcs;
+    vector<InternalPower*> liberty_internal_powers;
+    vector<LeakagePower*> liberty_leakage_powers;
+    vector<string> liberty_port_function_exprs;
+    vector<uint8_t> liberty_port_has_function;
     vector<float> dmp_input_thresholds;
     vector<float> dmp_output_thresholds;
     vector<float> dmp_slew_lower_thresholds;
@@ -194,6 +202,7 @@ public:
     vector<array<string, NUM_ATTR>> output_delay_clock_by_pin_attr;
     vector<int> net_is_clock;
     vector<int> pin_is_clk;  // 1 if pin is a register clock pin (from_pin of test arc)
+    vector<int> pin_case_values;  // -1 unset, 0/1 from set_case_analysis.
 
     // Timing Graph
     /// @param primary_inputs                 primary input pins

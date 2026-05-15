@@ -398,6 +398,14 @@ void GPUTimer::initialize() {
     maybe_profile_dmp_gate_lut_usage(this);
     gputimer_log_cuda_mem_info("GPUTimer::initialize after_lut_gpu_copy");
 
+    power_allocator = new GPUPowerLutAllocator();
+    power_allocator->AllocateBatch(gtdb.liberty_internal_powers);
+    power_allocator->CopyToGPU();
+    cudaMalloc((void **)&d_power_allocator, sizeof(GPUPowerLutAllocator));
+    cudaMemcpy(d_power_allocator, power_allocator, sizeof(GPUPowerLutAllocator), cudaMemcpyHostToDevice);
+    power_allocator->CopyToGPU(d_power_allocator);
+    gputimer_log_cuda_mem_info("GPUTimer::initialize after_power_lut_gpu_copy");
+
     logger.info("GPUTimer initialized");
 
     if (!gputimer_env_enabled("GPUTIMER_DISABLE_STATE_BACKUP_TENSORS")) {
@@ -434,6 +442,9 @@ GPUTimer::~GPUTimer() {
     cudaFree(net_is_clock);
     cudaFree(pin_is_clk);
     cudaFree(level_list);
+    cudaFree(level_list_end);
+    cudaFree(power_level_list);
+    cudaFree(power_level_list_end);
     cudaFree(primary_outputs);
 
     cudaFree(__pinSlew__);
@@ -441,8 +452,42 @@ GPUTimer::~GPUTimer() {
     cudaFree(__pinRAT__);
     cudaFree(__pinAT__);
 
-    allocator->~GPULutAllocator();
-    cudaFree(d_allocator);
+    if (allocator) {
+        delete allocator;
+        allocator = nullptr;
+    }
+    if (d_allocator) {
+        cudaFree(d_allocator);
+        d_allocator = nullptr;
+    }
+    if (power_allocator) {
+        delete power_allocator;
+        power_allocator = nullptr;
+    }
+    if (d_power_allocator) {
+        cudaFree(d_power_allocator);
+        d_power_allocator = nullptr;
+    }
+}
+
+__global__ void power_internal_lut_probe_kernel(GPUPowerLutAllocator* power_allocator, int n, float* out) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    out[idx * 2 + 0] = power_allocator ? power_allocator->query_internal_power(idx, 0, 0.0f, 0.0f) : nanf("");
+    out[idx * 2 + 1] = power_allocator ? power_allocator->query_internal_power(idx, 1, 0.0f, 0.0f) : nanf("");
+}
+
+torch::Tensor GPUTimer::report_power_internal_lut_cuda_probe() {
+    if (!d_power_allocator) {
+        throw std::runtime_error("report_power_internal_lut_cuda_probe requires timer.init() first");
+    }
+    const int n = static_cast<int>(gtdb.liberty_internal_powers.size());
+    auto out = torch::empty({n, 2}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    if (n > 0) {
+        power_internal_lut_probe_kernel<<<BLOCK_NUMBER(n), BLOCK_SIZE>>>(d_power_allocator, n, out.data_ptr<float>());
+        CUDA_CHECK("power_internal_lut_probe_kernel");
+    }
+    return out.to(torch::kCPU);
 }
 
 void GPUTimer::update_states() {

@@ -108,9 +108,9 @@ struct RouteSegmentCacheHeader {
 };
 
 constexpr char ROUTE_SEG_CACHE_MAGIC[16] = {
-    'X', 'P', 'R', 'S', 'E', 'G', 'R', 'C', 'A', 'C', 'H', 'E', '0', '4', '\0', '\0'
+    'X', 'P', 'R', 'S', 'E', 'G', 'R', 'C', 'A', 'C', 'H', 'E', '0', '5', '\0', '\0'
 };
-constexpr std::uint32_t ROUTE_SEG_CACHE_VERSION = 4;
+constexpr std::uint32_t ROUTE_SEG_CACHE_VERSION = 5;
 
 std::uint64_t fnv1a_mix(std::uint64_t hash, const void* data, std::size_t bytes) {
     const auto* ptr = static_cast<const unsigned char*>(data);
@@ -174,7 +174,7 @@ std::string route_segment_cache_path(const std::string& source_file) {
     const std::string base = source_path.filename().string();
     std::ostringstream hash_stream;
     hash_stream << std::hex << std::hash<std::string>{}(std::filesystem::absolute(source_path).string());
-    return (cache_dir / (base + "." + hash_stream.str() + ".rcgraph.v4.bin")).string();
+    return (cache_dir / (base + "." + hash_stream.str() + ".rcgraph.v5.bin")).string();
 }
 
 template <typename T>
@@ -446,6 +446,24 @@ static void set_attr_cap(std::vector<float>& node_cap, int node, int attr, float
     if (attr >= 0 && attr < NUM_ATTR) {
         node_cap[node * NUM_ATTR + attr] = cap;
     }
+}
+
+static float pin_cap_attr_host(const GTDatabase& gtdb, int pin, int attr)
+{
+    if (pin < 0 || attr < 0 || attr >= NUM_ATTR) {
+        return 0.0f;
+    }
+    const int stride = NUM_ATTR + 2;
+    const int base = pin * stride;
+    if (base + stride > static_cast<int>(gtdb.pin_capacitance.size())) {
+        return 0.0f;
+    }
+    float cap = gtdb.pin_capacitance[base + attr];
+    if (std::isfinite(cap)) {
+        return cap;
+    }
+    cap = gtdb.pin_capacitance[base + NUM_ATTR + (attr >> 1)];
+    return std::isfinite(cap) ? cap : 0.0f;
 }
 
 static std::string openroad_gr_edge_key(int from, int to, const std::string& res_id)
@@ -2231,7 +2249,19 @@ HostRcGraph GPUTimer::build_openroad_route_segments_rc(const std::string& file) 
             stats.skipped_missing_high_fanout_nets++;
             stats.skipped_missing_high_fanout_pins += fanout;
             if (driver_pin >= 0) {
-                append_pin_node(local, driver_pin);
+                const int driver_node = append_pin_node(local, driver_pin);
+                for (int pin_pos = pin_begin; pin_pos < pin_end; ++pin_pos) {
+                    const int pin_id = flat_net2pin_map[pin_pos];
+                    if (pin_id < 0 || pin_id == driver_pin) {
+                        continue;
+                    }
+                    for (int attr = 0; attr < NUM_ATTR; ++attr) {
+                        const float cap = pin_cap_attr_host(gtdb, pin_id, attr);
+                        if (cap > 0.0f) {
+                            local.node_cap[driver_node * NUM_ATTR + attr] += cap;
+                        }
+                    }
+                }
             }
             for (std::size_t edge = 0; edge < local.edge_from.size(); ++edge) {
                 graph.edge_from.emplace_back(graph.num_nodes + local.edge_from[edge]);

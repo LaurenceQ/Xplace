@@ -95,6 +95,13 @@ bool extract_profile_enabled()
              value[0] == 'n' || value[0] == 'N');
 }
 
+void warn_missing_sdc_object(const char* command,
+                             const char* kind,
+                             const std::string& name) {
+    if (!gputimer_env_enabled("GPUTIMER_VERBOSE_SDC_WARNINGS")) return;
+    std::fprintf(stderr, "%s: %s \"%s\" not found\n", command, kind, name.c_str());
+}
+
 class ExtractProfileTimer {
 public:
     explicit ExtractProfileTimer(bool enabled)
@@ -293,11 +300,25 @@ void GTDatabase::ExtractTimingGraph() {
         }
         if (!liberty_cell_view[MIN] || !liberty_cell_view[MAX]) {
             liberty_cell_type2port_list_end.push_back(liberty_cell_type2port_list_end.back());
+            for_each_el(el) {
+                liberty_cell_type2leakage_power_list_end.push_back(
+                    liberty_cell_type2leakage_power_list_end.back());
+            }
             continue;
+        }
+        for_each_el(el) {
+            for (auto* leakage_power : liberty_cell_view[el]->leakage_power_groups_) {
+                liberty_leakage_powers.push_back(leakage_power);
+            }
+            liberty_cell_type2leakage_power_list_end.push_back(
+                liberty_cell_type2leakage_power_list_end.back() +
+                liberty_cell_view[el]->leakage_power_groups_.size());
         }
         liberty_cell_type2port_list_end.push_back(liberty_cell_type2port_list_end.back() + liberty_cell_view[MIN]->ports_.size());
         for (int i = 0; i < liberty_cell_view[MIN]->ports_.size(); i++) {
             array<LibertyPort*, 2> liberty_port_view = {liberty_cell_view[MIN]->ports_[i], liberty_cell_view[MAX]->ports_[i]};
+            liberty_port_function_exprs.push_back(liberty_port_view[MAX]->function_expr_);
+            liberty_port_has_function.push_back(liberty_port_view[MAX]->has_function_ ? 1 : 0);
             for_each_el(el) {
                 for (auto rf : TRAN) {
                     float lib_pin_cap = liberty_port_view[el]->port_capacitances_[rf][el].value_or(nanf(""));
@@ -311,6 +332,15 @@ void GTDatabase::ExtractTimingGraph() {
                     liberty_port_capacitance.push_back(lib_pin_cap);
                 }
                 liberty_port_capacitance.push_back(liberty_port_view[el]->port_capacitance_[2].value_or(0.0f));
+            }
+
+            for_each_el(el) {
+                liberty_port2internal_power_list_end.push_back(
+                    liberty_port2internal_power_list_end.back() +
+                    liberty_port_view[el]->internal_powers_.size());
+                for (auto* internal_power : liberty_port_view[el]->internal_powers_) {
+                    liberty_internal_powers.push_back(internal_power);
+                }
             }
 
             for_each_el(el) {
@@ -372,6 +402,7 @@ void GTDatabase::ExtractTimingGraph() {
     pin_id2port_offset_id.resize(num_pins);
     dmp_pin_library_ids.assign(num_pins * MAX_SPLIT, -1);
     pin_is_clk.assign(num_pins, 0);
+    pin_case_values.assign(num_pins, -1);
     STA_pins.resize(num_pins, nullptr);
     pin_capacitance.resize(2 * 3 * num_pins, 0.0f);
     for (auto& gppin : gpdb.getPins()) {
@@ -932,9 +963,11 @@ void GTDatabase::_read_sdc(sdc::SetUnits& obj) {
         if (s == "kOhm") sdc_res_unit = 1e3;
         if (s == "MOhm") sdc_res_unit = 1e6;
     }
-    if (sdc_time_unit.has_value()) printf("sdc time unit: %.2E\n", *sdc_time_unit);
-    if (sdc_cap_unit.has_value()) printf("sdc capacitance unit: %.2E\n", *sdc_cap_unit);
-    if (sdc_res_unit.has_value()) printf("sdc resistance unit: %.2E\n", *sdc_res_unit);
+    if (gputimer_env_enabled("GPUTIMER_VERBOSE_SDC_UNITS")) {
+        if (sdc_time_unit.has_value()) printf("sdc time unit: %.2E\n", *sdc_time_unit);
+        if (sdc_cap_unit.has_value()) printf("sdc capacitance unit: %.2E\n", *sdc_cap_unit);
+        if (sdc_res_unit.has_value()) printf("sdc resistance unit: %.2E\n", *sdc_res_unit);
+    }
 }
 
 // Sets input delay on pins or input ports relative to a clock signal.
@@ -948,7 +981,7 @@ void GTDatabase::_read_sdc(sdc::SetInputDelay& obj) {
             clock_edge = obj.clock_fall ? clock_itr->second.fall_edge()
                                         : clock_itr->second.rise_edge();
         } else {
-            printf(obj.command, ": clock ", std::quoted(obj.clock), " not found");
+            warn_missing_sdc_object(obj.command, "clock", obj.clock);
         }
     }
     auto input_arrival = [&]() {
@@ -971,7 +1004,7 @@ void GTDatabase::_read_sdc(sdc::SetInputDelay& obj) {
                                         timing_raw_db.pinAT[itr->second][(el << 1) + rf] = input_arrival();
                                     }
                                 } else {
-                                    printf(obj.command, ": port ", std::quoted(port), " not found");
+                                    warn_missing_sdc_object(obj.command, "port", port);
                                 }
                             }
                         },
@@ -1003,7 +1036,7 @@ void GTDatabase::_read_sdc(sdc::SetInputTransition& obj) {
                                         timing_raw_db.pinSlew[itr->second][(el << 1) + rf] = transition;
                                     }
                                 } else {
-                                    printf(obj.command, ": port ", std::quoted(port), " not found");
+                                    warn_missing_sdc_object(obj.command, "port", port);
                                 }
                             }
                         },
@@ -1056,14 +1089,16 @@ void GTDatabase::_read_sdc(sdc::SetDrivingCell& obj) {
         for_each_el_rf_if(el, rf, (mask | el) && (mask | rf)) {
             LibertyCell* liberty_cell = cell_libs_[el]->get_cell(*obj.lib_cell);
             if (!liberty_cell) {
-                printf("%s: lib cell %s not found\n", obj.command, obj.lib_cell->c_str());
+                warn_missing_sdc_object(obj.command, "lib_cell", *obj.lib_cell);
                 continue;
             }
 
             const int port_id = liberty_cell->get_port(*obj.pin);
             if (port_id < 0 || port_id >= static_cast<int>(liberty_cell->ports_.size())) {
-                printf("%s: pin %s not found in lib cell %s\n",
-                       obj.command, obj.pin->c_str(), obj.lib_cell->c_str());
+                if (gputimer_env_enabled("GPUTIMER_VERBOSE_SDC_WARNINGS")) {
+                    std::fprintf(stderr, "%s: pin %s not found in lib_cell %s\n",
+                                 obj.command, obj.pin->c_str(), obj.lib_cell->c_str());
+                }
                 continue;
             }
 
@@ -1094,8 +1129,10 @@ void GTDatabase::_read_sdc(sdc::SetDrivingCell& obj) {
             }
 
             if (!selected_arc) {
-                printf("%s: no transition arc found for %s/%s attr %d\n",
-                       obj.command, obj.lib_cell->c_str(), obj.pin->c_str(), attr);
+                if (gputimer_env_enabled("GPUTIMER_VERBOSE_SDC_WARNINGS")) {
+                    std::fprintf(stderr, "%s: no transition arc found for %s/%s attr %d\n",
+                                 obj.command, obj.lib_cell->c_str(), obj.pin->c_str(), attr);
+                }
                 continue;
             }
 
@@ -1125,7 +1162,7 @@ void GTDatabase::_read_sdc(sdc::SetDrivingCell& obj) {
                                     }
                                     record_driving_cell_source(itr->second);
                                 } else {
-                                    printf(obj.command, ": port ", std::quoted(port), " not found");
+                                    warn_missing_sdc_object(obj.command, "port", port);
                                 }
                             }
                         },
@@ -1138,7 +1175,7 @@ void GTDatabase::_read_sdc(sdc::SetOutputDelay& obj) {
     assert(obj.delay_value && obj.port_pin_list);
 
     if (clocks.find(obj.clock) == clocks.end()) {
-        printf(obj.command, ": clock ", std::quoted(obj.clock), " not found");
+        warn_missing_sdc_object(obj.command, "clock", obj.clock);
         return;
     }
 
@@ -1175,7 +1212,7 @@ void GTDatabase::_read_sdc(sdc::SetOutputDelay& obj) {
 	                                        output_delay_clock_by_pin_attr[itr->second][attr] = obj.clock;
                                     }
                                 } else {
-                                    printf(obj.command, ": port ", std::quoted(port), " not found");
+                                    warn_missing_sdc_object(obj.command, "port", port);
                                 }
                             }
                         },
@@ -1211,7 +1248,7 @@ void GTDatabase::_read_sdc(sdc::SetLoad& obj) {
                                         pin_capacitance[6 * itr->second + 4 + el] = load;
                                     }
                                 } else {
-                                    printf(obj.command, ": port ", std::quoted(port), " not found");
+                                    warn_missing_sdc_object(obj.command, "port", port);
                                 }
                             }
                         },
@@ -1234,7 +1271,7 @@ void GTDatabase::_read_sdc(sdc::CreateClock& obj) {
                                         clock_iter->second.set_waveform((*obj.waveform)[0], (*obj.waveform)[1]);
                                     }
                                 } else {
-                                    printf(obj.command, ": port ", std::quoted(ports.front()), " not found");
+                                    warn_missing_sdc_object(obj.command, "port", ports.front());
                                 }
                             },
                             [](auto&&) { assert(false); }},
@@ -1438,9 +1475,6 @@ void GTDatabase::_read_sdc(sdc::SetMaxTransition& obj) {
 }
 
 void GTDatabase::_read_sdc(sdc::SetCaseAnalysis& obj) {
-    // Minimal OpenSTA-compatible effect for PI constants: a constant input is not a
-    // timing startpoint. Full conditional arc pruning remains separate from this
-    // direct WNS/TNS path unless a failing report points to case arcs.
     if (!obj.value || !obj.port_pin_list) {
         return;
     }
@@ -1449,12 +1483,26 @@ void GTDatabase::_read_sdc(sdc::SetCaseAnalysis& obj) {
     if (!is_zero && !is_one) {
         return;
     }
+    const int case_value = is_one ? 1 : 0;
+    auto apply_pin = [&](int pin_id) {
+        if (pin_id >= 0 && pin_id < static_cast<int>(pin_case_values.size())) {
+            pin_case_values[pin_id] = case_value;
+        }
+    };
     std::visit(Functors{[&](sdc::GetPorts& get_ports) {
                             for (auto& port : get_ports.ports) {
                                 if (auto itr = primary_input2pin_id.find(port); itr != primary_input2pin_id.end()) {
+                                    apply_pin(itr->second);
                                     for (int attr = 0; attr < NUM_ATTR; ++attr) {
                                         timing_raw_db.pinAT[itr->second][attr] = nanf("");
                                     }
+                                }
+                            }
+                        },
+                        [&](sdc::GetPins& get_pins) {
+                            for (auto& pin_name : get_pins.pins) {
+                                if (auto itr = pin_name2pin_id.find(pin_name); itr != pin_name2pin_id.end()) {
+                                    apply_pin(itr->second);
                                 }
                             }
                         },

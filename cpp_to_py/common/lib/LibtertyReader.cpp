@@ -1,5 +1,7 @@
 #include <zlib.h>
+#include <algorithm>
 #include <iostream>
+#include <unordered_set>
 
 #include "Liberty.h"
 #include "Timing.h"
@@ -10,6 +12,60 @@
 using std::ifstream;
 
 namespace gt {
+
+static std::string liberty_next_string(CellLib::token_iterator& itr,
+                                       const CellLib::token_iterator end) {
+    if (++itr == end) {
+        return "";
+    }
+    return std::string(*itr);
+}
+
+static bool liberty_expr_stop_token(const std::string& token) {
+    static const std::unordered_set<std::string> stop_tokens = {
+        "}",
+        "area", "bundle", "cell", "cell_leakage_power", "clock", "direction",
+        "fall_capacitance", "fall_capacitance_range", "fall_power", "fanout_load",
+        "function", "internal_power", "leakage_power", "max_capacitance",
+        "max_fanout", "max_transition", "min_capacitance", "min_fanout",
+        "min_transition", "pin", "related_ground_pin", "related_pg_pin",
+        "related_pin", "related_power_pin", "rise_capacitance",
+        "rise_capacitance_range", "rise_power", "timing", "value", "when",
+        "clocked_on", "next_state", "clear", "preset", "enable", "data_in",
+        "clear_preset_var1", "clear_preset_var2",
+        "clock_gate_clock_pin", "clock_gate_enable_pin",
+        "clock_gate_test_pin", "clock_gate_out_pin"
+    };
+    return stop_tokens.find(token) != stop_tokens.end();
+}
+
+static std::string liberty_next_expr(CellLib::token_iterator& itr,
+                                     const CellLib::token_iterator end) {
+    auto cur = itr;
+    if (++cur == end) {
+        return "";
+    }
+
+    std::string expr;
+    int paren_depth = 0;
+    for (; cur != end; ++cur) {
+        const std::string token(*cur);
+        if (paren_depth == 0 && liberty_expr_stop_token(token)) {
+            break;
+        }
+        if (token == "(") {
+            paren_depth++;
+        } else if (token == ")") {
+            paren_depth = std::max(0, paren_depth - 1);
+        }
+        if (!expr.empty()) expr.push_back(' ');
+        expr += token;
+    }
+
+    itr = cur;
+    --itr;
+    return expr;
+}
 
 static float liberty_port_default_cap(const CellLib* lib, CellPortDirection direction) {
     const char* key = "default_inout_pin_cap";
@@ -55,6 +111,10 @@ static void copy_liberty_port_attributes(const LibertyPort* from, LibertyPort* t
         }
     }
     to->is_clock_ = from->is_clock_;
+    to->is_clock_gate_clock_ = from->is_clock_gate_clock_;
+    to->is_clock_gate_enable_ = from->is_clock_gate_enable_;
+    to->is_clock_gate_test_ = from->is_clock_gate_test_;
+    to->is_clock_gate_out_ = from->is_clock_gate_out_;
     to->fanout_load = from->fanout_load;
     to->max_fanout = from->max_fanout;
     to->min_fanout = from->min_fanout;
@@ -299,6 +359,84 @@ Lut* CellLib::extract_lut(token_iterator& itr, const token_iterator end) {
     return lut;
 }
 
+InternalPower* CellLib::extractInternalPower(token_iterator& itr, const token_iterator end, LibertyPort* cell_port) {
+    InternalPower* internal_power = new InternalPower();
+    internal_power->liberty_port_ = cell_port;
+    const float cap_unit = (capacitance_unit_.has_value() ? static_cast<float>(capacitance_unit_->value()) : 1.0f) *
+                           scale_factors["capacitance"];
+    const float voltage_unit = (voltage_unit_.has_value() ? static_cast<float>(voltage_unit_->value()) : 1.0f) *
+                               scale_factors["voltage"];
+    internal_power->energy_unit_ = cap_unit * voltage_unit * voltage_unit;
+    cell_port->internal_powers_.push_back(internal_power);
+
+    if (itr = std::find(itr, end, "{"); itr == end) {
+        logger.info("can't find group brace '{' in internal_power");
+    }
+
+    int stack = 1;
+    while (stack && ++itr != end) {
+        if (*itr == "fall_power") {
+            internal_power->power_[FALL] = extract_lut(itr, end);
+        } else if (*itr == "rise_power") {
+            internal_power->power_[RISE] = extract_lut(itr, end);
+        } else if (*itr == "related_pin") {
+            internal_power->related_port_name_ = liberty_next_string(itr, end);
+        } else if (*itr == "related_pg_pin") {
+            internal_power->related_pg_pin_name_ = liberty_next_string(itr, end);
+        } else if (*itr == "when") {
+            internal_power->when_expr_ = liberty_next_expr(itr, end);
+        } else if (*itr == "}") {
+            stack--;
+        } else if (*itr == "{") {
+            stack++;
+        } else {
+            // undefined token TODO:
+        }
+    }
+
+    if (stack != 0 || *itr != "}") {
+        logger.info("can't find group brace '}' in internal_power");
+    }
+
+    return internal_power;
+}
+
+SequentialPower* CellLib::extractSequential(token_iterator& itr, const token_iterator end, LibertyCell* liberty_cell, bool is_latch) {
+    SequentialPower* seq = new SequentialPower();
+    seq->is_latch_ = is_latch;
+    std::vector<std::string> names;
+    on_next_parentheses(itr, end, [&](auto& name) mutable { names.emplace_back(name); });
+    if (!names.empty()) seq->output_name_ = names[0];
+    if (names.size() > 1) seq->output_inv_name_ = names[1];
+    if (itr = std::find(itr, end, "{"); itr == end) {
+        logger.info("can't find group brace '{' in sequential");
+    }
+    int stack = 1;
+    while (stack && ++itr != end) {
+        if (*itr == "clocked_on") {
+            seq->clocked_on_expr_ = liberty_next_expr(itr, end);
+        } else if (*itr == "next_state") {
+            seq->next_state_expr_ = liberty_next_expr(itr, end);
+        } else if (*itr == "enable") {
+            seq->enable_expr_ = liberty_next_expr(itr, end);
+        } else if (*itr == "clear") {
+            seq->clear_expr_ = liberty_next_expr(itr, end);
+        } else if (*itr == "preset") {
+            seq->preset_expr_ = liberty_next_expr(itr, end);
+        } else if (*itr == "}") {
+            stack--;
+        } else if (*itr == "{") {
+            stack++;
+        } else {
+            // undefined token TODO:
+        }
+    }
+    liberty_cell->sequentials_.push_back(seq);
+    liberty_cell->is_seq_ = true;
+    liberty_cell->num_bits_ = std::max(liberty_cell->num_bits_, 1);
+    return seq;
+}
+
 TimingArc* CellLib::extractTimingArc(token_iterator& itr, const token_iterator end, LibertyPort* cell_port) {
     TimingArc* timing_arc = new TimingArc();
     timing_arc->liberty_port_ = cell_port;
@@ -411,6 +549,27 @@ LibertyPort* CellLib::extractLibertyPort(token_iterator& itr, const token_iterat
         } else if (*itr == "clock") {
             logger.infoif(++itr == end, "can't get the clock status in cellpin");
             cell_port->is_clock_ = (*itr == "true") ? true : false;
+        } else if (*itr == "clock_gate_clock_pin") {
+            logger.infoif(++itr == end, "can't get the clock gate clock status in cellpin");
+            cell_port->is_clock_gate_clock_ = (*itr == "true") ? true : false;
+        } else if (*itr == "clock_gate_enable_pin") {
+            logger.infoif(++itr == end, "can't get the clock gate enable status in cellpin");
+            cell_port->is_clock_gate_enable_ = (*itr == "true") ? true : false;
+        } else if (*itr == "clock_gate_test_pin") {
+            logger.infoif(++itr == end, "can't get the clock gate test status in cellpin");
+            cell_port->is_clock_gate_test_ = (*itr == "true") ? true : false;
+        } else if (*itr == "clock_gate_out_pin") {
+            logger.infoif(++itr == end, "can't get the clock gate output status in cellpin");
+            cell_port->is_clock_gate_out_ = (*itr == "true") ? true : false;
+        } else if (*itr == "function") {
+            cell_port->function_expr_ = liberty_next_expr(itr, end);
+            cell_port->has_function_ = true;
+        } else if (*itr == "related_power_pin") {
+            cell_port->related_power_pin_name_ = liberty_next_string(itr, end);
+        } else if (*itr == "related_ground_pin") {
+            cell_port->related_ground_pin_name_ = liberty_next_string(itr, end);
+        } else if (*itr == "internal_power") {
+            InternalPower* internal_power_ = extractInternalPower(itr, end, cell_port);
         } else if (*itr == "timing") {
             TimingArc* timing_arc_ = extractTimingArc(itr, end, cell_port);
         } else if (*itr == "}") {
@@ -497,6 +656,18 @@ vector<LibertyPort*> CellLib::extractLibertyBus(token_iterator& itr, const token
         } else if (*itr == "clock") {
             logger.infoif(++itr == end, "can't get the clock status in bus");
             bus_port.is_clock_ = (*itr == "true") ? true : false;
+        } else if (*itr == "clock_gate_clock_pin") {
+            logger.infoif(++itr == end, "can't get the clock gate clock status in bus");
+            bus_port.is_clock_gate_clock_ = (*itr == "true") ? true : false;
+        } else if (*itr == "clock_gate_enable_pin") {
+            logger.infoif(++itr == end, "can't get the clock gate enable status in bus");
+            bus_port.is_clock_gate_enable_ = (*itr == "true") ? true : false;
+        } else if (*itr == "clock_gate_test_pin") {
+            logger.infoif(++itr == end, "can't get the clock gate test status in bus");
+            bus_port.is_clock_gate_test_ = (*itr == "true") ? true : false;
+        } else if (*itr == "clock_gate_out_pin") {
+            logger.infoif(++itr == end, "can't get the clock gate output status in bus");
+            bus_port.is_clock_gate_out_ = (*itr == "true") ? true : false;
         } else if (*itr == "timing") {
             extractTimingArc(itr, end, &bus_port);
         } else if (*itr == "}") {
@@ -570,20 +741,31 @@ LibertyCell* CellLib::extractLibertyCell(token_iterator& itr, const token_iterat
             liberty_cell->leakage_power_ = scale_factors["power"] * std::strtof(itr->data(), nullptr);
         }
         if (*itr == "leakage_power") {
+            LeakagePower* leakage_power = new LeakagePower();
             itr = std::find(itr, end, "{");
             int stack_1 = 1;
             while (stack_1 && ++itr != end) {
                 if (*itr == "value") {
                     logger.infoif(++itr == end, "can't get value in cell %s", liberty_cell->name);
-                    liberty_cell->leakage_powers_.push_back(std::strtof(itr->data(), nullptr));
+                    leakage_power->value_ = scale_factors["power"] * std::strtof(itr->data(), nullptr);
+                    liberty_cell->leakage_powers_.push_back(leakage_power->value_);
+                } else if (*itr == "when") {
+                    leakage_power->when_expr_ = liberty_next_expr(itr, end);
+                } else if (*itr == "related_pg_pin") {
+                    leakage_power->related_pg_pin_name_ = liberty_next_string(itr, end);
                 } else if (*itr == "}")
                     stack_1--;
                 else if (*itr == "{")
                     stack_1++;
             }
+            liberty_cell->leakage_power_groups_.push_back(leakage_power);
         } else if (*itr == "area") {
             logger.infoif(++itr == end, "can't get area in cell %s", liberty_cell->name);
             liberty_cell->area_ = std::strtof(itr->data(), nullptr);
+        } else if (*itr == "ff") {
+            extractSequential(itr, end, liberty_cell, false);
+        } else if (*itr == "latch") {
+            extractSequential(itr, end, liberty_cell, true);
         } else if (*itr == "pin") {
             logger.infoif(++itr == end, "can't get port in cell %s", liberty_cell->name);
             LibertyPort* cell_port_ = extractLibertyPort(itr, end, liberty_cell);
@@ -796,6 +978,26 @@ void CellLib::read(const std::string& file) {
 }
 
 void CellLib::finish_port_read(LibertyPort* liberty_port) {
+    for (InternalPower* internal_power : liberty_port->internal_powers_) {
+        if (!internal_power->related_port_name_.empty()) {
+            int related_port = liberty_port->cell_->get_port(internal_power->related_port_name_);
+            if (related_port == -1) {
+                logger.warning("internal_power %s.%s has no related pin %s",
+                               liberty_port->cell_->name.c_str(),
+                               liberty_port->name.c_str(),
+                               internal_power->related_port_name_.c_str());
+            } else {
+                internal_power->related_port_ = liberty_port->cell_->ports_[related_port];
+            }
+        }
+        if (!internal_power->related_pg_pin_name_.empty()) {
+            int related_pg_pin = liberty_port->cell_->get_port(internal_power->related_pg_pin_name_);
+            if (related_pg_pin != -1) {
+                internal_power->related_pg_pin_ = liberty_port->cell_->ports_[related_pg_pin];
+            }
+        }
+    }
+
     for (TimingArc* timing_arc : liberty_port->timing_arcs_) {
         if (timing_arc->related_port_name_.empty()) {
             logger.warning("timing arc %s.%s.%s has no related pin",
@@ -845,6 +1047,15 @@ void CellLib::finish_read() {
         
         for (int i = 0; i < liberty_cell->ports_.size(); i++) {
             liberty_cell->ports_map_[liberty_cell->ports_[i]->name] = i;
+        }
+
+        for (auto leakage_power : liberty_cell->leakage_power_groups_) {
+            if (!leakage_power->related_pg_pin_name_.empty()) {
+                int related_pg_pin = liberty_cell->get_port(leakage_power->related_pg_pin_name_);
+                if (related_pg_pin != -1) {
+                    leakage_power->related_pg_pin_ = liberty_cell->ports_[related_pg_pin];
+                }
+            }
         }
 
         for (auto port : liberty_cell->ports_) {

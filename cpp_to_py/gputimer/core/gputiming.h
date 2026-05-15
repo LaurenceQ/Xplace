@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <vector>
 #include "common/lib/Liberty.h"
 #include "common/lib/Lut.h"
@@ -382,5 +383,198 @@ public:
 
     __host__ ~GPULutAllocator() { freeMem(); }
 };
+
+
+class GPUPowerLutAllocator {
+public:
+    int num_luts_in_internal_power = 2;
+    int num_internal_powers = 0;
+    int num_luts = 0;
+    int x_size = 0, y_size = 0, table_size = 0;
+    int *num_x = nullptr, *num_y = nullptr, *num_table = nullptr;
+    float *x_array = nullptr, *y_array = nullptr, *table_array = nullptr;
+    size_t *x_offset = nullptr, *y_offset = nullptr, *table_offset = nullptr;
+    bool *allocated = nullptr;
+    int *lut_template_var = nullptr;
+    int *d_num_x = nullptr, *d_num_y = nullptr, *d_num_table = nullptr;
+    float *d_x_array = nullptr, *d_y_array = nullptr, *d_table_array = nullptr;
+    size_t *d_x_offset = nullptr, *d_y_offset = nullptr, *d_table_offset = nullptr;
+    bool *d_allocated = nullptr;
+    int *d_lut_template_var = nullptr;
+
+public:
+    GPUPowerLutAllocator() = default;
+
+    __host__ __forceinline__ void AllocateBatch(const vector<InternalPower*>& internal_powers) {
+        auto check_lut = [&](Lut* lut) {
+            if (!lut) return;
+            if (lut->set_) {
+                x_size += lut->indices1.size();
+                y_size += lut->indices2.size();
+                table_size += lut->table.size();
+            }
+        };
+        num_internal_powers = internal_powers.size();
+        for (auto* ip : internal_powers) {
+            if (!ip) continue;
+            check_lut(ip->power_[0]);
+            check_lut(ip->power_[1]);
+        }
+        num_luts = num_luts_in_internal_power * num_internal_powers;
+        x_array = new float[std::max(1, x_size)];
+        y_array = new float[std::max(1, y_size)];
+        table_array = new float[std::max(1, table_size)];
+        num_x = new int[std::max(1, num_luts)];
+        num_y = new int[std::max(1, num_luts)];
+        num_table = new int[std::max(1, num_luts)];
+        x_offset = new size_t[std::max(1, num_luts + 1)];
+        y_offset = new size_t[std::max(1, num_luts + 1)];
+        table_offset = new size_t[std::max(1, num_luts + 1)];
+        allocated = new bool[std::max(1, num_luts)];
+        lut_template_var = new int[std::max(1, num_luts * 2)];
+        x_offset[0] = y_offset[0] = table_offset[0] = 0;
+        int lut_idx = 0;
+        auto insert_lut = [&](Lut* lut) {
+            if (lut && lut->set_) {
+                num_x[lut_idx] = lut->indices1.size();
+                num_y[lut_idx] = lut->indices2.size();
+                num_table[lut_idx] = lut->table.size();
+                x_offset[lut_idx + 1] = x_offset[lut_idx] + num_x[lut_idx];
+                y_offset[lut_idx + 1] = y_offset[lut_idx] + num_y[lut_idx];
+                table_offset[lut_idx + 1] = table_offset[lut_idx] + num_table[lut_idx];
+                memcpy(x_array + x_offset[lut_idx], lut->indices1.data(), lut->indices1.size() * sizeof(float));
+                memcpy(y_array + y_offset[lut_idx], lut->indices2.data(), lut->indices2.size() * sizeof(float));
+                memcpy(table_array + table_offset[lut_idx], lut->table.data(), lut->table.size() * sizeof(float));
+                if (lut->lut_template) {
+                    lut_template_var[lut_idx * 2] = lut->lut_template->variable1 ? static_cast<int>(lut->lut_template->variable1.value()) : -1;
+                    lut_template_var[lut_idx * 2 + 1] = lut->lut_template->variable2 ? static_cast<int>(lut->lut_template->variable2.value()) : -1;
+                } else {
+                    lut_template_var[lut_idx * 2] = -1;
+                    lut_template_var[lut_idx * 2 + 1] = -1;
+                }
+                allocated[lut_idx] = true;
+            } else {
+                num_x[lut_idx] = num_y[lut_idx] = num_table[lut_idx] = 0;
+                x_offset[lut_idx + 1] = x_offset[lut_idx];
+                y_offset[lut_idx + 1] = y_offset[lut_idx];
+                table_offset[lut_idx + 1] = table_offset[lut_idx];
+                lut_template_var[lut_idx * 2] = -1;
+                lut_template_var[lut_idx * 2 + 1] = -1;
+                allocated[lut_idx] = false;
+            }
+            lut_idx++;
+        };
+        for (auto* ip : internal_powers) {
+            insert_lut(ip ? ip->power_[0] : nullptr);
+            insert_lut(ip ? ip->power_[1] : nullptr);
+        }
+    }
+
+    __host__ __forceinline__ void CopyToGPU() {
+        cudaMalloc(&d_x_array, std::max(1, x_size) * sizeof(float));
+        cudaMalloc(&d_y_array, std::max(1, y_size) * sizeof(float));
+        cudaMalloc(&d_table_array, std::max(1, table_size) * sizeof(float));
+        cudaMalloc(&d_num_x, std::max(1, num_luts) * sizeof(int));
+        cudaMalloc(&d_num_y, std::max(1, num_luts) * sizeof(int));
+        cudaMalloc(&d_num_table, std::max(1, num_luts) * sizeof(int));
+        cudaMalloc(&d_x_offset, std::max(1, num_luts + 1) * sizeof(size_t));
+        cudaMalloc(&d_y_offset, std::max(1, num_luts + 1) * sizeof(size_t));
+        cudaMalloc(&d_table_offset, std::max(1, num_luts + 1) * sizeof(size_t));
+        cudaMalloc(&d_allocated, std::max(1, num_luts) * sizeof(bool));
+        cudaMalloc(&d_lut_template_var, std::max(1, num_luts * 2) * sizeof(int));
+        if (x_size) cudaMemcpy(d_x_array, x_array, x_size * sizeof(float), cudaMemcpyHostToDevice);
+        if (y_size) cudaMemcpy(d_y_array, y_array, y_size * sizeof(float), cudaMemcpyHostToDevice);
+        if (table_size) cudaMemcpy(d_table_array, table_array, table_size * sizeof(float), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_num_x, num_x, std::max(1, num_luts) * sizeof(int), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_num_y, num_y, std::max(1, num_luts) * sizeof(int), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_num_table, num_table, std::max(1, num_luts) * sizeof(int), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_x_offset, x_offset, std::max(1, num_luts + 1) * sizeof(size_t), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_y_offset, y_offset, std::max(1, num_luts + 1) * sizeof(size_t), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_table_offset, table_offset, std::max(1, num_luts + 1) * sizeof(size_t), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_allocated, allocated, std::max(1, num_luts) * sizeof(bool), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_lut_template_var, lut_template_var, std::max(1, num_luts * 2) * sizeof(int), cudaMemcpyHostToDevice);
+    }
+
+    __host__ __forceinline__ void CopyToGPU(GPUPowerLutAllocator* d_gpu_luts) {
+        cudaMemcpy(&(d_gpu_luts->d_num_x), &d_num_x, sizeof(int*), cudaMemcpyHostToDevice);
+        cudaMemcpy(&(d_gpu_luts->d_num_y), &d_num_y, sizeof(int*), cudaMemcpyHostToDevice);
+        cudaMemcpy(&(d_gpu_luts->d_num_table), &d_num_table, sizeof(int*), cudaMemcpyHostToDevice);
+        cudaMemcpy(&(d_gpu_luts->d_x_array), &d_x_array, sizeof(float*), cudaMemcpyHostToDevice);
+        cudaMemcpy(&(d_gpu_luts->d_y_array), &d_y_array, sizeof(float*), cudaMemcpyHostToDevice);
+        cudaMemcpy(&(d_gpu_luts->d_table_array), &d_table_array, sizeof(float*), cudaMemcpyHostToDevice);
+        cudaMemcpy(&(d_gpu_luts->d_x_offset), &d_x_offset, sizeof(size_t*), cudaMemcpyHostToDevice);
+        cudaMemcpy(&(d_gpu_luts->d_y_offset), &d_y_offset, sizeof(size_t*), cudaMemcpyHostToDevice);
+        cudaMemcpy(&(d_gpu_luts->d_table_offset), &d_table_offset, sizeof(size_t*), cudaMemcpyHostToDevice);
+        cudaMemcpy(&(d_gpu_luts->d_allocated), &d_allocated, sizeof(bool*), cudaMemcpyHostToDevice);
+        cudaMemcpy(&(d_gpu_luts->d_lut_template_var), &d_lut_template_var, sizeof(int*), cudaMemcpyHostToDevice);
+    }
+
+    __device__ __forceinline__ float lut(int lut_id, float x, float y) {
+        if (lut_id < 0 || lut_id >= num_luts || !d_allocated[lut_id]) return nanf("");
+        if (d_num_x[lut_id] < 1 || d_num_y[lut_id] < 1) return nanf("");
+        if (d_num_table[lut_id] == 1) return d_table_array[d_table_offset[lut_id]];
+        int x_idx[2], y_idx[2];
+        x_idx[1] = lower_bound<float>(d_x_array + d_x_offset[lut_id], d_num_x[lut_id], x);
+        y_idx[1] = lower_bound<float>(d_y_array + d_y_offset[lut_id], d_num_y[lut_id], y);
+        x_idx[1] = max(1, min(d_num_x[lut_id] - 1, x_idx[1]));
+        y_idx[1] = max(1, min(d_num_y[lut_id] - 1, y_idx[1]));
+        x_idx[0] = x_idx[1] - 1;
+        y_idx[0] = y_idx[1] - 1;
+        if (d_num_x[lut_id] == 1) x_idx[1] = 0;
+        if (d_num_y[lut_id] == 1) y_idx[1] = 0;
+        float numeric[2];
+        numeric[0] = interpolate<float>(d_x_array[d_x_offset[lut_id] + x_idx[0]], d_x_array[d_x_offset[lut_id] + x_idx[1]],
+                                        d_table_array[d_table_offset[lut_id] + x_idx[0] * d_num_y[lut_id] + y_idx[0]],
+                                        d_table_array[d_table_offset[lut_id] + x_idx[1] * d_num_y[lut_id] + y_idx[0]], x);
+        numeric[1] = interpolate<float>(d_x_array[d_x_offset[lut_id] + x_idx[0]], d_x_array[d_x_offset[lut_id] + x_idx[1]],
+                                        d_table_array[d_table_offset[lut_id] + x_idx[0] * d_num_y[lut_id] + y_idx[1]],
+                                        d_table_array[d_table_offset[lut_id] + x_idx[1] * d_num_y[lut_id] + y_idx[1]], x);
+        return interpolate<float>(d_y_array[d_y_offset[lut_id] + y_idx[0]], d_y_array[d_y_offset[lut_id] + y_idx[1]], numeric[0], numeric[1], y);
+    }
+
+    __device__ __forceinline__ float query_internal_power(int internal_power_id, int rf, float input_slew, float output_load) {
+        if (internal_power_id < 0 || internal_power_id >= num_internal_powers || rf < 0 || rf > 1) return nanf("");
+        int lut_id = num_luts_in_internal_power * internal_power_id + rf;
+        if (!d_allocated[lut_id]) return nanf("");
+        float val1 = input_slew;
+        float val2 = output_load;
+        switch (d_lut_template_var[lut_id * 2]) {
+            case 0:  // TOTAL_OUTPUT_NET_CAPACITANCE
+                val1 = output_load;
+                val2 = input_slew;
+                break;
+            case 1:  // INPUT_NET_TRANSITION
+            case 4:  // INPUT_TRANSITION_TIME
+                val1 = input_slew;
+                val2 = output_load;
+                break;
+            default:
+                break;
+        }
+        return lut(lut_id, val1, val2);
+    }
+
+    __host__ __forceinline__ void freeMem() {
+        delete[] num_x; delete[] num_y; delete[] num_table;
+        delete[] x_array; delete[] y_array; delete[] table_array;
+        delete[] x_offset; delete[] y_offset; delete[] table_offset;
+        delete[] allocated; delete[] lut_template_var;
+        if (d_num_x) cudaFree(d_num_x); if (d_num_y) cudaFree(d_num_y); if (d_num_table) cudaFree(d_num_table);
+        if (d_x_array) cudaFree(d_x_array); if (d_y_array) cudaFree(d_y_array); if (d_table_array) cudaFree(d_table_array);
+        if (d_x_offset) cudaFree(d_x_offset); if (d_y_offset) cudaFree(d_y_offset); if (d_table_offset) cudaFree(d_table_offset);
+        if (d_allocated) cudaFree(d_allocated); if (d_lut_template_var) cudaFree(d_lut_template_var);
+        num_x = num_y = num_table = nullptr;
+        x_array = y_array = table_array = nullptr;
+        x_offset = y_offset = table_offset = nullptr;
+        allocated = nullptr; lut_template_var = nullptr;
+        d_num_x = d_num_y = d_num_table = nullptr;
+        d_x_array = d_y_array = d_table_array = nullptr;
+        d_x_offset = d_y_offset = d_table_offset = nullptr;
+        d_allocated = nullptr; d_lut_template_var = nullptr;
+    }
+
+    __host__ ~GPUPowerLutAllocator() { freeMem(); }
+};
+
 
 }  // namespace gt
