@@ -1550,6 +1550,8 @@ void run_power_activity_cuda_launcher(int n,
                                       float clock_density,
                                       float time_unit,
                                       int max_activity_passes,
+                                      int* d_trace_pins,
+                                      int num_trace_pins,
                                       float* d_out,
                                       int num_nodes,
                                       const int* d_pin2node_map,
@@ -1600,6 +1602,47 @@ void run_power_activity_cuda_launcher(int n,
     cudaMemcpyToSymbol(g_power_allow_clock_activity_override,
                        &allow_clock_activity_override,
                        sizeof(bool));
+    std::vector<int> h_trace_pins(std::max(0, num_trace_pins));
+    if (num_trace_pins > 0 && d_trace_pins) {
+        cudaMemcpy(h_trace_pins.data(), d_trace_pins, sizeof(int) * num_trace_pins, cudaMemcpyDeviceToHost);
+    }
+    std::vector<uint8_t> h_trace_first_seen(std::max(1, num_trace_pins), 0);
+    auto trace_cuda = [&](const char* tag, int pass, int pending_count) {
+        for (int idx = 0; idx < num_trace_pins; ++idx) {
+            const int pin = h_trace_pins[idx];
+            if (pin < 0 || pin >= n) continue;
+            float pin_density = 0.0f;
+            float pin_duty = 0.0f;
+            int pin_origin = 0;
+            cudaMemcpy(&pin_density, d_density + pin, sizeof(float), cudaMemcpyDeviceToHost);
+            cudaMemcpy(&pin_duty, d_duty + pin, sizeof(float), cudaMemcpyDeviceToHost);
+            cudaMemcpy(&pin_origin, d_origin + pin, sizeof(int), cudaMemcpyDeviceToHost);
+            int seq_count = 0;
+            int seq_pending = 0;
+            if (d_pin_seq_list_start && d_pin_seq_list && d_pending_seq) {
+                int start = 0;
+                int end = 0;
+                cudaMemcpy(&start, d_pin_seq_list_start + pin, sizeof(int), cudaMemcpyDeviceToHost);
+                cudaMemcpy(&end, d_pin_seq_list_start + pin + 1, sizeof(int), cudaMemcpyDeviceToHost);
+                seq_count = std::max(0, end - start);
+                for (int pos = start; pos < end; ++pos) {
+                    int seq_id = -1;
+                    int pending = 0;
+                    cudaMemcpy(&seq_id, d_pin_seq_list + pos, sizeof(int), cudaMemcpyDeviceToHost);
+                    if (seq_id >= 0 && seq_id < num_seqs) {
+                        cudaMemcpy(&pending, d_pending_seq + seq_id, sizeof(int), cudaMemcpyDeviceToHost);
+                        if (pending) seq_pending++;
+                    }
+                }
+            }
+            const bool first_nonzero = pin_density > 0.0f && !h_trace_first_seen[idx];
+            if (first_nonzero) h_trace_first_seen[idx] = 1;
+            fprintf(stderr,
+                    "[power_activity_trace_cuda] tag=%s pass=%d pending=%d pin_id=%d density=%.10e duty=%.10g origin=%d first_nonzero=%d seq_count=%d seq_pending=%d\n",
+                    tag, pass, pending_count, pin, pin_density, pin_duty, pin_origin,
+                    first_nonzero ? 1 : 0, seq_count, seq_pending);
+        }
+    };
 
     bool use_frontier = false;
     if (const char* env_frontier = std::getenv("XPLACE_POWER_ACTIVITY_FRONTIER"))
@@ -1667,6 +1710,9 @@ void run_power_activity_cuda_launcher(int n,
                 d_level_queue, d_level_counts, d_queued, d_overflow);
         }
         cudaDeviceSynchronize();
+        if (num_trace_pins > 0) {
+            fprintf(stderr, "[power_activity_trace_cuda] frontier_trace=unsupported\n");
+        }
 
         int blocks_per_sm = 1;
         cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks_per_sm, power_activity_level_queue_persistent_kernel, BLOCK_SIZE, 0);
@@ -1753,6 +1799,9 @@ void run_power_activity_cuda_launcher(int n,
                 d_pin_power_level, d_active_level, num_power_levels, d_active);
         }
         cudaDeviceSynchronize();
+        int pending_count = 0;
+        cudaMemcpy(&pending_count, d_pending_seq_count, sizeof(int), cudaMemcpyDeviceToHost);
+        trace_cuda("after_seed", 0, pending_count);
 
         std::vector<uint8_t> active_levels(std::max(1, num_power_levels));
         auto run_bfs = [&]() {
@@ -1799,11 +1848,12 @@ void run_power_activity_cuda_launcher(int n,
         };
 
         drain_bfs();
-        int pending_count = 0;
         cudaMemcpy(&pending_count, d_pending_seq_count, sizeof(int), cudaMemcpyDeviceToHost);
+        trace_cuda("after_comb", 0, pending_count);
         int seq_passes = 0;
         for (int pass = 1; pending_count > 0 && pass < max_activity_passes; pass++) {
             seq_passes = pass;
+            const int pending_before_seed = pending_count;
             if (num_seqs > 0) {
                 power_seed_seq_kernel<<<BLOCK_NUMBER(num_seqs), BLOCK_SIZE>>>(
                     d_seqs, num_seqs, d_expr_ops, d_expr_start, d_expr_count, clock_density,
@@ -1813,8 +1863,10 @@ void run_power_activity_cuda_launcher(int n,
                     d_pin_power_level, d_active_level, num_power_levels, d_active);
                 cudaDeviceSynchronize();
             }
+            trace_cuda("after_seq_seed", pass, pending_before_seed);
             const int comb_sweeps = drain_bfs();
             cudaMemcpy(&pending_count, d_pending_seq_count, sizeof(int), cudaMemcpyDeviceToHost);
+            trace_cuda("after_pass", pass, pending_count);
             if (print_pass_stats && std::getenv("XPLACE_POWER_PRINT_PASS_STATS_VERBOSE")) {
                 fprintf(stderr,
                         "[power_activity_pass] pass=%d pending=%d comb_sweeps=%d\n",

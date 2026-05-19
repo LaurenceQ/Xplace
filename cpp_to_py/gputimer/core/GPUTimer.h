@@ -236,6 +236,7 @@ public:
     index_type *power_level_list_end = nullptr, *power_level_list = nullptr;
     vector<int> power_level_list_end_cpu;
     vector<int> power_pin_level_cpu;
+    vector<int> power_level_root_pins_cpu;
     int* net_is_clock;
     int* pin_is_clk;  // GPU array: 1 if register clock pin, 0 otherwise
 

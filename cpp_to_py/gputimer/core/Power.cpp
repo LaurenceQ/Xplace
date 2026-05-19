@@ -17,9 +17,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
+#include <fstream>
 #include <limits>
+#include <queue>
+#include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace gt {
@@ -67,6 +71,8 @@ void run_power_activity_cuda_launcher(int n,
                                       float clock_density,
                                       float time_unit,
                                       int max_activity_passes,
+                                      int* d_trace_pins,
+                                      int num_trace_pins,
                                       float* d_out,
                                       int num_nodes,
                                       const int* d_pin2node_map,
@@ -93,6 +99,85 @@ void run_power_activity_cuda_launcher(int n,
                                       float* d_inst_leakage,
                                       float* d_leakage_row_power);
 
+static std::string normalizeTracePinName(std::string name) {
+    name.erase(0, name.find_first_not_of(" \t\r\n"));
+    size_t end = name.find_last_not_of(" \t\r\n");
+    if (end == std::string::npos) return "";
+    name.erase(end + 1);
+    name.erase(std::remove(name.begin(), name.end(), '\\'), name.end());
+    return name;
+}
+
+static std::vector<std::string> readPowerTracePinQueries() {
+    std::vector<std::string> queries;
+    auto add = [&](const std::string& raw) {
+        std::string name = normalizeTracePinName(raw);
+        if (!name.empty()) queries.push_back(name);
+    };
+    if (const char* file_name = std::getenv("XPLACE_POWER_ACTIVITY_TRACE_PIN_LIST_FILE")) {
+        std::ifstream stream(file_name);
+        std::string line;
+        while (std::getline(stream, line)) add(line);
+    }
+    if (const char* trace_name = std::getenv("XPLACE_POWER_ACTIVITY_TRACE_PIN")) add(trace_name);
+    if (const char* trace_list = std::getenv("XPLACE_POWER_ACTIVITY_TRACE_PINS")) {
+        std::stringstream stream(trace_list);
+        std::string item;
+        while (std::getline(stream, item, ',')) add(item);
+    }
+    std::vector<std::string> unique;
+    for (const std::string& query : queries) {
+        if (std::find(unique.begin(), unique.end(), query) == unique.end()) unique.push_back(query);
+    }
+    return unique;
+}
+
+static std::vector<std::string> readPowerRootProbePinQueries() {
+    std::vector<std::string> queries;
+    auto add = [&](const std::string& raw) {
+        std::string name = normalizeTracePinName(raw);
+        if (!name.empty()) queries.push_back(name);
+    };
+    auto read_file = [&](const char* file_name) {
+        if (!file_name || file_name[0] == '\0') return;
+        std::ifstream stream(file_name);
+        std::string line;
+        while (std::getline(stream, line)) add(line);
+    };
+    read_file(std::getenv("XPLACE_POWER_ROOT_PROBE_PINS_FILE"));
+    read_file(std::getenv("XPLACE_POWER_PROBE_PIN_LIST_FILE"));
+    read_file(std::getenv("XPLACE_POWER_ACTIVITY_TRACE_PIN_LIST_FILE"));
+    if (const char* trace_name = std::getenv("XPLACE_POWER_ROOT_PROBE_PIN")) add(trace_name);
+    if (const char* trace_list = std::getenv("XPLACE_POWER_ROOT_PROBE_PINS")) {
+        std::stringstream stream(trace_list);
+        std::string item;
+        while (std::getline(stream, item, ',')) add(item);
+    }
+    std::vector<std::string> unique;
+    for (const std::string& query : queries) {
+        if (std::find(unique.begin(), unique.end(), query) == unique.end()) unique.push_back(query);
+    }
+    return unique;
+}
+
+static std::vector<int> resolvePowerTracePins(const std::vector<std::string>& queries,
+                                              const std::vector<std::string>& pin_names) {
+    std::vector<int> pins;
+    for (const std::string& query : queries) {
+        int matched = -1;
+        for (int i = 0; i < static_cast<int>(pin_names.size()); ++i) {
+            std::string slash_name = pin_names[i];
+            std::replace(slash_name.begin(), slash_name.end(), ':', '/');
+            if (pin_names[i] == query || slash_name == query) {
+                matched = i;
+                break;
+            }
+        }
+        if (matched >= 0) pins.push_back(matched);
+    }
+    return pins;
+}
+
 namespace {
 
 struct CpuActivity {
@@ -100,6 +185,189 @@ struct CpuActivity {
     float duty = 0.0f;
     int origin = 0;  // 0 unknown, 1 input, 2 clock, 3 propagated, 4 constant.
 };
+
+struct PowerTraceEdge {
+    int arc_id = -1;
+    int from_pin = -1;
+    int to_pin = -1;
+    std::string reason;
+};
+
+struct PowerTracePathState {
+    std::unordered_set<int> pins;
+    std::unordered_set<int> arcs;
+    std::unordered_set<int> nodes;
+    std::ofstream out;
+
+    bool enabled() const { return out.good(); }
+};
+
+static bool parsePowerBool(const std::string& value) {
+    std::string text = value;
+    std::transform(text.begin(), text.end(), text.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return text == "1" || text == "true" || text == "yes" || text == "y";
+}
+
+static std::string normalizePowerPathName(std::string name) {
+    name.erase(0, name.find_first_not_of(" \t\r\n\""));
+    size_t end = name.find_last_not_of(" \t\r\n\"");
+    if (end == std::string::npos) return "";
+    name.erase(end + 1);
+    name.erase(std::remove(name.begin(), name.end(), '\\'), name.end());
+    std::replace(name.begin(), name.end(), ':', '/');
+    return name;
+}
+
+static bool powerPathNameMatches(const std::string& pin_name, const std::string& query) {
+    const std::string name = normalizePowerPathName(pin_name);
+    const std::string needle = normalizePowerPathName(query);
+    if (name.empty() || needle.empty()) return false;
+    if (name == needle) return true;
+    if (name.size() > needle.size() && name.compare(name.size() - needle.size(), needle.size(), needle) == 0) {
+        const size_t prefix = name.size() - needle.size();
+        return prefix == 0 || name[prefix - 1] == '/';
+    }
+    return false;
+}
+
+static std::vector<std::string> readPowerPathTargetQueries() {
+    std::vector<std::string> queries;
+    auto add = [&](const std::string& raw) {
+        std::string name = normalizePowerPathName(raw);
+        if (!name.empty() && std::find(queries.begin(), queries.end(), name) == queries.end())
+            queries.push_back(name);
+    };
+    if (const char* file_name = std::getenv("XPLACE_POWER_TRACE_PATH_TARGETS_FILE")) {
+        std::ifstream stream(file_name);
+        std::string line;
+        while (std::getline(stream, line)) add(line);
+    }
+    if (const char* list = std::getenv("XPLACE_POWER_TRACE_PATH_TARGETS")) {
+        std::stringstream stream(list);
+        std::string item;
+        while (std::getline(stream, item, ',')) add(item);
+    }
+    if (queries.empty() && (std::getenv("XPLACE_POWER_TRACE_PATH_OUT")
+                            || std::getenv("XPLACE_POWER_ACTIVITY_PATH_TRACE_FILE"))) {
+        add("FE_OCPC470995_soc_qvalid/A");
+        add("FE_OCPC470995_soc_qvalid/Z");
+        add("FE_RC_95112_0/ZN");
+    }
+    return queries;
+}
+
+static std::unordered_set<std::string> readOpenroadSeedRootNames(const char* file_name) {
+    std::unordered_set<std::string> roots;
+    if (!file_name || file_name[0] == '\0') return roots;
+    std::ifstream stream(file_name);
+    if (!stream) return roots;
+    std::string header;
+    if (!std::getline(stream, header)) return roots;
+    std::vector<std::string> cols;
+    std::stringstream header_stream(header);
+    std::string col;
+    while (std::getline(header_stream, col, '\t')) cols.push_back(col);
+    auto col_index = [&](const char* name) {
+        for (int i = 0; i < static_cast<int>(cols.size()); ++i) {
+            if (cols[i] == name) return i;
+        }
+        return -1;
+    };
+    const int pin_col = col_index("pin_name");
+    const int seeded_col = col_index("was_seeded");
+    const int found_col = col_index("found");
+    if (pin_col < 0 || seeded_col < 0) return roots;
+    std::string line;
+    while (std::getline(stream, line)) {
+        std::vector<std::string> fields;
+        std::stringstream row_stream(line);
+        std::string field;
+        while (std::getline(row_stream, field, '\t')) fields.push_back(field);
+        if (pin_col >= static_cast<int>(fields.size()) || seeded_col >= static_cast<int>(fields.size()))
+            continue;
+        if (found_col >= 0 && found_col < static_cast<int>(fields.size())
+            && !parsePowerBool(fields[found_col]))
+            continue;
+        if (!parsePowerBool(fields[seeded_col])) continue;
+        const std::string name = normalizePowerPathName(fields[pin_col]);
+        if (!name.empty()) roots.insert(name);
+    }
+    return roots;
+}
+
+static std::vector<int> resolvePowerPathTargetPins(const std::vector<std::string>& queries,
+                                                   const std::vector<std::string>& pin_names) {
+    std::vector<int> pins;
+    for (const std::string& query : queries) {
+        int matched = -1;
+        for (int i = 0; i < static_cast<int>(pin_names.size()); ++i) {
+            if (powerPathNameMatches(pin_names[i], query)) {
+                matched = i;
+                break;
+            }
+        }
+        if (matched >= 0 && std::find(pins.begin(), pins.end(), matched) == pins.end())
+            pins.push_back(matched);
+    }
+    return pins;
+}
+
+static PowerTracePathState loadPowerTracePathState(const char* trace_path_file,
+                                                   const char* out_file,
+                                                   const std::vector<int>& pin_to_node) {
+    PowerTracePathState state;
+    if (!out_file || out_file[0] == '\0') return state;
+    if (trace_path_file && trace_path_file[0] != '\0') {
+        std::ifstream stream(trace_path_file);
+        std::string header;
+        if (stream && std::getline(stream, header)) {
+            std::vector<std::string> cols;
+            std::stringstream hs(header);
+            std::string col;
+            while (std::getline(hs, col, '\t')) cols.push_back(col);
+            auto col_index = [&](const char* name) {
+                for (int i = 0; i < static_cast<int>(cols.size()); ++i) {
+                    if (cols[i] == name) return i;
+                }
+                return -1;
+            };
+            const int arc_col = col_index("arc_id");
+            const int from_col = col_index("from_pin_id");
+            const int to_col = col_index("to_pin_id");
+            std::string line;
+            while (std::getline(stream, line)) {
+                std::vector<std::string> fields;
+                std::stringstream rs(line);
+                std::string field;
+                while (std::getline(rs, field, '\t')) fields.push_back(field);
+                auto read_int = [&](int idx) -> int {
+                    if (idx < 0 || idx >= static_cast<int>(fields.size())) return -1;
+                    char* end = nullptr;
+                    long value = std::strtol(fields[idx].c_str(), &end, 10);
+                    return end != fields[idx].c_str() ? static_cast<int>(value) : -1;
+                };
+                const int arc_id = read_int(arc_col);
+                const int from_pin = read_int(from_col);
+                const int to_pin = read_int(to_col);
+                if (arc_id != -1) state.arcs.insert(arc_id);
+                if (from_pin >= 0) state.pins.insert(from_pin);
+                if (to_pin >= 0) state.pins.insert(to_pin);
+            }
+        }
+    }
+    for (int pin_id : state.pins) {
+        if (pin_id >= 0 && pin_id < static_cast<int>(pin_to_node.size()) && pin_to_node[pin_id] >= 0)
+            state.nodes.insert(pin_to_node[pin_id]);
+    }
+    state.out.open(out_file);
+    if (state.out) {
+        state.out << "engine\tpass\tlevel_tag\tevent\tarc_id\tfrom_pin_id\tfrom_pin"
+                  << "\tto_pin_id\tto_pin\tdensity_old\tduty_old\tdensity_new"
+                  << "\tduty_new\tchanged\tenqueued\tpending_seq\treason\n";
+    }
+    return state;
+}
 
 static bool evalPowerExprWithPortValues(const PowerExpr& expr,
                                         const std::vector<int8_t>& port_values,
@@ -250,6 +518,13 @@ static bool evalPowerExprActivity(const PowerExpr& expr,
     return std::isfinite(density) && std::isfinite(duty);
 }
 
+static const std::string& seqClockExpr(const SequentialPower* seq) {
+    static const std::string empty;
+    if (!seq) return empty;
+    if (seq->is_latch_ && !seq->enable_expr_.empty()) return seq->enable_expr_;
+    return seq->clocked_on_expr_;
+}
+
 }  // namespace
 
 tuple<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t> GPUTimer::report_power_liberty_inventory() {
@@ -344,13 +619,68 @@ torch::Tensor GPUTimer::report_power_activity_cpu() {
         }
     }
 
-    auto enqueue = [&](int pin_id, bool force_propagate = false) {
+    const char* trace_path_file_env = std::getenv("XPLACE_POWER_TRACE_PATH_FILE");
+    const char* trace_path_out_env = std::getenv("XPLACE_POWER_TRACE_PATH_OUT");
+    const char* activity_path_trace_env = std::getenv("XPLACE_POWER_ACTIVITY_PATH_TRACE_FILE");
+    PowerTracePathState path_trace =
+        loadPowerTracePathState(trace_path_file_env, activity_path_trace_env, pin_to_node);
+    int path_trace_pass = 0;
+    std::string path_trace_level_tag = "seed";
+    auto path_trace_hit = [&](int pin_id, int arc_id) -> bool {
+        return path_trace.enabled()
+            && ((pin_id >= 0 && path_trace.pins.count(pin_id))
+                || (arc_id != -1 && path_trace.arcs.count(arc_id)));
+    };
+    auto emit_path_trace = [&](const char* event,
+                               int arc_id,
+                               int from_pin,
+                               int to_pin,
+                               float old_density,
+                               float old_duty,
+                               float new_density,
+                               float new_duty,
+                               bool changed,
+                               bool enqueued,
+                               int pending_seq,
+                               const char* reason) {
+        if (!path_trace.enabled()) return;
+        if (!path_trace_hit(from_pin, arc_id) && !path_trace_hit(to_pin, arc_id)) return;
+        path_trace.out << "xplace_cpu\t" << path_trace_pass << '\t'
+                       << path_trace_level_tag << '\t' << (event ? event : "") << '\t'
+                       << arc_id << '\t'
+                       << from_pin << '\t'
+                       << ((from_pin >= 0 && from_pin < n) ? gtdb.pin_names[from_pin] : "") << '\t'
+                       << to_pin << '\t'
+                       << ((to_pin >= 0 && to_pin < n) ? gtdb.pin_names[to_pin] : "") << '\t'
+                       << old_density << '\t' << old_duty << '\t'
+                       << new_density << '\t' << new_duty << '\t'
+                       << (changed ? 1 : 0) << '\t'
+                       << (enqueued ? 1 : 0) << '\t'
+                       << pending_seq << '\t'
+                       << (reason ? reason : "") << '\n';
+    };
+
+    auto enqueue = [&](int pin_id,
+                       bool force_propagate = false,
+                       int from_pin = -1,
+                       int arc_id = -1,
+                       const char* reason = "enqueue") {
         if (pin_id < 0 || pin_id >= n) return;
         if (force_propagate) force_propagate_on_visit[pin_id] = 1;
-        if (in_queue[pin_id]) return;
+        if (in_queue[pin_id]) {
+            emit_path_trace("enqueue_skip_queued", arc_id, from_pin, pin_id,
+                            act[pin_id].density, act[pin_id].duty,
+                            act[pin_id].density, act[pin_id].duty,
+                            false, false, 0, reason);
+            return;
+        }
         int level = std::clamp(pin_level[pin_id], 0, max_pin_level + 1);
         level_queues[level].push_back(pin_id);
         in_queue[pin_id] = 1;
+        emit_path_trace("enqueue", arc_id, from_pin, pin_id,
+                        act[pin_id].density, act[pin_id].duty,
+                        act[pin_id].density, act[pin_id].duty,
+                        false, true, 0, reason);
     };
 
     auto percent_change = [](float value, float prev) -> float {
@@ -358,13 +688,11 @@ torch::Tensor GPUTimer::report_power_activity_cpu() {
         return std::abs(value - prev) / std::abs(prev);
     };
 
-    std::string trace_pin_name;
-    if (const char* trace_name = std::getenv("XPLACE_POWER_ACTIVITY_TRACE_PIN")) trace_pin_name = trace_name;
+    std::vector<int> trace_pin_ids = resolvePowerTracePins(readPowerTracePinQueries(), gtdb.pin_names);
+    std::vector<uint8_t> trace_first_seen(n, 0);
     auto trace_matches = [&](int pin_id) -> bool {
-        if (trace_pin_name.empty() || pin_id < 0 || pin_id >= n) return false;
-        std::string name = gtdb.pin_names[pin_id];
-        std::replace(name.begin(), name.end(), ':', '/');
-        return gtdb.pin_names[pin_id] == trace_pin_name || name == trace_pin_name;
+        return pin_id >= 0 && pin_id < n &&
+            std::find(trace_pin_ids.begin(), trace_pin_ids.end(), pin_id) != trace_pin_ids.end();
     };
 
     auto set_activity = [&](int pin_id, float density, float duty, int origin, bool force, bool enqueue_on_change = true) -> bool {
@@ -384,7 +712,7 @@ torch::Tensor GPUTimer::report_power_activity_cpu() {
         act[pin_id].duty = duty_clamped;
         act[pin_id].origin = origin;
         if (trace_matches(pin_id)) {
-            std::cerr << "[power_activity_trace_set] pin=" << trace_pin_name
+            std::cerr << "[power_activity_trace_set] pin=" << gtdb.pin_names[pin_id]
                       << " level=" << pin_level[pin_id]
                       << " prev_density=" << prev_density
                       << " prev_duty=" << prev_duty
@@ -395,7 +723,12 @@ torch::Tensor GPUTimer::report_power_activity_cpu() {
                       << " enqueue=" << (changed && enqueue_on_change)
                       << std::endl;
         }
-        if (changed && enqueue_on_change) enqueue(pin_id, true);
+        emit_path_trace("set_activity", -1, -1, pin_id,
+                        prev_density, prev_duty,
+                        density_clamped, duty_clamped,
+                        changed, changed && enqueue_on_change, 0,
+                        force ? "force" : "activity");
+        if (changed && enqueue_on_change) enqueue(pin_id, true, pin_id, -1, "set_activity_revisit");
         return changed;
     };
 
@@ -413,6 +746,20 @@ torch::Tensor GPUTimer::report_power_activity_cpu() {
         if (pending_reg_flag[node_id]) return;
         pending_reg_flag[node_id] = 1;
         pending_regs.push_back(node_id);
+        if (path_trace.enabled() && path_trace.nodes.count(node_id)) {
+            int node_trace_pin = -1;
+            for (int pin_id : path_trace.pins) {
+                if (pin_id >= 0 && pin_id < static_cast<int>(pin_to_node.size())
+                    && pin_to_node[pin_id] == node_id) {
+                    node_trace_pin = pin_id;
+                    break;
+                }
+            }
+            emit_path_trace("seq_pending", -1, node_trace_pin, node_trace_pin,
+                            0.0f, 0.0f, 0.0f, 0.0f,
+                            true, false, static_cast<int>(pending_regs.size()),
+                            "load_pin_changed");
+        }
     };
 
     auto get_cell = [&](int node_id) -> LibertyCell* {
@@ -570,7 +917,7 @@ torch::Tensor GPUTimer::report_power_activity_cpu() {
                 if (to_cell && !to_cell->sequentials_.empty() && to_pin >= 0 && to_pin < n && is_driver_pin[to_pin])
                     continue;
             }
-            enqueue(to_pin);
+            enqueue(to_pin, false, pin_id, arc_id, "adjacent");
         }
     };
 
@@ -643,7 +990,7 @@ torch::Tensor GPUTimer::report_power_activity_cpu() {
             PowerExpr data_expr;
             PowerExpr clk_expr;
             if (!data_expr.compile(seq->next_state_expr_, cell)) continue;
-            if (!clk_expr.compile(seq->clocked_on_expr_, cell)) continue;
+            if (!clk_expr.compile(seqClockExpr(seq), cell)) continue;
 
             float in_density = 0.0f, in_duty = 0.0f;
             float clk_density_eval = 0.0f, clk_duty = 0.5f;
@@ -672,14 +1019,80 @@ torch::Tensor GPUTimer::report_power_activity_cpu() {
                 if (!port || port->direction_ != CellPortDirection::output || !port->has_function_) continue;
                 const std::string func = normalize_expr(port->function_expr_);
                 if (!seq_out.empty() && func == seq_out) {
+                    emit_path_trace("seq_seed", -1, -1, pin_id,
+                                    act[pin_id].density, act[pin_id].duty,
+                                    out_density, out_duty,
+                                    true, true, static_cast<int>(pending_regs.size()),
+                                    "q");
                     set_activity(pin_id, out_density, out_duty, 3, false);
                 } else if (!seq_out_inv.empty() && func == seq_out_inv) {
                     const float inv_duty = 1.0f - out_duty;
+                    emit_path_trace("seq_seed", -1, -1, pin_id,
+                                    act[pin_id].density, act[pin_id].duty,
+                                    out_density, inv_duty,
+                                    true, true, static_cast<int>(pending_regs.size()),
+                                    "qn");
                     set_activity(pin_id, out_density, inv_duty, 3, false);
                 }
             }
         }
     };
+
+    std::vector<std::vector<PowerTraceEdge>> seq_reverse_edges(n);
+    int next_seq_trace_arc = -1000000;
+    auto collect_expr_pins = [&](const PowerExpr& expr,
+                                 const LibertyCell* cell,
+                                 const gp::GPNode& node,
+                                 std::vector<int>& pins) {
+        if (!cell) return;
+        for (const auto& op : expr.ops()) {
+            if (op.opcode != PowerExprOpcode::port || op.port_id < 0
+                || op.port_id >= static_cast<int>(cell->ports_.size()))
+                continue;
+            const std::string& port_name = cell->ports_[op.port_id]->name;
+            auto pin_itr = node.portMap.find(port_name);
+            if (pin_itr == node.portMap.end()) continue;
+            const int pin_id = pin_itr->second;
+            if (pin_id >= 0 && pin_id < n
+                && std::find(pins.begin(), pins.end(), pin_id) == pins.end())
+                pins.push_back(pin_id);
+        }
+    };
+    auto add_seq_reverse_edge = [&](int from_pin, int to_pin, const char* reason) {
+        if (from_pin < 0 || from_pin >= n || to_pin < 0 || to_pin >= n) return;
+        seq_reverse_edges[to_pin].push_back({next_seq_trace_arc--, from_pin, to_pin, reason});
+    };
+    for (const auto& node : gtdb.gpdb.getNodes()) {
+        const int node_id = static_cast<int>(node.getId());
+        LibertyCell* cell = get_cell(node_id);
+        if (!cell || cell->sequentials_.empty()) continue;
+        for (SequentialPower* seq : cell->sequentials_) {
+            if (!seq) continue;
+            PowerExpr data_expr;
+            PowerExpr clk_expr;
+            if (!data_expr.compile(seq->next_state_expr_, cell)) continue;
+            clk_expr.compile(seqClockExpr(seq), cell);
+            std::vector<int> data_pins;
+            std::vector<int> clock_pins_expr;
+            collect_expr_pins(data_expr, cell, node, data_pins);
+            collect_expr_pins(clk_expr, cell, node, clock_pins_expr);
+            const std::string seq_out = normalize_expr(seq->output_name_);
+            const std::string seq_out_inv = normalize_expr(seq->output_inv_name_);
+            for (int pin_id : node.pins()) {
+                if (pin_id < 0 || pin_id >= n) continue;
+                int port_offset = gtdb.pin_id2port_offset_id[pin_id];
+                if (port_offset < 0 || port_offset >= static_cast<int>(cell->ports_.size())) continue;
+                LibertyPort* port = cell->ports_[port_offset];
+                if (!port || port->direction_ != CellPortDirection::output || !port->has_function_) continue;
+                const std::string func = normalize_expr(port->function_expr_);
+                if ((!seq_out.empty() && func == seq_out) ||
+                    (!seq_out_inv.empty() && func == seq_out_inv)) {
+                    for (int pred_pin : data_pins) add_seq_reverse_edge(pred_pin, pin_id, "seq_data");
+                    for (int pred_pin : clock_pins_expr) add_seq_reverse_edge(pred_pin, pin_id, "seq_clock");
+                }
+            }
+        }
+    }
 
     bool level_lifo = true;
     if (const char* order_env = std::getenv("XPLACE_POWER_ACTIVITY_LEVEL_ORDER")) {
@@ -688,8 +1101,10 @@ torch::Tensor GPUTimer::report_power_activity_cpu() {
         if (order == "fifo") level_lifo = false;
     }
 
-    auto run_queue = [&]() {
+    auto run_queue = [&](int pass) {
+        path_trace_pass = pass;
         for (int level = 0; level <= max_pin_level + 1; level++) {
+            path_trace_level_tag = std::string("level:") + std::to_string(level);
             auto& queue = level_queues[level];
             while (!queue.empty()) {
                 int pin_id;
@@ -703,6 +1118,11 @@ torch::Tensor GPUTimer::report_power_activity_cpu() {
                 bool force_visit = force_propagate_on_visit[pin_id] != 0;
                 force_propagate_on_visit[pin_id] = 0;
                 in_queue[pin_id] = 0;
+                emit_path_trace("visit", -1, -1, pin_id,
+                                act[pin_id].density, act[pin_id].duty,
+                                act[pin_id].density, act[pin_id].duty,
+                                force_visit, false, static_cast<int>(pending_regs.size()),
+                                force_visit ? "force_visit" : "queue");
 
                 bool changed = false;
                 if (is_load_pin[pin_id]) {
@@ -711,7 +1131,7 @@ torch::Tensor GPUTimer::report_power_activity_cpu() {
                         ? net_driver_pin[net_id] : -1;
                     if (driver_pin >= 0 && driver_pin < n && driver_pin != pin_id) {
                         if (trace_matches(pin_id)) {
-                            std::cerr << "[power_activity_trace_net_sink] sink=" << trace_pin_name
+                            std::cerr << "[power_activity_trace_net_sink] sink=" << gtdb.pin_names[pin_id]
                                       << " from=" << gtdb.pin_names[driver_pin]
                                       << " driver_level=" << pin_level[driver_pin]
                                       << " sink_level=" << pin_level[pin_id]
@@ -719,6 +1139,11 @@ torch::Tensor GPUTimer::report_power_activity_cpu() {
                                       << " duty=" << act[driver_pin].duty
                                       << std::endl;
                         }
+                        emit_path_trace("net_sink", -1, driver_pin, pin_id,
+                                        act[pin_id].density, act[pin_id].duty,
+                                        act[driver_pin].density, act[driver_pin].duty,
+                                        false, false, static_cast<int>(pending_regs.size()),
+                                        "copy_driver_activity");
                         changed = set_activity(pin_id, act[driver_pin].density, act[driver_pin].duty, 3, false, false);
                     }
                 }
@@ -739,7 +1164,7 @@ torch::Tensor GPUTimer::report_power_activity_cpu() {
                         mark_pending_reg(node_id);
                     if (is_load_pin[pin_id] && pin_id >= 0 && pin_id < n &&
                         clock_gate_out_for_input[pin_id] >= 0) {
-                        enqueue(clock_gate_out_for_input[pin_id]);
+                        enqueue(clock_gate_out_for_input[pin_id], false, pin_id, -1, "clock_gate");
                     }
                     enqueue_adjacent_vertices(pin_id);
                 }
@@ -753,16 +1178,20 @@ torch::Tensor GPUTimer::report_power_activity_cpu() {
         if (pin_id >= 0 && pin_id < n) is_clock_pin[pin_id] = 1;
     }
     std::vector<uint8_t> is_primary_input(n, 0);
+    std::vector<uint8_t> actual_seed_seen(n, 0);
     for (int pin_id : gtdb.primary_inputs) {
         if (pin_id >= 0 && pin_id < n) is_primary_input[pin_id] = 1;
-        if (pin_id >= 0 && pin_id < n && is_driver_pin[pin_id]
-            && set_activity(pin_id, default_density, 0.5f, 1, false, false))
-            enqueue_adjacent_vertices(pin_id);
+        if (pin_id >= 0 && pin_id < n && is_driver_pin[pin_id]) {
+            actual_seed_seen[pin_id] = 1;
+            if (set_activity(pin_id, default_density, 0.5f, 1, false, false))
+                enqueue_adjacent_vertices(pin_id);
+        }
     }
 
     for (int pin_id : gtdb.pin_frontiers) {
         if (pin_id < 0 || pin_id >= n) continue;
         if (is_primary_input[pin_id] || is_clock_pin[pin_id]) continue;
+        actual_seed_seen[pin_id] = 1;
         if (set_activity(pin_id, default_density, 0.5f, 1, false, false))
             enqueue_adjacent_vertices(pin_id);
     }
@@ -779,17 +1208,146 @@ torch::Tensor GPUTimer::report_power_activity_cpu() {
                 break;
             }
         }
-        if (!has_input_pin && set_activity(pin_id, default_density, 0.5f, 1, false, false))
-            enqueue_adjacent_vertices(pin_id);
+        if (!has_input_pin) {
+            actual_seed_seen[pin_id] = 1;
+            if (set_activity(pin_id, default_density, 0.5f, 1, false, false))
+                enqueue_adjacent_vertices(pin_id);
+        }
     }
 
     for (int pin_id : clock_pins) {
+        if (pin_id >= 0 && pin_id < n) actual_seed_seen[pin_id] = 1;
         if (set_activity(pin_id, clock_density, 0.5f, 2, true, false))
             enqueue_adjacent_vertices(pin_id);
     }
 
-    // Initial combinational propagation from roots/clock network.
-    run_queue();
+    auto dump_trace_paths = [&]() {
+        if (!trace_path_out_env || trace_path_out_env[0] == '\0') return;
+        std::vector<int> target_pins =
+            resolvePowerPathTargetPins(readPowerPathTargetQueries(), gtdb.pin_names);
+        std::unordered_set<std::string> or_seed_roots =
+            readOpenroadSeedRootNames(std::getenv("XPLACE_POWER_OPENROAD_ROOTS_FILE"));
+        std::vector<uint8_t> common_seed(n, 0);
+        for (int pin_id = 0; pin_id < n; ++pin_id) {
+            if (!actual_seed_seen[pin_id]) continue;
+            const std::string name = normalizePowerPathName(gtdb.pin_names[pin_id]);
+            if (or_seed_roots.empty() || or_seed_roots.count(name)) common_seed[pin_id] = 1;
+        }
+        auto valid_power_arc = [&](int arc_id, int from_pin, int to_pin) -> bool {
+            if (arc_id < 0 || arc_id >= static_cast<int>(gtdb.timing_arc_to_pin_id.size())) return false;
+            if (arc_id < static_cast<int>(gtdb.arc_id2test_id.size()) && gtdb.arc_id2test_id[arc_id] != -1)
+                return false;
+            if (to_pin < 0 || to_pin >= n || from_pin < 0 || from_pin >= n) return false;
+            if (std::getenv("XPLACE_POWER_ACTIVITY_SKIP_BACK_LEVEL_ARCS")
+                && arc_id < static_cast<int>(gtdb.arc_types.size()) && gtdb.arc_types[arc_id] == 1
+                && pin_level[to_pin] <= pin_level[from_pin])
+                return false;
+            if (arc_id < static_cast<int>(gtdb.arc_types.size()) && gtdb.arc_types[arc_id] == 1) {
+                int to_node = pin_to_node[to_pin];
+                LibertyCell* to_cell = get_cell(to_node);
+                if (to_cell && !to_cell->sequentials_.empty() && is_driver_pin[to_pin])
+                    return false;
+            }
+            return true;
+        };
+
+        std::ofstream tsv(trace_path_out_env);
+        if (!tsv) return;
+        tsv << "path_id\tstep\ttarget_pin_id\ttarget_pin\tseed_pin_id\tseed_pin"
+            << "\tarc_id\tfrom_pin_id\tfrom_pin\tto_pin_id\tto_pin"
+            << "\tedge_kind\tfrom_level\tto_level\n";
+        std::string json_path;
+        if (const char* json_env = std::getenv("XPLACE_POWER_TRACE_PATH_JSON")) {
+            json_path = json_env;
+        } else {
+            json_path = trace_path_out_env;
+            const size_t dot = json_path.find_last_of('.');
+            if (dot == std::string::npos) json_path += ".json";
+            else json_path.replace(dot, std::string::npos, ".json");
+        }
+        std::ofstream json(json_path);
+        if (json) json << "{\n  \"paths\": [\n";
+        bool first_json_path = true;
+        int path_id = 0;
+        for (int target_pin : target_pins) {
+            if (target_pin < 0 || target_pin >= n) continue;
+            std::vector<int> pred_pin(n, -2);
+            std::vector<int> pred_arc(n, -1);
+            std::vector<std::string> pred_reason(n);
+            std::queue<int> queue;
+            pred_pin[target_pin] = -1;
+            queue.push(target_pin);
+            int seed_pin = -1;
+            while (!queue.empty()) {
+                const int pin_id = queue.front();
+                queue.pop();
+                if (common_seed[pin_id]) {
+                    seed_pin = pin_id;
+                    break;
+                }
+                if (pin_id >= 0 && pin_id + 1 < static_cast<int>(gtdb.pin_backward_arc_list_end.size())) {
+                    const int start = gtdb.pin_backward_arc_list_end[pin_id];
+                    const int end = gtdb.pin_backward_arc_list_end[pin_id + 1];
+                    for (int idx = start; idx < end; ++idx) {
+                        const int arc_id = gtdb.pin_backward_arc_list[idx];
+                        if (arc_id < 0 || arc_id >= static_cast<int>(gtdb.timing_arc_from_pin_id.size())) continue;
+                        const int from_pin = gtdb.timing_arc_from_pin_id[arc_id];
+                        if (!valid_power_arc(arc_id, from_pin, pin_id)) continue;
+                        if (pred_pin[from_pin] != -2) continue;
+                        pred_pin[from_pin] = pin_id;
+                        pred_arc[from_pin] = arc_id;
+                        pred_reason[from_pin] = "power_arc";
+                        queue.push(from_pin);
+                    }
+                }
+                for (const PowerTraceEdge& edge : seq_reverse_edges[pin_id]) {
+                    if (edge.from_pin < 0 || edge.from_pin >= n || pred_pin[edge.from_pin] != -2)
+                        continue;
+                    pred_pin[edge.from_pin] = pin_id;
+                    pred_arc[edge.from_pin] = edge.arc_id;
+                    pred_reason[edge.from_pin] = edge.reason;
+                    queue.push(edge.from_pin);
+                }
+            }
+            if (seed_pin < 0) {
+                tsv << path_id++ << "\t-1\t" << target_pin << '\t'
+                    << gtdb.pin_names[target_pin]
+                    << "\t-1\t\t-1\t-1\t\t-1\t\tno_path\t-1\t-1\n";
+                continue;
+            }
+            std::vector<int> path_pins;
+            for (int pin_id = seed_pin; pin_id >= 0; pin_id = pred_pin[pin_id]) {
+                path_pins.push_back(pin_id);
+                if (pin_id == target_pin) break;
+            }
+            const int current_path = path_id++;
+            if (json) {
+                if (!first_json_path) json << ",\n";
+                first_json_path = false;
+                json << "    {\"path_id\": " << current_path
+                     << ", \"seed_pin\": \"" << gtdb.pin_names[seed_pin]
+                     << "\", \"target_pin\": \"" << gtdb.pin_names[target_pin]
+                     << "\", \"steps\": " << (path_pins.size() > 1 ? path_pins.size() - 1 : 0)
+                     << "}";
+            }
+            for (size_t step = 0; step + 1 < path_pins.size(); ++step) {
+                const int from_pin = path_pins[step];
+                const int to_pin = path_pins[step + 1];
+                const int arc_id = pred_arc[from_pin];
+                tsv << current_path << '\t' << step << '\t'
+                    << target_pin << '\t' << gtdb.pin_names[target_pin] << '\t'
+                    << seed_pin << '\t' << gtdb.pin_names[seed_pin] << '\t'
+                    << arc_id << '\t'
+                    << from_pin << '\t' << gtdb.pin_names[from_pin] << '\t'
+                    << to_pin << '\t' << gtdb.pin_names[to_pin] << '\t'
+                    << pred_reason[from_pin] << '\t'
+                    << (from_pin < static_cast<int>(pin_level.size()) ? pin_level[from_pin] : -1) << '\t'
+                    << (to_pin < static_cast<int>(pin_level.size()) ? pin_level[to_pin] : -1) << '\n';
+            }
+        }
+        if (json) json << "\n  ]\n}\n";
+    };
+    dump_trace_paths();
 
     int max_activity_passes = 50;
     if (const char* env = std::getenv("XPLACE_POWER_ACTIVITY_MAX_PASSES")) {
@@ -805,35 +1363,54 @@ torch::Tensor GPUTimer::report_power_activity_cpu() {
                       << std::endl;
         }
     };
-    int trace_pin_id = -1;
-    if (const char* trace_name = std::getenv("XPLACE_POWER_ACTIVITY_TRACE_PIN")) {
-        std::string trace(trace_name);
-        for (int i = 0; i < n; i++) {
-            std::string name = gtdb.pin_names[i];
-            std::replace(name.begin(), name.end(), ':', '/');
-            if (gtdb.pin_names[i] == trace || name == trace) {
-                trace_pin_id = i;
-                break;
+    auto emit_trace = [&](const char* tag, int pass, size_t pending_count) {
+        for (int pin_id : trace_pin_ids) {
+            if (pin_id < 0 || pin_id >= n) continue;
+            const bool first_nonzero = act[pin_id].density > 0.0f && !trace_first_seen[pin_id];
+            if (first_nonzero) trace_first_seen[pin_id] = 1;
+            const int node_id = pin_to_node[pin_id];
+            const bool node_pending = node_id >= 0 && node_id < static_cast<int>(pending_reg_flag.size()) &&
+                                      pending_reg_flag[node_id];
+            const bool cell_seq = get_cell(node_id) && !get_cell(node_id)->sequentials_.empty();
+            std::cerr << "[power_activity_trace_cpu] tag=" << tag
+                      << " pass=" << pass
+                      << " pending=" << pending_count
+                      << " pin_id=" << pin_id
+                      << " pin=" << gtdb.pin_names[pin_id]
+                      << " density=" << act[pin_id].density
+                      << " duty=" << act[pin_id].duty
+                      << " origin=" << act[pin_id].origin
+                      << " first_nonzero=" << (first_nonzero ? 1 : 0)
+                      << " is_load=" << static_cast<int>(is_load_pin[pin_id])
+                      << " is_driver=" << static_cast<int>(is_driver_pin[pin_id])
+                      << " node=" << node_id
+                      << " node_pending=" << (node_pending ? 1 : 0)
+                      << " cell_seq=" << (cell_seq ? 1 : 0);
+            if (node_id >= 0 && node_id < static_cast<int>(gtdb.gpdb.getNodes().size())) {
+                std::cerr << " inst=" << gtdb.gpdb.getNodes()[node_id].getName();
             }
+            std::cerr << std::endl;
         }
-        if (trace_pin_id >= 0) {
-            std::cerr << "[power_activity_trace] pass=0 pin=" << trace_name << " density=" << act[trace_pin_id].density << " duty=" << act[trace_pin_id].duty << " pending=" << pending_regs.size() << std::endl;
-        }
-    }
+    };
+    emit_trace("after_seed", 0, pending_regs.size());
     trace_pending_regs(0);
+    // Initial combinational propagation from roots/clock network.
+    run_queue(0);
+    emit_trace("after_comb", 0, pending_regs.size());
     for (int pass = 1; !pending_regs.empty() && pass < max_activity_passes; pass++) {
         std::vector<int> regs = std::move(pending_regs);
         pending_regs.clear();
+        path_trace_pass = pass;
+        path_trace_level_tag = "seq_seed";
         for (int node_id : regs) {
             if (node_id >= 0 && node_id < static_cast<int>(pending_reg_flag.size()))
                 pending_reg_flag[node_id] = 0;
             seed_reg_outputs(node_id);
         }
-        run_queue();
+        emit_trace("after_seq_seed", pass, regs.size());
+        run_queue(pass);
         trace_pending_regs(pass);
-        if (trace_pin_id >= 0) {
-            std::cerr << "[power_activity_trace] pass=" << pass << " density=" << act[trace_pin_id].density << " duty=" << act[trace_pin_id].duty << " pending=" << pending_regs.size() << std::endl;
-        }
+        emit_trace("after_pass", pass, pending_regs.size());
     }
 
     auto out = torch::empty({n, 3}, torch::dtype(torch::kFloat32).device(torch::kCPU));
@@ -1063,7 +1640,7 @@ torch::Tensor GPUTimer::compute_power_activity_cuda(torch::Tensor* inst_switchin
             if (!seq) continue;
             GpuPowerSeqHost rec;
             rec.data_expr_id = add_expr(seq->next_state_expr_, cell, node);
-            rec.clk_expr_id = add_expr(seq->clocked_on_expr_, cell, node);
+            rec.clk_expr_id = add_expr(seqClockExpr(seq), cell, node);
             rec.is_latch = seq->is_latch_ ? 1 : 0;
             if (rec.data_expr_id < 0) continue;
             const std::string seq_out = normalize_expr(seq->output_name_);
@@ -1113,6 +1690,8 @@ torch::Tensor GPUTimer::compute_power_activity_cuda(torch::Tensor* inst_switchin
         std::getenv("XPLACE_POWER_INIT_SEQ_FEEDBACK_STATE") != nullptr;
     const bool skip_all_seq_output_arcs =
         std::getenv("XPLACE_POWER_SKIP_ALL_SEQ_OUTPUT_ARCS") != nullptr;
+    const bool seed_timing_loop_roots =
+        std::getenv("XPLACE_POWER_SEED_TIMING_LOOP_ROOTS") != nullptr;
     std::vector<int> h_power_arc_types = gtdb.arc_types;
     auto timing_arc_ptr = [&](int arc_id) -> TimingArc* {
         const int base = arc_id * 2;
@@ -1140,6 +1719,103 @@ torch::Tensor GPUTimer::compute_power_activity_cuda(torch::Tensor* inst_switchin
             return true;
         return false;
     };
+    std::vector<uint8_t> h_power_disabled_loop_arc(gtdb.arc_id2test_id.size(), 0);
+    std::vector<int> h_timing_loop_roots;
+    int root_timing_loop_count = 0;
+    int disabled_loop_arc_count = 0;
+    if (seed_timing_loop_roots) {
+        auto timing_level_edge_valid = [&](int arc_id) -> bool {
+            if (arc_id < 0 || arc_id >= static_cast<int>(gtdb.arc_id2test_id.size())) return false;
+            if (gtdb.arc_id2test_id[arc_id] != -1) return false;
+            TimingArc* timing_arc = timing_arc_ptr(arc_id);
+            if (timing_arc) {
+                const TimingType type = timing_arc->timing_type_;
+                if (type == TimingType::clear || type == TimingType::preset) return false;
+            }
+            return arc_id < static_cast<int>(gtdb.timing_arc_to_pin_id.size());
+        };
+        auto edge_to_pin = [&](int arc_id) -> int {
+            return (arc_id >= 0 && arc_id < static_cast<int>(gtdb.timing_arc_to_pin_id.size()))
+                ? gtdb.timing_arc_to_pin_id[arc_id] : -1;
+        };
+        auto has_valid_in = [&](int pin_id) -> bool {
+            if (pin_id < 0 || pin_id + 1 >= static_cast<int>(gtdb.pin_backward_arc_list_end.size()))
+                return false;
+            for (int idx = gtdb.pin_backward_arc_list_end[pin_id];
+                 idx < gtdb.pin_backward_arc_list_end[pin_id + 1]; ++idx) {
+                const int arc_id = gtdb.pin_backward_arc_list[idx];
+                if (timing_level_edge_valid(arc_id) && !h_power_disabled_loop_arc[arc_id])
+                    return true;
+            }
+            return false;
+        };
+        auto has_valid_out = [&](int pin_id) -> bool {
+            if (pin_id < 0 || pin_id + 1 >= static_cast<int>(gtdb.pin_forward_arc_list_end.size()))
+                return false;
+            for (int idx = gtdb.pin_forward_arc_list_end[pin_id];
+                 idx < gtdb.pin_forward_arc_list_end[pin_id + 1]; ++idx) {
+                const int arc_id = gtdb.pin_forward_arc_list[idx];
+                if (timing_level_edge_valid(arc_id) && !h_power_disabled_loop_arc[arc_id])
+                    return true;
+            }
+            return false;
+        };
+        std::vector<uint8_t> visited(n, 0);
+        std::vector<uint8_t> on_path(n, 0);
+        auto dfs_from = [&](int root_pin) {
+            struct Frame {
+                int pin = -1;
+                int next = 0;
+                int end = 0;
+            };
+            std::vector<Frame> stack;
+            if (root_pin < 0 || root_pin >= n || visited[root_pin]) return;
+            visited[root_pin] = 1;
+            on_path[root_pin] = 1;
+            stack.push_back({root_pin, gtdb.pin_forward_arc_list_end[root_pin],
+                             gtdb.pin_forward_arc_list_end[root_pin + 1]});
+            while (!stack.empty()) {
+                Frame& frame = stack.back();
+                bool advanced = false;
+                while (frame.next < frame.end) {
+                    const int arc_id = gtdb.pin_forward_arc_list[frame.next++];
+                    if (!timing_level_edge_valid(arc_id) || h_power_disabled_loop_arc[arc_id])
+                        continue;
+                    const int to_pin = edge_to_pin(arc_id);
+                    if (to_pin < 0 || to_pin >= n) continue;
+                    if (!visited[to_pin]) {
+                        visited[to_pin] = 1;
+                        on_path[to_pin] = 1;
+                        stack.push_back({to_pin, gtdb.pin_forward_arc_list_end[to_pin],
+                                         gtdb.pin_forward_arc_list_end[to_pin + 1]});
+                        advanced = true;
+                        break;
+                    }
+                    if (on_path[to_pin]) {
+                        h_power_disabled_loop_arc[arc_id] = 1;
+                        h_timing_loop_roots.push_back(to_pin);
+                        disabled_loop_arc_count++;
+                    }
+                }
+                if (!advanced) {
+                    on_path[frame.pin] = 0;
+                    stack.pop_back();
+                }
+            }
+        };
+        for (int pin_id = 0; pin_id < n; ++pin_id) {
+            if (!has_valid_in(pin_id) && has_valid_out(pin_id)) {
+                h_timing_loop_roots.push_back(pin_id);
+                dfs_from(pin_id);
+            }
+        }
+        for (int pin_id = 0; pin_id < n; ++pin_id) {
+            if (!visited[pin_id] && has_valid_out(pin_id)) dfs_from(pin_id);
+        }
+        std::sort(h_timing_loop_roots.begin(), h_timing_loop_roots.end());
+        h_timing_loop_roots.erase(std::unique(h_timing_loop_roots.begin(), h_timing_loop_roots.end()),
+                                  h_timing_loop_roots.end());
+    }
     for (int from_pin = 0; from_pin < n; ++from_pin) {
         if (from_pin + 1 >= static_cast<int>(gtdb.pin_forward_arc_list_end.size())) break;
         const int start = gtdb.pin_forward_arc_list_end[from_pin];
@@ -1182,11 +1858,28 @@ torch::Tensor GPUTimer::compute_power_activity_cuda(torch::Tensor* inst_switchin
     std::vector<uint8_t> h_is_primary_input(n, 0);
     std::vector<int> h_primary_inputs;
     h_primary_inputs.reserve(gtdb.primary_inputs.size());
+    std::vector<std::string> h_seed_reason(n);
+    auto add_seed_reason = [&](int pin_id, const char* reason) {
+        if (pin_id < 0 || pin_id >= n || !reason || reason[0] == '\0') return;
+        std::string& current = h_seed_reason[pin_id];
+        const std::string value(reason);
+        if (current.empty()) {
+            current = value;
+        } else if (current.find(value) == std::string::npos) {
+            current += ";";
+            current += value;
+        }
+    };
+    auto add_seed_pin = [&](int pin_id, const char* reason) {
+        h_primary_inputs.push_back(pin_id);
+        add_seed_reason(pin_id, reason);
+    };
     int root_primary_count = 0;
     int root_zero_indeg_count = 0;
     int root_const_output_count = 0;
     int root_seq_feedback_count = 0;
     int state_seq_feedback_count = 0;
+    int root_power_level_count = 0;
     std::vector<int> h_feedback_seed_pins;
     std::vector<int> h_feedback_seed_seqs;
     bool seed_default_inputs = true;
@@ -1200,7 +1893,7 @@ torch::Tensor GPUTimer::compute_power_activity_cuda(torch::Tensor* inst_switchin
         const int pin_id = static_cast<int>(pin);
         if (pin_id >= 0 && pin_id < n) h_is_primary_input[pin_id] = 1;
         if (seed_default_inputs && pin_id >= 0 && pin_id < n && h_is_driver_pin[pin_id]) {
-            h_primary_inputs.push_back(pin_id);
+            add_seed_pin(pin_id, "primary_input");
             root_primary_count++;
         }
     }
@@ -1208,8 +1901,17 @@ torch::Tensor GPUTimer::compute_power_activity_cuda(torch::Tensor* inst_switchin
         for (int pin_id : gtdb.pin_frontiers) {
             if (pin_id < 0 || pin_id >= n) continue;
             if (h_is_primary_input[pin_id] || h_is_clock_pin[pin_id]) continue;
-            h_primary_inputs.push_back(pin_id);
+            add_seed_pin(pin_id, "timing_zero_indeg");
             root_zero_indeg_count++;
+        }
+        if (seed_timing_loop_roots) {
+            for (int pin_id : h_timing_loop_roots) {
+                if (pin_id < 0 || pin_id >= n) continue;
+                if (h_is_primary_input[pin_id] || h_is_clock_pin[pin_id]) continue;
+                if (!h_is_load_pin[pin_id] && !h_is_driver_pin[pin_id]) continue;
+                add_seed_pin(pin_id, "timing_loop_root");
+                root_timing_loop_count++;
+            }
         }
     }
     if (seed_default_inputs && (seed_seq_feedback_outputs || init_seq_feedback_state)) {
@@ -1249,13 +1951,13 @@ torch::Tensor GPUTimer::compute_power_activity_cuda(torch::Tensor* inst_switchin
             std::vector<int> data_pins;
             const bool q_feedback = collect_feedback_data_pins(seq.data_expr_id, seq.q_pin, &data_pins);
             if (q_feedback && seed_seq_feedback_outputs && !seed_seen[seq.q_pin]) {
-                h_primary_inputs.push_back(seq.q_pin);
+                add_seed_pin(seq.q_pin, "seq_feedback_q");
                 seed_seen[seq.q_pin] = 1;
                 root_seq_feedback_count++;
             }
             const bool qn_feedback = collect_feedback_data_pins(seq.data_expr_id, seq.qn_pin, &data_pins);
             if (qn_feedback && seed_seq_feedback_outputs && !seed_seen[seq.qn_pin]) {
-                h_primary_inputs.push_back(seq.qn_pin);
+                add_seed_pin(seq.qn_pin, "seq_feedback_qn");
                 seed_seen[seq.qn_pin] = 1;
                 root_seq_feedback_count++;
             }
@@ -1287,29 +1989,12 @@ torch::Tensor GPUTimer::compute_power_activity_cuda(torch::Tensor* inst_switchin
             }
         }
         if (seed_default_inputs && !has_input_pin) {
-            h_primary_inputs.push_back(pin_id);
+            add_seed_pin(pin_id, "const_output");
             root_const_output_count++;
         }
     }
     std::sort(h_primary_inputs.begin(), h_primary_inputs.end());
     h_primary_inputs.erase(std::unique(h_primary_inputs.begin(), h_primary_inputs.end()), h_primary_inputs.end());
-    if (std::getenv("XPLACE_POWER_PRINT_ROOT_STATS")) {
-        std::fprintf(stderr,
-                     "[power_activity_roots] seeds=%zu primary=%d timing_roots=%d const_outputs=%d\n",
-                     h_primary_inputs.size(), root_primary_count, root_zero_indeg_count,
-                     root_const_output_count);
-        if (seed_seq_feedback_outputs) {
-            std::fprintf(stderr,
-                         "[power_activity_roots] seq_feedback=%d\n",
-                         root_seq_feedback_count);
-        }
-        if (init_seq_feedback_state) {
-            std::fprintf(stderr,
-                         "[power_activity_roots] seq_feedback_state=%d pins=%zu\n",
-                         state_seq_feedback_count, h_feedback_seed_pins.size());
-        }
-    }
-
     auto positive_unate_for_power = [](LibertyCell* cell, LibertyPort* from, LibertyPort* to) -> bool {
         if (!cell || !from || !to) return true;
         for (TimingArc* arc : from->timing_arcs_) {
@@ -1567,6 +2252,13 @@ torch::Tensor GPUTimer::compute_power_activity_cuda(torch::Tensor* inst_switchin
     auto d_timing_arc_to_pin_id = to_cuda_index(gtdb.timing_arc_to_pin_id);
     auto d_arc_types = to_cuda_int(h_power_arc_types);
     std::vector<int> h_power_arc_id2test_id = gtdb.arc_id2test_id;
+    if (seed_timing_loop_roots) {
+        const int num_mark_arcs = std::min(static_cast<int>(h_power_arc_id2test_id.size()),
+                                           static_cast<int>(h_power_disabled_loop_arc.size()));
+        for (int arc_id = 0; arc_id < num_mark_arcs; ++arc_id) {
+            if (h_power_disabled_loop_arc[arc_id]) h_power_arc_id2test_id[arc_id] = 0;
+        }
+    }
     auto d_arc_id2test_id = to_cuda_int(h_power_arc_id2test_id);
     auto d_net_driver_pin = to_cuda_int(h_net_driver_pin);
     auto d_is_load_pin = to_cuda_u8(h_is_load_pin);
@@ -1587,6 +2279,8 @@ torch::Tensor GPUTimer::compute_power_activity_cuda(torch::Tensor* inst_switchin
     auto d_pin_seq_list = to_cuda_int(h_pin_seq_list);
     auto d_feedback_seed_pins = to_cuda_int(h_feedback_seed_pins);
     auto d_feedback_seed_seqs = to_cuda_int(h_feedback_seed_seqs);
+    auto h_trace_pins = resolvePowerTracePins(readPowerTracePinQueries(), gtdb.pin_names);
+    auto d_trace_pins = to_cuda_int(h_trace_pins);
     auto d_internal_rows = to_cuda_bytes(h_internal_rows);
     auto d_leakage_rows = to_cuda_bytes(h_leakage_rows);
     auto d_leakage_groups = to_cuda_bytes(h_leakage_groups);
@@ -1596,6 +2290,15 @@ torch::Tensor GPUTimer::compute_power_activity_cuda(torch::Tensor* inst_switchin
     levelize_power(d_is_seq_output_pin.data_ptr<uint8_t>());
     if (!power_level_list || power_level_list_end_cpu.empty()) {
         throw std::runtime_error("levelize_power failed to build power level list");
+    }
+    if (seed_default_inputs && std::getenv("XPLACE_POWER_SEED_POWER_LEVEL_ROOTS")) {
+        for (int pin_id : power_level_root_pins_cpu) {
+            if (pin_id < 0 || pin_id >= n) continue;
+            if (h_is_primary_input[pin_id] || h_is_clock_pin[pin_id]) continue;
+            if (!h_is_load_pin[pin_id] && !h_is_driver_pin[pin_id]) continue;
+            add_seed_pin(pin_id, "power_zero_fanin_seed");
+            root_power_level_count++;
+        }
     }
 
     std::vector<uint8_t> h_seed_seen(n, 0);
@@ -1607,6 +2310,112 @@ torch::Tensor GPUTimer::compute_power_activity_cuda(torch::Tensor* inst_switchin
         h_seed_inputs.push_back(pin_id);
     }
     h_primary_inputs.swap(h_seed_inputs);
+    std::vector<int> h_power_fanin(n, 0);
+    if (gtdb.pin_forward_arc_list_end.size() == static_cast<size_t>(n + 1)) {
+        for (int from_pin = 0; from_pin < n; ++from_pin) {
+            const int start = gtdb.pin_forward_arc_list_end[from_pin];
+            const int end = gtdb.pin_forward_arc_list_end[from_pin + 1];
+            for (int idx = start; idx < end; ++idx) {
+                if (idx < 0 || idx >= static_cast<int>(gtdb.pin_forward_arc_list.size())) continue;
+                const int arc_id = gtdb.pin_forward_arc_list[idx];
+                if (arc_id < 0 || arc_id >= static_cast<int>(gtdb.timing_arc_to_pin_id.size())) continue;
+                if (arc_id < static_cast<int>(h_power_arc_id2test_id.size()) && h_power_arc_id2test_id[arc_id] != -1) continue;
+                const int to_pin = gtdb.timing_arc_to_pin_id[arc_id];
+                if (to_pin < 0 || to_pin >= n) continue;
+                if (arc_id < static_cast<int>(h_power_arc_types.size())
+                    && h_power_arc_types[arc_id] == 1 && h_is_seq_output_pin[to_pin])
+                    continue;
+                h_power_fanin[to_pin]++;
+            }
+        }
+    }
+    if (const char* root_dump_file = std::getenv("XPLACE_POWER_DUMP_ROOTS_FILE")) {
+        if (root_dump_file[0] != '\0') {
+            std::vector<uint8_t> h_candidate_seen(n, 0);
+            for (int pin_id : power_level_root_pins_cpu) {
+                if (pin_id >= 0 && pin_id < n) h_candidate_seen[pin_id] = 1;
+            }
+            std::vector<int> root_probe_pins =
+                resolvePowerTracePins(readPowerRootProbePinQueries(), gtdb.pin_names);
+            std::vector<int> dump_pins;
+            dump_pins.reserve(h_primary_inputs.size() + power_level_root_pins_cpu.size() + root_probe_pins.size());
+            dump_pins.insert(dump_pins.end(), h_primary_inputs.begin(), h_primary_inputs.end());
+            dump_pins.insert(dump_pins.end(), power_level_root_pins_cpu.begin(), power_level_root_pins_cpu.end());
+            dump_pins.insert(dump_pins.end(), root_probe_pins.begin(), root_probe_pins.end());
+            std::sort(dump_pins.begin(), dump_pins.end());
+            dump_pins.erase(std::unique(dump_pins.begin(), dump_pins.end()), dump_pins.end());
+
+            std::ofstream root_dump(root_dump_file);
+            if (root_dump) {
+                root_dump
+                    << "pin_id\tpin_name\tin_actual_seed\tin_candidate\treason"
+                    << "\tis_primary\tis_clock\tis_driver\tis_load\tpower_fanin"
+                    << "\ttiming_fanin\tpower_level\tnode_id\tinst_name\tcell_type"
+                    << "\tnet_id\tnet_name\n";
+                for (int pin_id : dump_pins) {
+                    if (pin_id < 0 || pin_id >= n) continue;
+                    std::string reason = h_seed_reason[pin_id];
+                    if (reason.empty() && h_seed_seen[pin_id]) reason = "seed";
+                    if (h_candidate_seen[pin_id]) {
+                        if (reason.empty()) reason = "power_zero_fanin_candidate";
+                        else if (reason.find("power_zero_fanin_candidate") == std::string::npos
+                                 && reason.find("power_zero_fanin_seed") == std::string::npos)
+                            reason += ";power_zero_fanin_candidate";
+                    }
+                    if (reason.empty()) reason = "probe_only";
+                    const int node_id =
+                        (pin_id < static_cast<int>(h_pin_to_node.size())) ? h_pin_to_node[pin_id] : -1;
+                    const int net_id =
+                        (pin_id < static_cast<int>(h_pin_to_net.size())) ? h_pin_to_net[pin_id] : -1;
+                    std::string inst_name;
+                    std::string cell_type;
+                    if (node_id >= 0 && node_id < static_cast<int>(gtdb.gpdb.getNodes().size())) {
+                        inst_name = gtdb.gpdb.getNodes()[node_id].getName();
+                        cell_type = gtdb.gpdb.getNodes()[node_id].getCellTypeName();
+                    }
+                    std::string net_name;
+                    if (net_id >= 0 && net_id < static_cast<int>(gtdb.net_names.size())) {
+                        net_name = gtdb.net_names[net_id];
+                    } else if (net_id >= 0 && net_id < static_cast<int>(gtdb.gpdb.getNets().size())) {
+                        net_name = gtdb.gpdb.getNets()[net_id].getName();
+                    }
+                    const int timing_fanin =
+                        (pin_id < static_cast<int>(gtdb.pin_num_fanin.size())) ? gtdb.pin_num_fanin[pin_id] : -1;
+                    const int power_level =
+                        (pin_id < static_cast<int>(power_pin_level_cpu.size())) ? power_pin_level_cpu[pin_id] : -1;
+                    root_dump << pin_id << '\t' << gtdb.pin_names[pin_id] << '\t'
+                              << (h_seed_seen[pin_id] ? 1 : 0) << '\t'
+                              << (h_candidate_seen[pin_id] ? 1 : 0) << '\t'
+                              << reason << '\t'
+                              << (h_is_primary_input[pin_id] ? 1 : 0) << '\t'
+                              << (h_is_clock_pin[pin_id] ? 1 : 0) << '\t'
+                              << (h_is_driver_pin[pin_id] ? 1 : 0) << '\t'
+                              << (h_is_load_pin[pin_id] ? 1 : 0) << '\t'
+                              << h_power_fanin[pin_id] << '\t'
+                              << timing_fanin << '\t' << power_level << '\t'
+                              << node_id << '\t' << inst_name << '\t' << cell_type << '\t'
+                              << net_id << '\t' << net_name << '\n';
+                }
+            }
+        }
+    }
+    if (std::getenv("XPLACE_POWER_PRINT_ROOT_STATS")) {
+        std::fprintf(stderr,
+                     "[power_activity_roots] seeds=%zu primary=%d timing_roots=%d timing_loop_roots=%d disabled_loop_arcs=%d power_roots=%d const_outputs=%d\n",
+                     h_primary_inputs.size(), root_primary_count, root_zero_indeg_count,
+                     root_timing_loop_count, disabled_loop_arc_count,
+                     root_power_level_count, root_const_output_count);
+        if (seed_seq_feedback_outputs) {
+            std::fprintf(stderr,
+                         "[power_activity_roots] seq_feedback=%d\n",
+                         root_seq_feedback_count);
+        }
+        if (init_seq_feedback_state) {
+            std::fprintf(stderr,
+                         "[power_activity_roots] seq_feedback_state=%d pins=%zu\n",
+                         state_seq_feedback_count, h_feedback_seed_pins.size());
+        }
+    }
     auto d_primary_inputs = to_cuda_int(h_primary_inputs);
 
     const bool use_timing_levels_for_power =
@@ -1745,6 +2554,8 @@ torch::Tensor GPUTimer::compute_power_activity_cuda(torch::Tensor* inst_switchin
         clock_density,
         gtdb.time_unit,
         max_activity_passes,
+        d_trace_pins.data_ptr<int>(),
+        static_cast<int>(h_trace_pins.size()),
         out_gpu.data_ptr<float>(),
         num_nodes,
         pin2node_map,

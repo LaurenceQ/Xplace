@@ -12,16 +12,16 @@ Scope: CUDA power from `../Xplace_power_merged_20260513_094803`.
 - 2026-05-15 fix: clock-origin activity overwrite only for ideal clocks;
   fixed sky130 `picorv32a`/`wbqspiflash` activity drift.
 - 2026-05-15 latch/case-analysis support did not change mempool_group power.
-- Main power pass is total `report_power` within 1%; components are diagnostic.
+- Power accept is component-level: internal, switching, leakage each <=1% vs OpenROAD; total-only pass is stale.
 - Timing pass treats OpenROAD WNS/TNS `0` with Xplace nonnegative slack as pass.
-- Auto missing-fanout skip: `0` for visible NVDA, blind ariane/bsg/NVDA;
-  default `300` otherwise.
+- Power compare auto skip: `0` for visible NVDA, blind ariane/bsg/NVDA;
+  timing matrix still uses `300` for blind bsg/NVDA.
 - Always run with `CUDA_VISIBLE_DEVICES=0` unless user changes GPU.
 
 - `...powerfix_midcases/`: visible/blind ariane, bsg, NVDA pass timing/power.
 - Visible NVDA component errs: internal `7.4e-05`, switching `0.00192`.
 - Visible/blind ariane total pass (`0.00476`/`0.00257`) but switching noisy.
-- Blind bsg/NVDA need skip `0`; group cases use skip `300`.
+- Blind bsg/NVDA total power pass records used skip `0`; group uses skip `300`.
 - `...powerfix_group/`: mempool_group timing passes; power fails visible
   `0.0185`, blind `0.10845`.
 

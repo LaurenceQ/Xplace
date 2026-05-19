@@ -5,6 +5,10 @@ This directory is the active memory system. Keep it small, current, and useful.
 ## Hard Limits
 
 - Every active `*.md` file in this directory must be 50 lines or fewer.
+- The 50-line cap must never cause skipped updates or lost conclusions.
+- If the right file is full, create the next focused numbered file and link it
+  from `00_INDEX.md`.
+- If `00_INDEX.md` is full, compress navigation text; do not drop active topics.
 - `00_INDEX.md` is navigation only: read order, file purpose, and global traps.
 - Do not paste long logs, command history, stack traces, or broad transcripts.
 - Store artifact paths, exact numeric conclusions, and the decision they imply.
@@ -23,6 +27,7 @@ Update memory before final response when a conclusion changes future behavior:
 
 - Add a new focused file for a new topic that does not fit an existing file.
 - Delete stale or false conclusions immediately after replacing them.
+- Never delete a still-active fact just to satisfy the line cap.
 - Merge duplicated facts into the most specific topical file.
 - Split any file that would exceed 50 lines.
 - Move historical detail to `archive/` only when it is no longer active.

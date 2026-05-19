@@ -197,6 +197,7 @@ void GPUTimer::levelize_power(const uint8_t* d_is_seq_output_pin) {
     CUDA_CHECK("power entry");
     if (num_pins <= 0) {
         power_level_list_end_cpu.clear();
+        power_level_root_pins_cpu.clear();
         power_level_list_end_cpu.push_back(0);
         return;
     }
@@ -268,10 +269,19 @@ void GPUTimer::levelize_power(const uint8_t* d_is_seq_output_pin) {
                power_level_list_end_cpu.size() * sizeof(index_type), cudaMemcpyHostToDevice);
 
     power_pin_level_cpu.assign(num_pins, -1);
+    power_level_root_pins_cpu.clear();
     if (emitted_count > 0) {
         std::vector<index_type> power_level_list_cpu(emitted_count);
         cudaMemcpy(power_level_list_cpu.data(), power_level_list,
                    emitted_count * sizeof(index_type), cudaMemcpyDeviceToHost);
+        if (power_level_list_end_cpu.size() > 1) {
+            const int root_end = std::min(power_level_list_end_cpu[1], emitted_count);
+            power_level_root_pins_cpu.reserve(root_end);
+            for (int i = 0; i < root_end; ++i) {
+                const int pin = static_cast<int>(power_level_list_cpu[i]);
+                if (pin >= 0 && pin < num_pins) power_level_root_pins_cpu.push_back(pin);
+            }
+        }
         for (int level = 0; level + 1 < static_cast<int>(power_level_list_end_cpu.size()); ++level) {
             const int start = power_level_list_end_cpu[level];
             const int end = power_level_list_end_cpu[level + 1];

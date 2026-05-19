@@ -70,6 +70,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--openroad-ref-out", type=Path)
     parser.add_argument("--openroad-golden-cache", type=Path, default=OPENROAD_GOLDEN_CACHE)
     parser.add_argument("--xplace-ref-out", type=Path)
+    parser.add_argument("--openroad-root-dump", type=Path)
+    parser.add_argument("--xplace-root-dump", type=Path)
+    parser.add_argument("--root-probe-pins", type=Path)
     parser.add_argument("--missing-fanout-skip", default="auto")
     parser.add_argument("--force-openroad-golden", action="store_true")
     parser.add_argument("--no-instance-power-csv", action="store_true")
@@ -81,6 +84,14 @@ def parse_args() -> argparse.Namespace:
 
 def segment_path(split: str, design: str) -> Path:
     return BENCH / "openroad_gr_segments_skip_fanout300" / split / f"{design}.route_segments"
+
+
+def root_debug_path(base: Path | None, split: str, design: str, leaf: str) -> Path | None:
+    if base is None:
+        return None
+    if base.suffix:
+        return base
+    return base / f"{split}_{design}" / leaf
 
 
 def design_dir(split: str, design: str) -> Path:
@@ -149,6 +160,10 @@ def xplace_power_csv_path(out: Path, case_id: str) -> Path:
 
 def power_compare_csv_path(out: Path, case_id: str) -> Path:
     return out / "compare" / f"{case_id}_power_compare.csv"
+
+
+def norm_inst_name(name: str) -> str:
+    return name.replace(r"\[", "[").replace(r"\]", "]")
 
 
 def golden_csvs_complete(paths: dict[str, Path]) -> bool:
@@ -458,10 +473,12 @@ def compare_power_csvs(openroad_csv: Path, xplace_csv: Path, compare_csv: Path) 
     x_by_name: dict[str, dict[str, str]] = {}
     with xplace_csv.open(newline="", errors="replace") as f:
         for row in csv.DictReader(f):
-            x_by_name[row.get("name", "")] = row
+            x_by_name[norm_inst_name(row.get("name", ""))] = row
 
     rows: list[dict[str, Any]] = []
     missing = 0
+    xplace_only = 0
+    matched_x: set[str] = set()
     worst = {component: {"name": "", "abs_diff": -1.0} for component in COMPONENTS}
     sums = {
         "openroad": {component: 0.0 for component in COMPONENTS},
@@ -470,11 +487,13 @@ def compare_power_csvs(openroad_csv: Path, xplace_csv: Path, compare_csv: Path) 
     diffs = {component: [] for component in COMPONENTS}
     with openroad_csv.open(newline="", errors="replace") as f:
         for gt in csv.DictReader(f):
-            name = gt.get("name", "")
+            name = norm_inst_name(gt.get("name", ""))
             x = x_by_name.get(name)
             if x is None:
                 missing += 1
                 x = {}
+            else:
+                matched_x.add(name)
             out: dict[str, Any] = {
                 "name": name,
                 "cell_type": gt.get("cell_type") or x.get("cell_type", ""),
@@ -495,6 +514,24 @@ def compare_power_csvs(openroad_csv: Path, xplace_csv: Path, compare_csv: Path) 
                 out[f"{component}_abs_diff"] = adiff
             rows.append(out)
 
+    for name, x in x_by_name.items():
+        if name in matched_x:
+            continue
+        xplace_only += 1
+        out = {"name": name, "cell_type": x.get("cell_type", "")}
+        for component in COMPONENTS:
+            xv = float(x.get(component) or 0.0)
+            adiff = abs(xv)
+            sums["xplace"][component] += xv
+            diffs[component].append(adiff)
+            if adiff > worst[component]["abs_diff"]:
+                worst[component] = {"name": name, "abs_diff": adiff, "openroad": 0.0, "xplace": xv}
+            out[f"openroad_{component}"] = 0.0
+            out[f"xplace_{component}"] = xv
+            out[f"{component}_diff"] = xv
+            out[f"{component}_abs_diff"] = adiff
+        rows.append(out)
+
     with compare_csv.open("w", newline="") as f:
         fieldnames = ["name", "cell_type"]
         for component in COMPONENTS:
@@ -507,8 +544,10 @@ def compare_power_csvs(openroad_csv: Path, xplace_csv: Path, compare_csv: Path) 
         "openroad_csv": str(openroad_csv),
         "xplace_csv": str(xplace_csv),
         "compare_csv": str(compare_csv),
-        "num_openroad_instances": len(rows),
+        "num_openroad_instances": len(rows) - xplace_only,
+        "num_compare_rows": len(rows),
         "missing_openroad_names_in_xplace": missing,
+        "xplace_only_names_not_in_openroad": xplace_only,
         "worst": worst,
     }
     for component in COMPONENTS:
@@ -543,6 +582,12 @@ def run_openroad(args: argparse.Namespace, split: str, design: str, log_path: Pa
         env["OR_DUMP_POWER_PINS_CSV"] = str(paths["pins_csv"])
         env["OR_DUMP_POWER_ARCS_CSV"] = str(paths["arcs_csv"])
         env["OR_DUMP_POWER_LEAKAGE_CSV"] = str(paths["leakage_csv"])
+    openroad_root_dump = root_debug_path(args.openroad_root_dump, split, design, "openroad_roots.tsv")
+    if openroad_root_dump is not None:
+        openroad_root_dump.parent.mkdir(parents=True, exist_ok=True)
+        env["OR_POWER_DUMP_ROOTS_FILE"] = str(openroad_root_dump)
+    if args.root_probe_pins is not None:
+        env["OR_POWER_ROOT_PROBE_PINS_FILE"] = str(args.root_probe_pins)
     cmd = [
         str(args.openroad_bin),
         "-no_init",
@@ -587,6 +632,13 @@ def run_xplace_parent(args: argparse.Namespace, split: str, design: str, log_pat
     ]
     if args.no_instance_power_csv:
         cmd.append("--no-instance-power-csv")
+    xplace_root_dump = root_debug_path(args.xplace_root_dump, split, design, "xplace_roots.tsv")
+    if xplace_root_dump is not None:
+        xplace_root_dump.parent.mkdir(parents=True, exist_ok=True)
+        env["XPLACE_POWER_DUMP_ROOTS_FILE"] = str(xplace_root_dump)
+    if args.root_probe_pins is not None:
+        env["XPLACE_POWER_ROOT_PROBE_PINS_FILE"] = str(args.root_probe_pins)
+        env["XPLACE_POWER_PROBE_PIN_LIST_FILE"] = str(args.root_probe_pins)
     timeout = None if args.timeout_min <= 0 else args.timeout_min * 60.0
     return run_monitored(cmd, log_path, REPO, env, timeout, args.sample_interval)
 
@@ -801,6 +853,113 @@ def summarize_xplace_probe_instance_pins(gpdb: Any, probe_rows: list[dict[str, A
     return result
 
 
+def summarize_xplace_probe_pins(gpdb: Any, activity: Any, pin_load: Any) -> list[dict[str, Any]]:
+    list_path = os.environ.get("XPLACE_POWER_PROBE_PIN_LIST_FILE", "").strip()
+    if not list_path:
+        return []
+    path = Path(list_path)
+    if not path.exists():
+        return []
+    wanted = [line.strip() for line in path.read_text(errors="replace").splitlines() if line.strip()]
+    if not wanted:
+        return []
+    pin_names = gpdb.pin_names()
+    name_to_id: dict[str, int] = {}
+    for idx, name in enumerate(pin_names):
+        name_to_id[name] = idx
+        name_to_id[name.replace(":", "/")] = idx
+    act = activity.detach().cpu()
+    load = pin_load.detach().cpu() if pin_load is not None else None
+    rows: list[dict[str, Any]] = []
+    for query in wanted:
+        pin_id = name_to_id.get(query, -1)
+        row: dict[str, Any] = {
+            "query": query,
+            "pin_id": pin_id,
+            "pin": pin_names[pin_id] if 0 <= pin_id < len(pin_names) else "",
+            "found": 0 <= pin_id < len(pin_names),
+        }
+        if row["found"]:
+            row["density"] = float(act[pin_id, 0].item())
+            row["duty"] = float(act[pin_id, 1].item())
+            row["origin"] = int(float(act[pin_id, 2].item()))
+            if load is not None:
+                row["load_attrs"] = [float(v) for v in load[pin_id].double().tolist()]
+        rows.append(row)
+    return rows
+
+
+def write_probe_pin_artifacts(out_dir: Path, case_id: str, rows: list[dict[str, Any]], suffix: str = "power_probe_pins") -> dict[str, str]:
+    if not rows:
+        return {}
+    probe_dir = out_dir / "probe"
+    probe_dir.mkdir(parents=True, exist_ok=True)
+    json_path = probe_dir / f"{case_id}_{suffix}.json"
+    csv_path = probe_dir / f"{case_id}_{suffix}.csv"
+    write_json(json_path, {"pins": rows})
+
+    fields: list[str] = []
+    preferred = ["query", "found", "pin_id", "pin", "density", "duty", "origin", "load_attrs"]
+    for key in preferred:
+        if any(key in row for row in rows):
+            fields.append(key)
+    for row in rows:
+        for key in row:
+            if key not in fields:
+                fields.append(key)
+    with csv_path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        for row in rows:
+            flat = {
+                key: json.dumps(value, sort_keys=True) if isinstance(value, (list, dict)) else value
+                for key, value in row.items()
+            }
+            writer.writerow(flat)
+    return {f"{suffix}_json": str(json_path), f"{suffix}_csv": str(csv_path)}
+
+
+def write_xplace_pin_activity_csv(gpdb: Any, activity: Any, csv_path: Path) -> dict[str, Any]:
+    pin_names = gpdb.pin_names()
+    act = activity.detach().cpu()
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with csv_path.open("w", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "pin_id",
+                "pin_name",
+                "pin_name_slash",
+                "inst_name",
+                "port_name",
+                "activity_density",
+                "activity_duty",
+                "activity_origin",
+            ],
+        )
+        writer.writeheader()
+        rows = min(len(pin_names), int(act.shape[0]))
+        for pin_id in range(rows):
+            pin_name = pin_names[pin_id]
+            inst_name = pin_name
+            port_name = ""
+            if ":" in pin_name:
+                inst_name, port_name = pin_name.rsplit(":", 1)
+            writer.writerow(
+                {
+                    "pin_id": pin_id,
+                    "pin_name": pin_name,
+                    "pin_name_slash": pin_name.replace(":", "/"),
+                    "inst_name": inst_name,
+                    "port_name": port_name,
+                    "activity_density": float(act[pin_id, 0].item()),
+                    "activity_duty": float(act[pin_id, 1].item()),
+                    "activity_origin": int(float(act[pin_id, 2].item())),
+                }
+            )
+    return {"path": str(csv_path), "rows": rows}
+
+
 def run_xplace_worker(args: argparse.Namespace) -> int:
     sys.path.insert(0, str(REPO))
     import torch
@@ -877,6 +1036,46 @@ def run_xplace_worker(args: argparse.Namespace) -> int:
             return gputimer.report_timing_slack()
 
         wns_early, tns_early, wns_late, tns_late = time_stage(stages, "timer", run_timer, torch)
+        path_trace_requested = any(
+            os.environ.get(name, "").strip()
+            for name in (
+                "XPLACE_POWER_TRACE_PATH_OUT",
+                "XPLACE_POWER_TRACE_PATH_FILE",
+                "XPLACE_POWER_ACTIVITY_PATH_TRACE_FILE",
+            )
+        )
+        path_trace_only = os.environ.get("XPLACE_POWER_PATH_TRACE_ONLY", "").strip() not in (
+            "",
+            "0",
+            "false",
+            "False",
+            "no",
+        )
+        pre_power_cpu_activity = None
+        if path_trace_requested:
+            pre_power_cpu_activity = time_stage(
+                stages,
+                "power_activity_cpu_pathtrace",
+                lambda: gputimer.timer.report_power_activity_cpu(),
+                torch,
+            )
+            if path_trace_only:
+                summary.update(
+                    {
+                        "status": "ok",
+                        "timing": {
+                            "wns": float(wns_late),
+                            "tns": float(tns_late),
+                            "wns_early": float(wns_early),
+                            "tns_early": float(tns_early),
+                        },
+                        "power": {component: None for component in COMPONENTS},
+                        "trace_path": os.environ.get("XPLACE_POWER_TRACE_PATH_OUT", ""),
+                        "xplace_activity_path_trace": os.environ.get("XPLACE_POWER_ACTIVITY_PATH_TRACE_FILE", ""),
+                        "time_unit": float(gputimer.timer.time_unit()),
+                    }
+                )
+                return 0
         tensors = time_stage(stages, "power", lambda: gputimer.timer.report_power_total_cuda(), torch)
         power = {component: tensor_sum(tensor) for component, tensor in zip(COMPONENTS, tensors)}
         xplace_power_csv = ""
@@ -890,10 +1089,61 @@ def run_xplace_worker(args: argparse.Namespace) -> int:
         power_probe_type_instances = summarize_xplace_probe_types(gpdb, tensors)
         power_probe_instances = summarize_xplace_probe_instances(gpdb, tensors)
         power_probe_instance_pins = {}
-        if power_probe_instances and os.environ.get("XPLACE_POWER_PROBE_PIN_ACTIVITY", "").strip() not in ("", "0", "false", "False", "no"):
+        power_probe_pins = []
+        power_probe_pin_paths = {}
+        power_probe_pins_cpu = []
+        power_probe_pin_cpu_paths = {}
+        full_pin_activity_paths: dict[str, Any] = {}
+        power_probe_inst_list_file = os.environ.get("XPLACE_POWER_PROBE_INST_LIST_FILE", "").strip()
+        power_probe_pin_list_file = os.environ.get("XPLACE_POWER_PROBE_PIN_LIST_FILE", "").strip()
+        want_pin_activity = os.environ.get("XPLACE_POWER_PROBE_PIN_ACTIVITY", "").strip() not in ("", "0", "false", "False", "no")
+        want_cpu_activity = os.environ.get("XPLACE_POWER_PROBE_CPU_ACTIVITY", "").strip() not in ("", "0", "false", "False", "no")
+        want_probe_pin_list = bool(power_probe_pin_list_file)
+        full_pin_activity_csv = os.environ.get("XPLACE_POWER_FULL_PIN_ACTIVITY_CSV", "").strip()
+        full_pin_activity_cpu_csv = os.environ.get("XPLACE_POWER_FULL_PIN_ACTIVITY_CPU_CSV", "").strip()
+        if full_pin_activity_cpu_csv:
+            cpu_activity = pre_power_cpu_activity
+            if cpu_activity is None:
+                cpu_activity = time_stage(
+                    stages,
+                    "power_activity_cpu_full_pin",
+                    lambda: gputimer.timer.report_power_activity_cpu(),
+                    torch,
+                )
+            full_pin_activity_paths["cpu"] = time_stage(
+                stages,
+                "write_power_activity_cpu_full_pin_csv",
+                lambda: write_xplace_pin_activity_csv(gpdb, cpu_activity, Path(full_pin_activity_cpu_csv)),
+                torch,
+            )
+        if full_pin_activity_csv:
+            activity = time_stage(
+                stages,
+                "power_activity_full_pin",
+                lambda: gputimer.timer.report_power_activity_cuda(),
+                torch,
+            )
+            full_pin_activity_paths["cuda"] = time_stage(
+                stages,
+                "write_power_activity_full_pin_csv",
+                lambda: write_xplace_pin_activity_csv(gpdb, activity, Path(full_pin_activity_csv)),
+                torch,
+            )
+        if want_pin_activity and (power_probe_instances or want_probe_pin_list):
+            if want_cpu_activity and want_probe_pin_list:
+                cpu_activity = pre_power_cpu_activity
+                if cpu_activity is None:
+                    cpu_activity = time_stage(stages, "power_activity_cpu_probe", lambda: gputimer.timer.report_power_activity_cpu(), torch)
+                pin_load_cpu = time_stage(stages, "pin_load_cpu_probe", lambda: gputimer.timer.report_pin_load(), torch)
+                power_probe_pins_cpu = summarize_xplace_probe_pins(gpdb, cpu_activity, pin_load_cpu)
+                power_probe_pin_cpu_paths = write_probe_pin_artifacts(args.out, f"{split}_{design}", power_probe_pins_cpu, "power_probe_pins_cpu")
             activity = time_stage(stages, "power_activity_probe", lambda: gputimer.timer.report_power_activity_cuda(), torch)
             pin_load = time_stage(stages, "pin_load_probe", lambda: gputimer.timer.report_pin_load(), torch)
-            power_probe_instance_pins = summarize_xplace_probe_instance_pins(gpdb, power_probe_instances, activity, pin_load)
+            if power_probe_instances:
+                power_probe_instance_pins = summarize_xplace_probe_instance_pins(gpdb, power_probe_instances, activity, pin_load)
+            if want_probe_pin_list:
+                power_probe_pins = summarize_xplace_probe_pins(gpdb, activity, pin_load)
+                power_probe_pin_paths = write_probe_pin_artifacts(args.out, f"{split}_{design}", power_probe_pins)
         summary.update(
             {
                 "status": "ok",
@@ -910,6 +1160,13 @@ def run_xplace_worker(args: argparse.Namespace) -> int:
                 "power_probe_type_instances": power_probe_type_instances,
                 "power_probe_instances": power_probe_instances,
                 "power_probe_instance_pins": power_probe_instance_pins,
+                "power_probe_pins": power_probe_pins,
+                "power_probe_pins_cpu": power_probe_pins_cpu,
+                "power_probe_inst_list_file": power_probe_inst_list_file,
+                "power_probe_pin_list_file": power_probe_pin_list_file,
+                "power_probe_pin_paths": power_probe_pin_paths,
+                "power_probe_pin_cpu_paths": power_probe_pin_cpu_paths,
+                "full_pin_activity_paths": full_pin_activity_paths,
                 "power_csv": xplace_power_csv,
                 "time_unit": float(gputimer.timer.time_unit()),
             }

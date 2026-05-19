@@ -417,6 +417,8 @@ SequentialPower* CellLib::extractSequential(token_iterator& itr, const token_ite
             seq->clocked_on_expr_ = liberty_next_expr(itr, end);
         } else if (*itr == "next_state") {
             seq->next_state_expr_ = liberty_next_expr(itr, end);
+        } else if (*itr == "data_in") {
+            seq->next_state_expr_ = liberty_next_expr(itr, end);
         } else if (*itr == "enable") {
             seq->enable_expr_ = liberty_next_expr(itr, end);
         } else if (*itr == "clear") {

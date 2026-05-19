@@ -9,42 +9,41 @@ Scope: OpenROAD/OpenSTA power oracle and Xplace CUDA power compare.
   `my_dump_graph`, `my_dump_pins`, `my_dump_power`.
 - Xplace python: `/home/qkduan25/.conda/envs/gnn/bin/python` (`Python 3.10.19`).
 
-## Legacy Bundle
-- Reference: `/research/d7/ascstd/qkduan25/openroad_power_alignment_scripts_20260515_194001`.
-- Prompt typo without underscores is wrong; old package is flow reference only.
-- Stale paths found: `/data/Xplace`, `/data/GNNTimer`,
-  `/home/lawrenced/anaconda3`, `sky130hd`, `/data/Xplace/netlists`.
-
 ## Current ISPD2025 Driver
-- Use `tools/compare_ispd25_route_power_timing.py` for contest route-segment
-  power/timing compare.
+- Use `tools/compare_ispd25_route_power_timing.py` for ISPD route-segment compare.
 - Resolve golden cache to absolute path; OpenROAD cwd is benchmark root.
-- Golden paths: `<cache>/openroad_dump/<split>_<design>_power*.csv`
-  plus `<split>_<design>_manifest.json`.
-- Valid ISPD golden requires all four power CSVs plus manifest; do not accept
-  instance-only dumps as complete.
+- Golden paths: `<cache>/openroad_dump/<split>_<design>_power*.csv` plus manifest.
+- Valid ISPD golden requires all four power CSVs plus manifest; reject instance-only dumps.
 - Do not use `report_power -format json`; use `my_dump_power` four CSVs:
   instance, pins, internal arcs, leakage.
-- Use `--openroad-bin /research/d7/ascstd/qkduan25/GNNTimer/openroad/build-check/bin/openroad`
-  and `--gpu 0`.
+- Use `--openroad-bin /research/d7/ascstd/qkduan25/GNNTimer/openroad/build-check/bin/openroad` and `--gpu 0`.
 - Reuse golden unless DEF, SDC, libs, route_segments, OpenROAD bin, Tcl, or
   dump code changed; use `--force-openroad-golden` only then.
-
-## Legacy Script Porting Rules
-
-- If using old GNNTimer benchmark scripts, copy to a work dir before edits.
-- Correct env names are `OUT_ROOT`, `DESIGN_LIST`, `OPENROAD_BIN`,
-  `GNNTIMER_DIR`, `GPU`; not `OUTROOT`, `DESIGNLIST`, `OPENROADBIN`.
-- `run_power_benchmark_compare.sh` must call its local
-  `power_benchmark_compare_one.py`, not `/data/Xplace/logs/...`.
-- Replace `sys.path.insert('/data/Xplace')`, `platformPath`, and `designPath`
-  with `XPLACE_DIR`, `PLATFORM_PATH`, and `DESIGN_PATH` inputs.
 
 ## Required Compare Semantics
 
 - OpenROAD CSV is golden oracle only; Xplace must compute power itself.
 - Compare by instance name, never by internal id.
-- Report internal, switching, leakage, total, worst instance/component, and
-  1% total-power status.
+- Report internal/switching/leakage/total plus worst instance/component.
+- Accept only if internal, switching, and leakage are each within 1% of OpenROAD.
+- Activity debug target: each pin density/duty ideally within 5% of OpenROAD.
+- Mandatory debug order: first check all four OpenROAD CSVs; if missing, dump
+  them with `my_dump_power`. If present, diff instance CSV first, then inspect
+  worst pin/internal-arc/leakage CSV rows before changing code.
+- Only after CSV diff identifies the failing component should source be read:
+  switching -> load/activity code; internal -> arc/table/duty code; leakage ->
+  when/PG/default code. Do not guess from total-only numbers.
+- For activity mismatch, first use final CSVs and OpenROAD source semantics. If
+  still unclear, instrument/probe `ensureActivities()` pass-by-pass and record
+  target pin, pending register output, density/duty, and enqueue/update changes.
 - Preserve OpenSTA semantics: switching load cap not Ceff; activity follows
   `ensureActivities()`; internal/leakage use Liberty table/when rules.
+
+## Root Debug
+- OR roots: `Power::seedActivities()`/`levelize_->roots()`; dump with
+  `OR_POWER_DUMP_ROOTS_FILE`, optional `OR_POWER_ROOT_PROBE_PINS_FILE`.
+- X dump: `XPLACE_POWER_DUMP_ROOTS_FILE`, optional
+  `XPLACE_POWER_ROOT_PROBE_PINS_FILE`; compare via
+  `tools/power_alignment/compare_power_roots.py`.
+- Judge: OR root not X candidate => graph/fanin; X candidate not seed => seed
+  selection; X seed but zero => seed/enqueue.

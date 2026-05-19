@@ -13,8 +13,8 @@ Read this after `AGENTS.md`; open focused notes before grepping logs.
   `05_current_case_debugging.md`.
 - DMP timing path: `08_dmp_timing_path.md`, then
   `12_dmp_arc_vs_fallback_profile.md`.
-- Speed or memory: `09_speed_memory_status.md`.
-- Power flow: `15_power_alignment_flow.md`, then `13_power_merge_status.md`.
+- Speed or memory: `09_speed_memory_status.md`, then `17_route_stage_speed_audit.md`.
+- Power accept/debug: `18_power_acceptance_plan.md`, then `15_power_alignment_flow.md`, `16_nangate45_power_alignment.md`, `13_power_merge_status.md`.
 - Hypotheses/results: `14_hypotheses_validation.md`.
 - Commands and paths: `04_tools.md`.
 - Trap check before edits: `03_pitfalls.md`.

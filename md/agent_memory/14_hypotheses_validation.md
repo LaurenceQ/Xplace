@@ -1,50 +1,49 @@
 # 假设与验证结果
 Scope: ISPD2025 route-segment timing/power alignment. Keep <=50 lines.
-## sky130 Power Regressions
 
+## sky130 Power
 - H: non-ideal SPEF flow should not use SDC ideal-clock slew override.
   Result: limiting override to `ideal_clock` fixes `blabla`/`zipdiv`.
 - H: non-ideal clock seed activity must not be overwritten by propagation.
   Result: guarding overwrite by `ideal_clock` fixes `picorv32a`/`wbqspiflash`;
-  full sky130 21/21 Xplace-only worst total err `3.692918e-06`.
+  sky130 21/21 Xplace-only worst total err `3.692918e-06`.
 
-## blind/mempool_group Power Gap
-
-- Reference: OR total `4.51656961 W`; X total `4.026748111 W`.
-- Timing aligns: OR/X WNS about `-1.3747767`, TNS about `-67650`.
-- Diagnosis: std-cell dynamic activity is low in X; not timing or RC.
-
-Rejected global hypotheses:
+## Global Rejections
 - Voltage `1.1`, DMP load alone, async clear/preset arcs: no fix.
 - Timing levels, root-indeg/timing-root seeding, clock closure, loop roots:
-  unchanged around `4.02674811 W`.
+  no useful change.
+- Pass count is not a fix: 200/500/1000/2000 raises power but 2000 still low/slow.
+- Broad seq seeding over-shoots: all zero-indeg seq outputs `16.2367 W`;
+  feedback D-only fixed one mempool by cancellation but broke bsg.
+- Expression-width rejected: NanGate45 `.lib` max function/when/seq vars `8`,
+  below Xplace 16-var enum limit.
 
-Pass-count hypothesis:
-- `MAX_PASSES=200/500/1000/2000` -> `4.2630/4.2927/4.3014/4.3036 W`.
-- At 2000, X still has `final_pending=22108`; power takes `431.6s`.
-- Result: grows but remains `4.76%` low and too slow; reject as fix.
-
-Seq-feedback hypotheses:
-- Seed all zero-indeg seq outputs -> `16.2367 W`; gross over-seed.
-- Seed feedback seq outputs: all `6.7335 W`, D-only `4.9013 W`.
-- D-only pass25 fixes mempool by cancellation, but bsg fails `3.15%`.
-- Conclusion: seq feedback matters, but broad seeding is invalid.
-
-OpenSTA alignment facts:
-- OpenSTA seeds level roots, then iterates register-output activity up to 50.
-- Enqueues register outputs whose Liberty seq output function matches `IQ/IQN`.
-- OR blind group: roots `5854`, roots with fanout `5461`, back edges `0`.
-
-Tile14/chain validation:
-- DEF/net connectivity is correct for prior suspects:
-  `g1411:A <- g36724:ZN`, `g1410:A* <- g1414/g1413/g1411/g2268`.
-- OR dynamic: `g37288:ZN 1.85012e8`, `g36724:ZN 1.85187e8`,
-  `prefetch_req_vld_q_reg:Q/QN 1.91425e5`; X static.
-- X chain2: `pending_refill_q_reg:D/Q/QN`, `g39183`, `g37289`,
-  `g37288`, `g36724`, `prefetch_req_vld_q_reg` static after 50 passes.
-- OR chain2: `g30021`, `g36733/34/36/37`, `g40707/8/9/17`,
-  `g39183`, `pending_refill_q_reg` are dynamic.
-- X chain3: `g620/g36725/g36763/g42326/g36765/g36750/g41386`
-  are static; issue is further-upstream activity source.
-- Chain4 and badpin evidence: multiple upstream scan/test/control nets are
-  static in X but dynamic in OR; do not chase local power formula.
+## OpenSTA Facts
+- OpenSTA seeds `levelize_->roots()`, then iterates register-output activity
+  up to 50 passes.
+- Register outputs are enqueued when Liberty seq output function matches
+  `IQ/IQN`.
+## NanGate45 visible/mempool_group
+- Baseline: OR total `4.589715868 W`, X total `4.494483077 W`, err `2.0749%`;
+  std-cell internal/switching activity low, leakage aligned.
+- H: local `a_full_q_reg/D,Q` are first source.
+  Result: false; OR has earlier nonzero pins.
+- H: `status_cnt` Q/QN recognition or seq pending is first root cause.
+  Result: false; OR status D nonzero appears before Q.
+- H: CUDA propagation queue is first root cause.
+  Result: false; X CPU and CUDA probes both keep source-chain density `0`.
+- H: missing OpenSTA-equivalent root/frontier seed.
+  Result: false; all OR seeded roots are in X; X only extra root is `clk_i`.
+- H: matched-root path propagation is missing an enqueue.
+  Result: false/partial; X path reaches g99, but full final diff shows the
+  first upstream break is before g99.
+- H: g99 boolean eval is the first bug.
+  Result: false as first cause; g99 is downstream. Full diff shows
+  `FE_RC_119370_0/A1` side chain is OR-nonzero/X-zero, causing
+  `FE_RC_119370_0/ZN` and then g99/A2 to become zero in X.
+- H: `FE_RC_97449_0` has matching inputs but wrong output.
+  Result: false; B2 is OR nonzero/X zero, so its output mismatch is downstream.
+- H: strict B2 max-OR/X-zero branch reaches all-input-match gate.
+  Result: false; stops at `clk_en_reg/Q`; `GN` matches, `D` is OR/X nonzero mismatch.
+- H: NanGate45 latch/gated-clock activity missing.
+  Result: true; X ignored latch `data_in/enable`; fix gives Ptotal err `0.1575%`.
