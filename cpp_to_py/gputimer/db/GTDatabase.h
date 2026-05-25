@@ -89,7 +89,6 @@ public:
         std::array<int, NUM_ATTR> input_rfs = {-1, -1, -1, -1};
         std::array<float, NUM_ATTR> input_slews = {0.0f, 0.0f, 0.0f, 0.0f};
     };
-
     db::Database& rawdb;
     gp::GPDatabase& gpdb;
     TimingTorchRawDB& timing_raw_db;
@@ -116,6 +115,7 @@ public:
     void _read_sdc(sdc::SetCaseAnalysis&);
     void _read_sdc(sdc::SetFalsePath&);
     void _read_sdc(sdc::SetIdealNetwork&);
+    void _read_sdc(sdc::SetPropagatedClock&);
     void _read_sdc(sdc::SetUnits&);
     bool is_redundant_timing(const TimingArc* timing_arc, Split el);
 
@@ -199,9 +199,15 @@ public:
     unordered_map<std::string, std::array<float, NUM_ATTR>> clock_transitions;
     unordered_map<std::string, float> clock_setup_uncertainty;
     unordered_map<std::string, float> clock_hold_uncertainty;
+    bool propagated_all_clocks = false;
+    std::unordered_set<std::string> propagated_clock_names;
+    std::unordered_set<int> propagated_clock_pins;
+    // Debug-only optional mask for false-path power-activity experiments.
+    vector<uint8_t> power_disabled_constraint_arc;
     vector<array<string, NUM_ATTR>> output_delay_clock_by_pin_attr;
     vector<int> net_is_clock;
     vector<int> pin_is_clk;  // 1 if pin is a register clock pin (from_pin of test arc)
+    vector<int> pin_is_ideal_clk;  // 1 if a register clock pin is ideal, 0 if propagated.
     vector<int> pin_case_values;  // -1 unset, 0/1 from set_case_analysis.
 
     // Timing Graph

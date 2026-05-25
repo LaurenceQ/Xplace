@@ -40,6 +40,22 @@ Object parse_port(const std::string& line) {
         return get_pins;
     }
 
+    const std::string get_clocks_prefix = "__get_clocks__";
+    if (line.rfind(get_clocks_prefix, 0) == 0) {
+        auto clocks_line = line.substr(get_clocks_prefix.size());
+        auto itr = std::sregex_token_iterator(clocks_line.begin(), clocks_line.end(), ws_re, -1);
+        auto end = std::sregex_token_iterator();
+
+        GetClocks get_clocks;
+        for (; itr != end; ++itr) {
+            auto clock = strip_braces(itr->str());
+            if (!clock.empty()) {
+                get_clocks.clocks.push_back(std::move(clock));
+            }
+        }
+        return get_clocks;
+    }
+
     auto itr = std::sregex_token_iterator(line.begin(), line.end(), ws_re, -1);
     auto end = std::sregex_token_iterator();
     // auto num = std::distance(itr, end);

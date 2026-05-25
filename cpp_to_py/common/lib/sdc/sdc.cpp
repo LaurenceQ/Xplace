@@ -107,6 +107,8 @@ void SDC::read(const std::filesystem::path& path) {
                 commands.emplace_back(std::in_place_type_t<SetFalsePath>{}, j);
             } else if (c == "set_ideal_network") {
                 commands.emplace_back(std::in_place_type_t<SetIdealNetwork>{}, j);
+            } else if (c == "set_propagated_clock") {
+                commands.emplace_back(std::in_place_type_t<SetPropagatedClock>{}, j);
             } else {
                 logger.error("sdc command %s not supported yet", c);
             }
@@ -463,6 +465,19 @@ SetIdealNetwork::SetIdealNetwork(const Json& json) {
         if (auto& key = itr.key(); key == "-no_propagate") {
             no_propagate.emplace();
         } else if (key == "object_list") {
+            object_list = parse_port(unquoted(itr.value()));
+        } else if (key == "command") {
+            logger.errorif(itr.value() != command, "wrong command field: %s", itr.value());
+        } else {
+            logger.error("%s: %s not supported", command, std::quoted(key));
+        }
+    }
+}
+
+// Constructor
+SetPropagatedClock::SetPropagatedClock(const Json& json) {
+    for (auto itr = json.begin(); itr != json.end(); ++itr) {
+        if (auto& key = itr.key(); key == "object_list") {
             object_list = parse_port(unquoted(itr.value()));
         } else if (key == "command") {
             logger.errorif(itr.value() != command, "wrong command field: %s", itr.value());

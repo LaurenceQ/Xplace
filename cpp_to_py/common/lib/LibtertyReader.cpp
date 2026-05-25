@@ -566,6 +566,9 @@ LibertyPort* CellLib::extractLibertyPort(token_iterator& itr, const token_iterat
         } else if (*itr == "function") {
             cell_port->function_expr_ = liberty_next_expr(itr, end);
             cell_port->has_function_ = true;
+        } else if (*itr == "nextstate_type") {
+            logger.infoif(++itr == end, "can't get nextstate_type in cellpin");
+            cell_port->nextstate_type_ = string(*itr);
         } else if (*itr == "related_power_pin") {
             cell_port->related_power_pin_name_ = liberty_next_string(itr, end);
         } else if (*itr == "related_ground_pin") {

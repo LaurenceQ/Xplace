@@ -221,6 +221,15 @@ struct SetIdealNetwork {
     SetIdealNetwork(const Json&);
 };
 
+struct SetPropagatedClock {
+    inline static constexpr auto command = "set_propagated_clock";
+
+    std::optional<Object> object_list;
+
+    SetPropagatedClock() = default;
+    SetPropagatedClock(const Json&);
+};
+
 using Command = std::variant<SetUnits,
                              SetInputDelay,
                              SetDrivingCell,
@@ -234,7 +243,8 @@ using Command = std::variant<SetUnits,
                              SetMaxTransition,
                              SetCaseAnalysis,
                              SetFalsePath,
-                             SetIdealNetwork>;
+                             SetIdealNetwork,
+                             SetPropagatedClock>;
 
 struct SDC {
     std::vector<Command> commands;

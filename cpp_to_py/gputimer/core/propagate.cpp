@@ -56,8 +56,9 @@ void propagate_infer_timing_impl(
                         index_type *at_prefix_attr,
                         float clock_period,
                         GPULutAllocator *d_allocator,
-                        bool ideal_clock,
                         int *pin_is_clk,
+                        int *pin_is_ideal_clk,
+                        const float *pin_clock_fall_edges,
                         int num_pins);
 
 
@@ -116,8 +117,9 @@ void GPUTimer::propagate_infer_timing() {
                                 at_prefix_attr,
                                 clock_period,
                                 d_allocator,
-                                ideal_clock,
                                 pin_is_clk,
+                                pin_is_ideal_clk,
+                                pin_clock_fall_edges,
                                 num_pins);
 }
 

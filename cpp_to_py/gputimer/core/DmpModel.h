@@ -24,7 +24,7 @@ struct DmpModel {
     const char **net_names;
     int num_pins, num_nets, num_arcs, num_tests;
     const int *flat_net2pin_start_map, *flat_net2pin_map, *pin2net_map;
-    double *C1, *C2, *r_pi;
+    float *C1, *C2, *r_pi;
     float *timer_ceff;
     int dmp_pin_slot_count, dmp_slot_capacity, dmp_work_slot_capacity;
     bool owns_allocations;
@@ -48,7 +48,7 @@ struct DmpModel {
     const float *dmp_library_slew_derates;
     int *pin_is_primary_input;
     int *pin_is_clk;
-    bool ideal_clock;
+    int *pin_is_ideal_clk;
     int *pin_ids, *arc_ids;
     index_type *level_list;
     index_type *pin_forward_arc_list_end;
@@ -114,7 +114,7 @@ struct DmpModel {
                   dmp_library_slew_lower_thresholds(nullptr),
                   dmp_library_slew_upper_thresholds(nullptr),
                   dmp_library_slew_derates(nullptr), pin_is_primary_input(nullptr),
-                  pin_is_clk(nullptr), ideal_clock(false),
+                  pin_is_clk(nullptr), pin_is_ideal_clk(nullptr),
                   pinSlew(nullptr), elmore_delay(nullptr), pinAt(nullptr), pinRat(nullptr),
                   testRelatedAT(nullptr), testRAT(nullptr), testConstraint(nullptr),
                   test_clock_periods(nullptr), test_setup_uncertainties(nullptr),

@@ -231,6 +231,7 @@ public:
 
     string function_expr_;
     bool has_function_ = false;
+    string nextstate_type_;
     string related_power_pin_name_;
     string related_ground_pin_name_;
 

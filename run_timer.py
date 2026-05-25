@@ -221,7 +221,6 @@ def main():
         data = None
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-    # gputimer.timer.set_ideal_clock(True)
     if args.debug_dump_rc_net:
         if args.gr_rc:
             gputimer.debug_dump_openroad_gr_rc_net(args.gr_rc, args.debug_dump_rc_net)

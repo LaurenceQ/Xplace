@@ -66,10 +66,6 @@ std::shared_ptr<gt::GPUTimer> create_gputimer(const py::dict& kwargs,
     std::shared_ptr<gt::GPUTimer> gputimer = std::make_shared<gt::GPUTimer>(gtdb, timing_raw_db);
     profile_log("construct_gputimer");
 
-    if (kwargs.contains("ideal_clock") && kwargs["ideal_clock"].cast<bool>()) {
-        gputimer->ideal_clock = true;
-    }
-
     const bool direct_rc_mode = kwargs.contains("route_segments") || kwargs.contains("gr_rc");
     if (!direct_rc_mode) {
         readLUT("thirdparty/flute_mp/lut.ICCAD2015/POWV9.dat", "thirdparty/flute_mp/lut.ICCAD2015/POST9.dat");
@@ -125,6 +121,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("report_power_leakage_rows_cuda", &gt::GPUTimer::report_power_leakage_rows_cuda, py::return_value_policy::move)
         .def("report_power_total_cuda", &gt::GPUTimer::report_power_total_cuda, py::return_value_policy::move)
         .def("report_power_seq_inventory", &gt::GPUTimer::report_power_seq_inventory)
+        .def("report_power_group_codes", &gt::GPUTimer::report_power_group_codes, py::return_value_policy::move)
         .def("report_power_internal_lut_cuda_probe", &gt::GPUTimer::report_power_internal_lut_cuda_probe, py::return_value_policy::move)
         .def("debug_dump_endpoint_tests",
              &gt::GPUTimer::debug_dump_endpoint_tests,
@@ -158,10 +155,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              "Also loads slew/net_delay/cell_delay into GPU arrays for propagation.")
         .def("report_pin_gt_at", &gt::GPUTimer::report_pin_gt_at, py::return_value_policy::move,
              "Return GT AT values loaded by read_opr_gt_infer(). Shape [num_pins, 4], internal units, NaN=missing.")
-        .def("set_ideal_clock", [](gt::GPUTimer& self, bool v) { self.ideal_clock = v; },
-             py::arg("enabled"),
-             "Enable/disable ideal clock mode. When enabled, clock network delay is zero\n"
-             "at all register clock pins (AT=0, slew=0) for constraint computation.")
         .def("update_rc_flute_dmp", &gt::GPUTimer::update_rc_timing_flute_dmp)
         .def("init_dmp_rc_spef", &gt::GPUTimer::init_dmp_rc_spef)
         .def("init_dmp_rc_gr", &gt::GPUTimer::init_dmp_rc_gr,
@@ -170,6 +163,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              py::arg("file"))
         .def("debug_dump_dmp_rc_net", &gt::GPUTimer::debug_dump_dmp_rc_net)
         .def("initialize_dmp_model", &gt::GPUTimer::initialize_dmp_model)
+        .def("release_dmp_timing_scratch_for_power", &gt::GPUTimer::release_dmp_timing_scratch_for_power)
         .def("update_timing_dmp", &gt::GPUTimer::update_timing_dmp)
         .def("print_pin_id_name", &gt::GPUTimer::print_pin_id_name)
         .def("get_units", &gt::GPUTimer::get_units)

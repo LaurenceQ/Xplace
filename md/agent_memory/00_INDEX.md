@@ -15,6 +15,7 @@ Read this after `AGENTS.md`; open focused notes before grepping logs.
   `12_dmp_arc_vs_fallback_profile.md`.
 - Speed or memory: `09_speed_memory_status.md`, then `17_route_stage_speed_audit.md`.
 - Power accept/debug: `18_power_acceptance_plan.md`, then `15_power_alignment_flow.md`, `16_nangate45_power_alignment.md`, `13_power_merge_status.md`.
+- Power group/component alignment: `19_power_group_alignment.md`.
 - Hypotheses/results: `14_hypotheses_validation.md`.
 - Commands and paths: `04_tools.md`.
 - Trap check before edits: `03_pitfalls.md`.
@@ -39,6 +40,8 @@ Read this after `AGENTS.md`; open focused notes before grepping logs.
 - `13_power_merge_status.md`: CUDA power merge status and validation.
 - `14_hypotheses_validation.md`: compact hypothesis/test/result log.
 - `15_power_alignment_flow.md`: OpenROAD oracle/cache and compare workflow.
+- `19_power_group_alignment.md`: OpenROAD power group rule, Xplace group
+  implementation, current group-level status, and next activity mismatches.
 
 ## Do Not Confuse
 

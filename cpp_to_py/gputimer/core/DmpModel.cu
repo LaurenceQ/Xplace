@@ -249,7 +249,7 @@ __host__ DmpModel::DmpModel(GPUTimer* timer)
         dmp_library_slew_upper_thresholds(timer -> dmp_library_slew_upper_thresholds),
         dmp_library_slew_derates(timer -> dmp_library_slew_derates),
         pin_is_clk(timer -> pin_is_clk),
-        ideal_clock(timer -> ideal_clock),
+        pin_is_ideal_clk(timer -> pin_is_ideal_clk),
         clock_period(timer -> clock_period),
         d_allocator(timer -> d_allocator),
         res_unit(timer -> res_unit),
@@ -460,8 +460,6 @@ void DmpModel::release_after_timing()
     cudaFree(pin_is_primary_input);
     cudaFree(pin_ids);
     cudaFree(arc_ids);
-    cudaFree(C1);
-    cudaFree(C2);
     cudaFree(r_pi);
     cudaFree(elmore_delay);
     pin_at_winner = nullptr;
@@ -473,8 +471,6 @@ void DmpModel::release_after_timing()
     pin_is_primary_input = nullptr;
     pin_ids = nullptr;
     arc_ids = nullptr;
-    C1 = nullptr;
-    C2 = nullptr;
     r_pi = nullptr;
     elmore_delay = nullptr;
     if (dmpInitMemProfileEnabled()) {
@@ -505,6 +501,7 @@ __host__ DmpModel::~DmpModel(){
         if (C1) cudaFree(C1);
         if (C2) cudaFree(C2);
         if (r_pi) cudaFree(r_pi);
+        if (elmore_delay) cudaFree(elmore_delay);
         cudaFree(pin_at_winner);
         cudaFree(pin_slew_winner);
         cudaFree(arc_delay_winner);
@@ -516,6 +513,12 @@ __host__ DmpModel::~DmpModel(){
         cudaFree(arc_ids);
     } 
 }
+
+void GPUTimer::release_dmp_timing_scratch_for_power()
+{
+    dmp_release_after_timing(h_dmp_db, dmp_db);
+}
+
 void GPUTimer::initialize_dmp_model(){
     // cudaMemcpy(h_dmp_rc_, dmp_rc_, sizeof(dmp_rc), cudaMemcpyDeviceToHost);
     h_dmp_db = new DmpModel(this);
@@ -571,8 +574,8 @@ void print_pinLoad_cuda(DmpModel* dmp_db, vector<int> level_list_end_cpu, vector
     int total_num_pins = level_list_end_cpu.back();
     assert(total_num_pins == (int)pin_names.size());
     float* pinLoad_host = new float[total_num_pins * NUM_ATTR];
-    double* C1_host = new double[total_num_pins * NUM_ATTR];
-    double* C2_host = new double[total_num_pins * NUM_ATTR];
+    float* C1_host = new float[total_num_pins * NUM_ATTR];
+    float* C2_host = new float[total_num_pins * NUM_ATTR];
     float* pinslew_host = new float[total_num_pins * NUM_ATTR];
     float* pinAt_host = new float[total_num_pins * NUM_ATTR];
     float* pinRat_host = new float[total_num_pins * NUM_ATTR];
@@ -592,8 +595,8 @@ void print_pinLoad_cuda(DmpModel* dmp_db, vector<int> level_list_end_cpu, vector
     cudaMemcpy(arcDelay_host, dmp_db_host->arcDelay, sizeof(float) * num_arcs * 2 * NUM_ATTR, cudaMemcpyDeviceToHost);
     cudaMemcpy(level_pin_list_host, dmp_db_host->level_list, sizeof(int) * total_num_pins, cudaMemcpyDeviceToHost);
     cudaMemcpy(pinLoad_host, dmp_db_host->timer_ceff, sizeof(float) * total_num_pins * NUM_ATTR, cudaMemcpyDeviceToHost);
-    cudaMemcpy(C1_host, dmp_db_host->C1, sizeof(double) * total_num_pins * NUM_ATTR, cudaMemcpyDeviceToHost);
-    cudaMemcpy(C2_host, dmp_db_host->C2, sizeof(double) * total_num_pins * NUM_ATTR, cudaMemcpyDeviceToHost);
+    cudaMemcpy(C1_host, dmp_db_host->C1, sizeof(float) * total_num_pins * NUM_ATTR, cudaMemcpyDeviceToHost);
+    cudaMemcpy(C2_host, dmp_db_host->C2, sizeof(float) * total_num_pins * NUM_ATTR, cudaMemcpyDeviceToHost);
     cudaMemcpy(pinslew_host, dmp_db_host->pinSlew, sizeof(float) * total_num_pins * NUM_ATTR, cudaMemcpyDeviceToHost);
     cudaMemcpy(pinAt_host, dmp_db_host->pinAt, sizeof(float) * total_num_pins * NUM_ATTR, cudaMemcpyDeviceToHost);
     cudaMemcpy(pinRat_host, dmp_db_host->pinRat, sizeof(float) * total_num_pins * NUM_ATTR, cudaMemcpyDeviceToHost);

@@ -224,7 +224,6 @@ class GPUTimer():
             raise ValueError("SPEF path is required for DMP SPEF timing.")
         self.timer.read_spef(self.params["spef"])
         self.timer.update_states()
-        self.timer.set_ideal_clock(False)
         if self.verbose:
             print("Updating DMP RC from SPEF...")
         self.timer.init_dmp_rc_spef()
@@ -237,7 +236,6 @@ class GPUTimer():
         if not gr_rc_file:
             raise ValueError("OpenROAD GR RC dump path is required.")
         self.timer.update_states()
-        self.timer.set_ideal_clock(True)
         if self.verbose:
             print(f"Updating DMP RC from OpenROAD GR RC: {gr_rc_file}")
         self.timer.init_dmp_rc_gr(gr_rc_file)
@@ -250,7 +248,6 @@ class GPUTimer():
         if not route_segments_file:
             raise ValueError("OpenROAD route segment path is required.")
         self.timer.update_states()
-        self.timer.set_ideal_clock(True)
         if self.verbose:
             print(f"Updating DMP RC from OpenROAD route segments: {route_segments_file}")
         self.timer.init_dmp_rc_route_segments(route_segments_file)

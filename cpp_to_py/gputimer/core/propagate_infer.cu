@@ -41,8 +41,7 @@ __device__ void propagateInferAT(
     index_type *at_prefix_arc,
     index_type *at_prefix_attr,
     GPULutAllocator *d_allocator,
-    bool ideal_clock,
-    int *pin_is_clk
+    int *pin_is_ideal_clk
 ) {
     /**
      * Forward pass: Propagate AT using ML-predicted arcDelay
@@ -51,9 +50,9 @@ __device__ void propagateInferAT(
      * NOTE: For net arcs, arcDelay only has valid values at indices [0,3,4,7]
      * corresponding to [er,ef,lr,lf]. Indices [1,2,5,6] are NaN and should be skipped.
      * Skip entire corner if arcDelay is NaN (delay not provided by ML model).
-     * If ideal_clock, skip propagation to register clock pins (AT stays at 0).
+     * If this is an ideal clock pin, skip propagation to it.
      */
-    if (ideal_clock && pin_is_clk[to_pin_id]) return;
+    if (pin_is_ideal_clk != nullptr && pin_is_ideal_clk[to_pin_id]) return;
 
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int i = idx & 0b111;
@@ -99,7 +98,7 @@ __device__ void propagateInferTest(
     float *testConstraint,
     float clock_period,
     GPULutAllocator *d_allocator,
-    bool ideal_clock
+    int *pin_is_ideal_clk
 ) {
     /**
      * Forward pass: Compute RAT at test constraint sinks using library delays
@@ -121,15 +120,20 @@ __device__ void propagateInferTest(
         if (frf && !d_allocator->d_is_falling_edge_triggered[timing_id]) return;
 
         const int fel_rf = (fel << 1) + frf;
-        if (!ideal_clock && (isnan(pinAt[from_pin_id * NUM_ATTR + fel_rf]) || isnan(pinSlew[from_pin_id * NUM_ATTR + fel_rf]))) return;
+        const bool ideal_clock_pin = pin_is_ideal_clk != nullptr && pin_is_ideal_clk[from_pin_id];
+        if (!ideal_clock_pin &&
+            (isnan(pinAt[from_pin_id * NUM_ATTR + fel_rf]) ||
+             isnan(pinSlew[from_pin_id * NUM_ATTR + fel_rf]))) return;
 
         if (el == 0) {
-            testRelatedAT[test_id * NUM_ATTR + i] = ideal_clock ? 0.0f : pinAt[from_pin_id * NUM_ATTR + fel_rf];
+            testRelatedAT[test_id * NUM_ATTR + i] =
+                ideal_clock_pin ? 0.0f : pinAt[from_pin_id * NUM_ATTR + fel_rf];
         } else {
-            testRelatedAT[test_id * NUM_ATTR + i] = ideal_clock ? clock_period : (pinAt[from_pin_id * NUM_ATTR + fel_rf] + clock_period);
+            testRelatedAT[test_id * NUM_ATTR + i] =
+                ideal_clock_pin ? clock_period : (pinAt[from_pin_id * NUM_ATTR + fel_rf] + clock_period);
         }
 
-        float sr = ideal_clock ? 0.0f : pinSlew[from_pin_id * NUM_ATTR + fel_rf];
+        float sr = ideal_clock_pin ? 0.0f : pinSlew[from_pin_id * NUM_ATTR + fel_rf];
         float sc = pinSlew[to_pin_id * NUM_ATTR + i];
         testConstraint[test_id * NUM_ATTR + i] = d_allocator->query(timing_id, frf, rf, sr, sc, 2);
 
@@ -154,8 +158,7 @@ __device__ void propagateInferRAT(
     float *arcDelay,
     int *timing_arc_id_map,
     float *from_rats,
-    GPULutAllocator *d_allocator,
-    bool ideal_clock
+    GPULutAllocator *d_allocator
 ) {
     /**
      * Backward pass: Propagate RAT using ML-predicted arcDelay + library constraints
@@ -195,12 +198,12 @@ __device__ void propagateInferRAT(
 __global__ void initIdealClockPins(
     float *pinAt,
     float *pinSlew,
-    int *pin_is_clk,
+    int *pin_is_ideal_clk,
     int num_pins,
     float half_period
 ) {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < num_pins && pin_is_clk[idx]) {
+    if (idx < num_pins && pin_is_ideal_clk[idx]) {
         // Rise edges: AT = 0, Fall edges: AT = T/2
         pinAt[idx * NUM_ATTR + 0] = 0.0f;          // early rise
         pinAt[idx * NUM_ATTR + 1] = half_period;    // early fall
@@ -216,17 +219,27 @@ __global__ void initClockSourceFallAT(
     index_type *level_list,
     float *pinAt,
     int *pin_is_clk,
+    int *pin_is_ideal_clk,
+    const float *pin_clock_fall_edges,
     int num_level0_pins,
     float half_period
 ) {
-    // For non-ideal clock: set fall-edge AT = T/2 at clock source pins (level 0 only).
+    // For propagated clocks: seed fall-edge AT at clock source pins (level 0 only).
     // Downstream clock pins get their fall AT from propagation (T/2 + accumulated delay).
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < num_level0_pins) {
         index_type pin_id = level_list[idx];
-        if (pin_is_clk[pin_id]) {
-            pinAt[pin_id * NUM_ATTR + 1] = half_period;  // early fall
-            pinAt[pin_id * NUM_ATTR + 3] = half_period;  // late fall
+        if (pin_is_clk[pin_id] && (pin_is_ideal_clk == nullptr || !pin_is_ideal_clk[pin_id])) {
+            float fall_edge = half_period;
+            if (pin_clock_fall_edges != nullptr && isfinite(pin_clock_fall_edges[pin_id])) {
+                fall_edge = pin_clock_fall_edges[pin_id];
+            }
+            if (isnan(pinAt[pin_id * NUM_ATTR + 1])) {
+                pinAt[pin_id * NUM_ATTR + 1] = fall_edge;  // early fall
+            }
+            if (isnan(pinAt[pin_id * NUM_ATTR + 3])) {
+                pinAt[pin_id * NUM_ATTR + 3] = fall_edge;  // late fall
+            }
         }
     }
 }
@@ -253,8 +266,7 @@ __global__ void propagatePinInferAT(
     int num_pins_level,
     float clock_period,
     GPULutAllocator *d_allocator,
-    bool ideal_clock,
-    int *pin_is_clk
+    int *pin_is_ideal_clk
 ) {
     /**
      * Forward pass kernel: Process all pins at current level
@@ -270,22 +282,21 @@ __global__ void propagatePinInferAT(
         // Iterate fanin arcs using CSR format
         for (index_type i = pin_backward_arc_list_end[pin_id];
              i < pin_backward_arc_list_end[pin_id + 1];
-             i++) {
+            i++) {
             index_type arc_id = pin_backward_arc_list[i];
             index_type from_pin_id = timing_arc_from_pin_id[arc_id];
-            int arc_type = arc_types[arc_id];
 
             // Each thread computes one corner via idx & 0b111
             propagateInferAT(arc_id, from_pin_id, pin_id, timing_arc_id_map, pinAt, arcDelay,
                            at_prefix_pin, at_prefix_arc, at_prefix_attr, d_allocator,
-                           ideal_clock, pin_is_clk);
+                           pin_is_ideal_clk);
 
             // For test constraint arcs, also compute RAT using library constraint info
             int test_id = arc_id2test_id[arc_id];
             if (clock_period > 0 && test_id != -1) {
                 propagateInferTest(arc_id, test_id, from_pin_id, pin_id, timing_arc_id_map,
                                  pinSlew, pinAt, pinRat, testRelatedAT, testRAT, testConstraint,
-                                 clock_period, d_allocator, ideal_clock);
+                                 clock_period, d_allocator, pin_is_ideal_clk);
             }
         }
     }
@@ -303,8 +314,7 @@ __global__ void propagatePinInferRAT(
     int *timing_arc_id_map,
     index_type level_start_offset,
     int num_pins_level,
-    GPULutAllocator *d_allocator,
-    bool ideal_clock
+    GPULutAllocator *d_allocator
 ) {
     /**
      * Backward pass kernel: Process all pins at current level (reversed)
@@ -328,7 +338,7 @@ __global__ void propagatePinInferRAT(
             __syncthreads();
 
             // Fill shared memory with RAT values (net arcs use atomicExch directly)
-            propagateInferRAT(arc_id, arc_type, from_pin_id, to_pin_id, pinAt, pinRat, arcDelay, timing_arc_id_map, from_rats, d_allocator, ideal_clock);
+            propagateInferRAT(arc_id, arc_type, from_pin_id, to_pin_id, pinAt, pinRat, arcDelay, timing_arc_id_map, from_rats, d_allocator);
 
             __syncthreads();
 
@@ -381,8 +391,9 @@ void propagate_infer_timing_impl(
     index_type *at_prefix_attr,
     float clock_period,
     GPULutAllocator *d_allocator,
-    bool ideal_clock,
     int *pin_is_clk,
+    int *pin_is_ideal_clk,
+    const float *pin_clock_fall_edges,
     int num_pins
 ) {
     /**
@@ -394,14 +405,13 @@ void propagate_infer_timing_impl(
 
     float half_period = clock_period / 2.0f;
 
-    if (ideal_clock) {
-        initIdealClockPins<<<BLOCK_NUMBER(num_pins), BLOCK_SIZE>>>(pinAt, pinSlew, pin_is_clk, num_pins, half_period);
-        cudaDeviceSynchronize();
-    }
-    else if (clock_period > 0) {
+    initIdealClockPins<<<BLOCK_NUMBER(num_pins), BLOCK_SIZE>>>(pinAt, pinSlew, pin_is_ideal_clk, num_pins, half_period);
+    cudaDeviceSynchronize();
+
+    if (clock_period > 0) {
         int num_level0 = level_list_end_cpu[1] - level_list_end_cpu[0];
         initClockSourceFallAT<<<BLOCK_NUMBER(num_level0), BLOCK_SIZE>>>(
-            level_list, pinAt, pin_is_clk, num_level0, half_period);
+            level_list, pinAt, pin_is_clk, pin_is_ideal_clk, pin_clock_fall_edges, num_level0, half_period);
         cudaDeviceSynchronize();
     }
 
@@ -431,8 +441,7 @@ void propagate_infer_timing_impl(
             num_pins_level,
             clock_period,
             d_allocator,
-            ideal_clock,
-            pin_is_clk
+            pin_is_ideal_clk
         );
         cudaDeviceSynchronize();
     }
@@ -458,8 +467,7 @@ void propagate_infer_timing_impl(
             timing_arc_id_map,
             level_start_offset,
             num_pins_level,
-            d_allocator,
-            ideal_clock
+            d_allocator
         );
         cudaDeviceSynchronize();
     }

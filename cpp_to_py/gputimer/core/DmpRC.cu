@@ -3,6 +3,7 @@
 #include "utils.cuh"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
 
@@ -47,6 +48,66 @@ static bool dmp_rc_profile_enabled()
     return dmp_rc_kernel_profile_enabled() ||
            dmp_rc_env_enabled("DMP_RC_PROFILE") ||
            dmp_rc_env_enabled("DMP_DEBUG_TIMING");
+}
+
+template <typename T>
+static void dmp_rc_cuda_malloc_checked(T** ptr, size_t count, const char* name)
+{
+    const size_t bytes = sizeof(T) * count;
+    if (count == 0) {
+        *ptr = nullptr;
+        return;
+    }
+    const cudaError_t err = cudaMalloc(reinterpret_cast<void**>(ptr), bytes);
+    if (err != cudaSuccess) {
+        std::fprintf(stderr,
+                     "[DMP RC INIT] cudaMalloc failed name=%s count=%zu elem=%zu bytes=%zu %.3f MiB error=%s\n",
+                     name,
+                     count,
+                     sizeof(T),
+                     bytes,
+                     static_cast<double>(bytes) / (1024.0 * 1024.0),
+                     cudaGetErrorString(err));
+        std::fflush(stderr);
+        std::exit(err);
+    }
+}
+
+static void dmp_rc_cuda_memcpy_checked(void* dst,
+                                       const void* src,
+                                       size_t bytes,
+                                       cudaMemcpyKind kind,
+                                       const char* name)
+{
+    if (bytes == 0) return;
+    const cudaError_t err = cudaMemcpy(dst, src, bytes, kind);
+    if (err != cudaSuccess) {
+        std::fprintf(stderr,
+                     "[DMP RC INIT] cudaMemcpy failed name=%s bytes=%zu %.3f MiB error=%s\n",
+                     name,
+                     bytes,
+                     static_cast<double>(bytes) / (1024.0 * 1024.0),
+                     cudaGetErrorString(err));
+        std::fflush(stderr);
+        std::exit(err);
+    }
+}
+
+static void dmp_rc_cuda_memset_checked(void* ptr, int value, size_t bytes, const char* name)
+{
+    if (bytes == 0) return;
+    const cudaError_t err = cudaMemset(ptr, value, bytes);
+    if (err != cudaSuccess) {
+        std::fprintf(stderr,
+                     "[DMP RC INIT] cudaMemset failed name=%s bytes=%zu %.3f MiB value=%d error=%s\n",
+                     name,
+                     bytes,
+                     static_cast<double>(bytes) / (1024.0 * 1024.0),
+                     value,
+                     cudaGetErrorString(err));
+        std::fflush(stderr);
+        std::exit(err);
+    }
 }
 
 static int dmp_rc_hist_bucket(int degree)
@@ -193,9 +254,9 @@ __host__ void DmpModel::initialize_rc(const std::vector<int>& host_edge_from,
         cudaMalloc(&y3, num_nodes * NUM_ATTR * sizeof(float));
         cudaMalloc(&down_cap, num_nodes * NUM_ATTR * sizeof(float));
         cudaMalloc(&elmore_delay, num_pins * NUM_ATTR * sizeof(float));
-        cudaMalloc(&C1, dmp_slot_capacity * sizeof(double));
-        cudaMalloc(&C2, dmp_slot_capacity * sizeof(double));
-        cudaMalloc(&r_pi, dmp_slot_capacity * sizeof(double));
+        cudaMalloc(&C1, dmp_slot_capacity * sizeof(float));
+        cudaMalloc(&C2, dmp_slot_capacity * sizeof(float));
+        cudaMalloc(&r_pi, dmp_slot_capacity * sizeof(float));
 
         cudaMemset(cnts, 0, num_nodes * sizeof(int));
         cudaMemset(node_order, 0, num_nodes * sizeof(int));
@@ -208,9 +269,9 @@ __host__ void DmpModel::initialize_rc(const std::vector<int>& host_edge_from,
         cudaMemset(y3, 0, num_nodes * NUM_ATTR * sizeof(float));
         cudaMemset(down_cap, 0, num_nodes * NUM_ATTR * sizeof(float));
         cudaMemset(elmore_delay, 0, num_pins * NUM_ATTR * sizeof(float));
-        cudaMemset(C1, 0, num_pins * NUM_ATTR * sizeof(double));
-        cudaMemset(C2, 0, num_pins * NUM_ATTR * sizeof(double));
-        cudaMemset(r_pi, 0, num_pins * NUM_ATTR * sizeof(double));
+        cudaMemset(C1, 0, num_pins * NUM_ATTR * sizeof(float));
+        cudaMemset(C2, 0, num_pins * NUM_ATTR * sizeof(float));
+        cudaMemset(r_pi, 0, num_pins * NUM_ATTR * sizeof(float));
         cudaMemset(root_dist, -1, num_nodes * sizeof(int));
       }
 
@@ -245,54 +306,54 @@ __host__ void DmpModel::initialize_rc_explicit(
         if (host_edge_res.size() != static_cast<size_t>(num_edges)) {
             throw std::runtime_error("initialize_rc_explicit edge_res must have num_edges values.");
         }
-        cudaMalloc(&edge_from, host_edge_from.size() * sizeof(int));
-        cudaMalloc(&edge_to, host_edge_to.size() * sizeof(int));
-        cudaMalloc(&flat_net2node_start_map, host_flat_net2node_start_map.size() * sizeof(int));
-        cudaMalloc(&flat_net2edge_start_map, host_flat_net2edge_start_map.size() * sizeof(int));
-        cudaMalloc(&node2pin_map, host_node2pin_map.size() * sizeof(int));
-        cudaMalloc(&edge_res, host_edge_res.size() * sizeof(float));
-        cudaMalloc(&node_cap, num_nodes * NUM_ATTR * sizeof(float));
-        cudaMalloc(&includes_pin_caps, num_nets * sizeof(uint8_t));
+        dmp_rc_cuda_malloc_checked(&edge_from, host_edge_from.size(), "edge_from");
+        dmp_rc_cuda_malloc_checked(&edge_to, host_edge_to.size(), "edge_to");
+        dmp_rc_cuda_malloc_checked(&flat_net2node_start_map, host_flat_net2node_start_map.size(), "flat_net2node_start_map");
+        dmp_rc_cuda_malloc_checked(&flat_net2edge_start_map, host_flat_net2edge_start_map.size(), "flat_net2edge_start_map");
+        dmp_rc_cuda_malloc_checked(&node2pin_map, host_node2pin_map.size(), "node2pin_map");
+        dmp_rc_cuda_malloc_checked(&edge_res, host_edge_res.size(), "edge_res");
+        dmp_rc_cuda_malloc_checked(&node_cap, static_cast<size_t>(num_nodes) * NUM_ATTR, "node_cap");
+        dmp_rc_cuda_malloc_checked(&includes_pin_caps, num_nets, "includes_pin_caps");
         edge_wl = nullptr;
 
-        cudaMemcpy(edge_from, host_edge_from.data(), host_edge_from.size() * sizeof(int), cudaMemcpyHostToDevice);
-        cudaMemcpy(edge_to, host_edge_to.data(), host_edge_to.size() * sizeof(int), cudaMemcpyHostToDevice);
-        cudaMemcpy(flat_net2node_start_map, host_flat_net2node_start_map.data(), host_flat_net2node_start_map.size() * sizeof(int), cudaMemcpyHostToDevice);
-        cudaMemcpy(flat_net2edge_start_map, host_flat_net2edge_start_map.data(), host_flat_net2edge_start_map.size() * sizeof(int), cudaMemcpyHostToDevice);
-        cudaMemcpy(node2pin_map, host_node2pin_map.data(), host_node2pin_map.size() * sizeof(int), cudaMemcpyHostToDevice);
-        cudaMemcpy(edge_res, host_edge_res.data(), host_edge_res.size() * sizeof(float), cudaMemcpyHostToDevice);
-        cudaMemcpy(node_cap, host_node_cap.data(), num_nodes * NUM_ATTR * sizeof(float), cudaMemcpyHostToDevice);
-        cudaMemcpy(includes_pin_caps, host_includes_pin_caps.data(), num_nets * sizeof(uint8_t), cudaMemcpyHostToDevice);
+        dmp_rc_cuda_memcpy_checked(edge_from, host_edge_from.data(), host_edge_from.size() * sizeof(int), cudaMemcpyHostToDevice, "edge_from");
+        dmp_rc_cuda_memcpy_checked(edge_to, host_edge_to.data(), host_edge_to.size() * sizeof(int), cudaMemcpyHostToDevice, "edge_to");
+        dmp_rc_cuda_memcpy_checked(flat_net2node_start_map, host_flat_net2node_start_map.data(), host_flat_net2node_start_map.size() * sizeof(int), cudaMemcpyHostToDevice, "flat_net2node_start_map");
+        dmp_rc_cuda_memcpy_checked(flat_net2edge_start_map, host_flat_net2edge_start_map.data(), host_flat_net2edge_start_map.size() * sizeof(int), cudaMemcpyHostToDevice, "flat_net2edge_start_map");
+        dmp_rc_cuda_memcpy_checked(node2pin_map, host_node2pin_map.data(), host_node2pin_map.size() * sizeof(int), cudaMemcpyHostToDevice, "node2pin_map");
+        dmp_rc_cuda_memcpy_checked(edge_res, host_edge_res.data(), host_edge_res.size() * sizeof(float), cudaMemcpyHostToDevice, "edge_res");
+        dmp_rc_cuda_memcpy_checked(node_cap, host_node_cap.data(), static_cast<size_t>(num_nodes) * NUM_ATTR * sizeof(float), cudaMemcpyHostToDevice, "node_cap");
+        dmp_rc_cuda_memcpy_checked(includes_pin_caps, host_includes_pin_caps.data(), static_cast<size_t>(num_nets) * sizeof(uint8_t), cudaMemcpyHostToDevice, "includes_pin_caps");
 
-        cudaMalloc(&root_dist, num_nodes * sizeof(int));
-        cudaMalloc(&cnts, num_nodes * sizeof(int));
-        cudaMalloc(&node_order, num_nodes * sizeof(int));
-        cudaMalloc(&parent_node, num_nodes * sizeof(int));
-        cudaMalloc(&res_parent, num_nodes * NUM_ATTR * sizeof(float));
-        cudaMalloc(&node_delay, num_nodes * NUM_ATTR * sizeof(float));
-        cudaMalloc(&y1, num_nodes * NUM_ATTR * sizeof(float));
-        cudaMalloc(&y2, num_nodes * NUM_ATTR * sizeof(float));
-        cudaMalloc(&y3, num_nodes * NUM_ATTR * sizeof(float));
-        cudaMalloc(&down_cap, num_nodes * NUM_ATTR * sizeof(float));
-        cudaMalloc(&elmore_delay, num_pins * NUM_ATTR * sizeof(float));
-        cudaMalloc(&C1, dmp_slot_capacity * sizeof(double));
-        cudaMalloc(&C2, dmp_slot_capacity * sizeof(double));
-        cudaMalloc(&r_pi, dmp_slot_capacity * sizeof(double));
+        dmp_rc_cuda_malloc_checked(&root_dist, num_nodes, "root_dist");
+        dmp_rc_cuda_malloc_checked(&cnts, num_nodes, "cnts");
+        dmp_rc_cuda_malloc_checked(&node_order, num_nodes, "node_order");
+        dmp_rc_cuda_malloc_checked(&parent_node, num_nodes, "parent_node");
+        dmp_rc_cuda_malloc_checked(&res_parent, static_cast<size_t>(num_nodes) * NUM_ATTR, "res_parent");
+        dmp_rc_cuda_malloc_checked(&node_delay, static_cast<size_t>(num_nodes) * NUM_ATTR, "node_delay");
+        dmp_rc_cuda_malloc_checked(&y1, static_cast<size_t>(num_nodes) * NUM_ATTR, "y1");
+        dmp_rc_cuda_malloc_checked(&y2, static_cast<size_t>(num_nodes) * NUM_ATTR, "y2");
+        dmp_rc_cuda_malloc_checked(&y3, static_cast<size_t>(num_nodes) * NUM_ATTR, "y3");
+        dmp_rc_cuda_malloc_checked(&down_cap, static_cast<size_t>(num_nodes) * NUM_ATTR, "down_cap");
+        dmp_rc_cuda_malloc_checked(&elmore_delay, static_cast<size_t>(num_pins) * NUM_ATTR, "elmore_delay");
+        dmp_rc_cuda_malloc_checked(&C1, dmp_slot_capacity, "C1");
+        dmp_rc_cuda_malloc_checked(&C2, dmp_slot_capacity, "C2");
+        dmp_rc_cuda_malloc_checked(&r_pi, dmp_slot_capacity, "r_pi");
 
-        cudaMemset(cnts, 0, num_nodes * sizeof(int));
-        cudaMemset(node_order, 0, num_nodes * sizeof(int));
-        cudaMemset(parent_node, -1, num_nodes * sizeof(int));
-        cudaMemset(res_parent, 0, num_nodes * NUM_ATTR * sizeof(float));
-        cudaMemset(node_delay, 0, num_nodes * NUM_ATTR * sizeof(float));
-        cudaMemset(y1, 0, num_nodes * NUM_ATTR * sizeof(float));
-        cudaMemset(y2, 0, num_nodes * NUM_ATTR * sizeof(float));
-        cudaMemset(y3, 0, num_nodes * NUM_ATTR * sizeof(float));
-        cudaMemset(down_cap, 0, num_nodes * NUM_ATTR * sizeof(float));
-        cudaMemset(elmore_delay, 0, num_pins * NUM_ATTR * sizeof(float));
-        cudaMemset(C1, 0, num_pins * NUM_ATTR * sizeof(double));
-        cudaMemset(C2, 0, num_pins * NUM_ATTR * sizeof(double));
-        cudaMemset(r_pi, 0, num_pins * NUM_ATTR * sizeof(double));
-        cudaMemset(root_dist, -1, num_nodes * sizeof(int));
+        dmp_rc_cuda_memset_checked(cnts, 0, static_cast<size_t>(num_nodes) * sizeof(int), "cnts");
+        dmp_rc_cuda_memset_checked(node_order, 0, static_cast<size_t>(num_nodes) * sizeof(int), "node_order");
+        dmp_rc_cuda_memset_checked(parent_node, -1, static_cast<size_t>(num_nodes) * sizeof(int), "parent_node");
+        dmp_rc_cuda_memset_checked(res_parent, 0, static_cast<size_t>(num_nodes) * NUM_ATTR * sizeof(float), "res_parent");
+        dmp_rc_cuda_memset_checked(node_delay, 0, static_cast<size_t>(num_nodes) * NUM_ATTR * sizeof(float), "node_delay");
+        dmp_rc_cuda_memset_checked(y1, 0, static_cast<size_t>(num_nodes) * NUM_ATTR * sizeof(float), "y1");
+        dmp_rc_cuda_memset_checked(y2, 0, static_cast<size_t>(num_nodes) * NUM_ATTR * sizeof(float), "y2");
+        dmp_rc_cuda_memset_checked(y3, 0, static_cast<size_t>(num_nodes) * NUM_ATTR * sizeof(float), "y3");
+        dmp_rc_cuda_memset_checked(down_cap, 0, static_cast<size_t>(num_nodes) * NUM_ATTR * sizeof(float), "down_cap");
+        dmp_rc_cuda_memset_checked(elmore_delay, 0, static_cast<size_t>(num_pins) * NUM_ATTR * sizeof(float), "elmore_delay");
+        dmp_rc_cuda_memset_checked(C1, 0, static_cast<size_t>(num_pins) * NUM_ATTR * sizeof(float), "C1");
+        dmp_rc_cuda_memset_checked(C2, 0, static_cast<size_t>(num_pins) * NUM_ATTR * sizeof(float), "C2");
+        dmp_rc_cuda_memset_checked(r_pi, 0, static_cast<size_t>(num_pins) * NUM_ATTR * sizeof(float), "r_pi");
+        dmp_rc_cuda_memset_checked(root_dist, -1, static_cast<size_t>(num_nodes) * sizeof(int), "root_dist");
       }
 
 void GPUTimer::initialize_dmp_rc(
@@ -322,8 +383,8 @@ void GPUTimer::initialize_dmp_rc(
                               unit_to_micron,
                               rf,
                               cf);
-    cudaMalloc(&dmp_db, sizeof(DmpModel));
-    cudaMemcpy(dmp_db, h_dmp_db, sizeof(DmpModel), cudaMemcpyHostToDevice);
+    dmp_rc_cuda_malloc_checked(&dmp_db, 1, "dmp_db");
+    dmp_rc_cuda_memcpy_checked(dmp_db, h_dmp_db, sizeof(DmpModel), cudaMemcpyHostToDevice, "dmp_db");
    
 }
 
@@ -674,11 +735,11 @@ void debug_dump_dmp_rc_net_cuda(DmpModel* h_dmp_db,
     }
 
     int root_pin = node2pin_host[0];
-    double c1[NUM_ATTR] = {0.0}, c2[NUM_ATTR] = {0.0}, rpi[NUM_ATTR] = {0.0};
+    float c1[NUM_ATTR] = {0.0f}, c2[NUM_ATTR] = {0.0f}, rpi[NUM_ATTR] = {0.0f};
     if (root_pin >= 0) {
-        gpuErrchk(cudaMemcpy(c1, h_dmp_db->C1 + root_pin * NUM_ATTR, NUM_ATTR * sizeof(double), cudaMemcpyDeviceToHost));
-        gpuErrchk(cudaMemcpy(c2, h_dmp_db->C2 + root_pin * NUM_ATTR, NUM_ATTR * sizeof(double), cudaMemcpyDeviceToHost));
-        gpuErrchk(cudaMemcpy(rpi, h_dmp_db->r_pi + root_pin * NUM_ATTR, NUM_ATTR * sizeof(double), cudaMemcpyDeviceToHost));
+        gpuErrchk(cudaMemcpy(c1, h_dmp_db->C1 + root_pin * NUM_ATTR, NUM_ATTR * sizeof(float), cudaMemcpyDeviceToHost));
+        gpuErrchk(cudaMemcpy(c2, h_dmp_db->C2 + root_pin * NUM_ATTR, NUM_ATTR * sizeof(float), cudaMemcpyDeviceToHost));
+        gpuErrchk(cudaMemcpy(rpi, h_dmp_db->r_pi + root_pin * NUM_ATTR, NUM_ATTR * sizeof(float), cudaMemcpyDeviceToHost));
     }
     uint8_t includes_pin_caps_flag = 0;
     if (h_dmp_db->includes_pin_caps) {

@@ -42,6 +42,7 @@ proc sdc_callback {cmd parsing_result} {
     set_case_analysis -
     set_false_path -
     set_ideal_network -
+    set_propagated_clock -
     set_load -
     set_units { 
 

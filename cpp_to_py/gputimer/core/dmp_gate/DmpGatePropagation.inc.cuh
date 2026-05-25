@@ -1,9 +1,8 @@
 __device__ __forceinline__ bool dmpIsIdealClockTimingArc(const DmpModel* dmp_db,
                                                          int timing_id,
                                                          int from_pin_id) {
-    return dmp_db->ideal_clock &&
-           dmp_db->pin_is_clk != nullptr &&
-           dmp_db->pin_is_clk[from_pin_id] &&
+    return dmp_db->pin_is_ideal_clk != nullptr &&
+           dmp_db->pin_is_ideal_clk[from_pin_id] &&
            timing_id >= 0;
 }
 

@@ -21,13 +21,16 @@ class GPUPowerLutAllocator;
 class DmpModel;
 
 struct GpuPowerExprOpHost {
-    uint8_t op = 0;   // 0=pin, 1=const0, 2=const1, 3=not, 4=and, 5=or, 6=xor
+    uint8_t op = 0;   // 0=pin, 1=const0, 2=const1, 3=not, 4=and, 5=or, 6=xor, 7=missing pin
+    uint8_t zero_density = 0;
     int arg = -1;     // physical pin id for op=pin
+    int var_key = -1; // Liberty port id for BDD variable identity/order
 };
 
 struct GpuPowerSeqHost {
     int data_expr_id = -1;
     int clk_expr_id = -1;
+    int node_id = -1;
     int q_pin = -1;
     int qn_pin = -1;
     uint8_t is_latch = 0;
@@ -94,7 +97,14 @@ public:
     // === functions ===
     void initialize();
     void levelize();
-    void levelize_power(const uint8_t* d_is_seq_output_pin);
+    void levelize_power(const uint8_t* d_is_seq_output_pin,
+                        const int* d_power_arc_types,
+                        const int* d_power_arc_id2test_id,
+                        const uint8_t* d_is_load_pin,
+                        const int* d_pin2net_map,
+                        const int* d_net_driver_pin,
+                        const int* d_flat_net2pin_start_map,
+                        const int* d_flat_net2pin_map);
     void update_rc_timing(torch::Tensor node_lpos, bool record = false, bool load = false, bool conpensation = false);
     void update_rc_timing_flute(torch::Tensor node_lpos, bool record = false);
     void update_rc_timing_spef();
@@ -126,6 +136,7 @@ public:
     torch::Tensor report_delay();
     tuple<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t> report_power_liberty_inventory();
     int64_t report_power_seq_inventory();
+    torch::Tensor report_power_group_codes();
     torch::Tensor report_power_internal_lut_cuda_probe();
     torch::Tensor report_power_activity_cpu();
     torch::Tensor report_power_activity_cuda();
@@ -239,11 +250,9 @@ public:
     vector<int> power_level_root_pins_cpu;
     int* net_is_clock;
     int* pin_is_clk;  // GPU array: 1 if register clock pin, 0 otherwise
+    int* pin_is_ideal_clk;  // GPU array: 1 if register clock pin remains ideal
 
     float clock_period;
-    bool ideal_clock = false;
-
-    void set_ideal_clock(bool v) { ideal_clock = v; }
 
 public:
     float* x;
@@ -302,6 +311,7 @@ public:
 public:
 
     void initialize_dmp_model();
+    void release_dmp_timing_scratch_for_power();
     void initialize_dmp_rc(
                   const std::vector<int>& host_edge_from,
                   const std::vector<int>& host_edge_to,

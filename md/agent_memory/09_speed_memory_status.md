@@ -19,6 +19,18 @@ peak sampled CPU RSS about 169.7/171.5 GiB
 peak sampled GPU memory about 77.3/77.7 GiB
 ```
 
+2026-05-24 route-power cluster reruns now complete under occupied GPU1 after
+the DMP memory reductions and release-before-power path. Current measured
+peaks with another user's process resident:
+
+```text
+visible/mempool_cluster: wall 769s, peak RSS 128.98 GiB, peak GPU 47.85 GiB
+blind/mempool_cluster:   wall 902s, peak RSS 129.90 GiB, peak GPU 48.00 GiB
+```
+
+Both runs used default CUDA power and `--no-instance-power-csv`; the extra
+OpenROAD CSV group-oracle reconstruction took about 67s/70s on CPU.
+
 - Removed dead per-slot thresholds and waveform scratch arrays
   (`k*`, `p*`, `A/B/D`, `rd/t0/dt`, `ceff`, `vo_*`, `dmp_alg_kind`).
 - Replaced per-pin/per-timing threshold copies with pin/timing library-id
