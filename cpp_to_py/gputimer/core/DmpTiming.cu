@@ -343,14 +343,6 @@ void update_timing_dmp_cuda(GPUTimer* timer){
         gpuErrchk(cudaMemset(h_entry_dmp.pin_at_winner, 0,
                              sizeof(unsigned long long) * h_entry_dmp.dmp_pin_slot_count));
     }
-    if (h_entry_dmp.pin_slew_winner != nullptr && h_entry_dmp.dmp_pin_slot_count > 0) {
-        gpuErrchk(cudaMemset(h_entry_dmp.pin_slew_winner, 0,
-                             sizeof(unsigned long long) * h_entry_dmp.dmp_pin_slot_count));
-    }
-    if (h_entry_dmp.arc_delay_winner != nullptr && h_entry_dmp.num_arcs > 0) {
-        gpuErrchk(cudaMemset(h_entry_dmp.arc_delay_winner, 0,
-                             sizeof(unsigned long long) * h_entry_dmp.num_arcs * NUM_ATTR));
-    }
     if (debug_timing) {
         dmp_debug_print_counts(dmp_db, "entry");
         dmp_debug_print_parallel_stats(dmp_db, level_list_end_cpu, "entry");
@@ -358,6 +350,12 @@ void update_timing_dmp_cuda(GPUTimer* timer){
     unsigned long long* d_gate_net_pair_debug_counts = nullptr;
     unsigned long long gate_net_pair_debug_counts[DMP_GNP_DEBUG_COUNTERS] = {0ULL, 0ULL, 0ULL, 0ULL};
     DmpForwardArcLevels* forward_arc_levels = &dmp_get_forward_schedule(timer);
+    const int reset_work_items = h_entry_dmp.dmp_pin_slot_count + h_entry_dmp.num_arcs * 2 * NUM_ATTR;
+    if (reset_work_items > 0) {
+        const int reset_blocks = DMP_TIMING_BLOCK_NUMBER(reset_work_items);
+        dmpResetForwardTargetsKernel<<<reset_blocks, DMP_TIMING_BLOCK_SIZE>>>(dmp_db);
+        gpuErrchk(cudaGetLastError());
+    }
     if (debug_timing) {
         gpuErrchk(cudaMalloc(&d_gate_net_pair_debug_counts,
                              sizeof(unsigned long long) * DMP_GNP_DEBUG_COUNTERS));

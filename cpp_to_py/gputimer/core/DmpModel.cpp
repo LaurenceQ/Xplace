@@ -56,11 +56,13 @@ void compute_pi_model_cuda(DmpModel* dmp_db, int num_nets);
 
 void update_timing_dmp_cuda(GPUTimer* timer);
 void print_pinLoad_cuda(DmpModel* dmp_db, vector<int> level_list_end_cpu, vector<string> pin_names);
+static void apply_dmp_driving_cell_source_slew(GPUTimer& timer);
 void GPUTimer::update_timing_dmp(){
     if (dmp_progress_enabled()) {
         printf("Update timing DMP started.\n");
         fflush(stdout);
     }
+    apply_dmp_driving_cell_source_slew(*this);
     update_timing_dmp_cuda(this);
 }
 void GPUTimer::print_pinLoad(){

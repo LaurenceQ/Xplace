@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cmath>
+#include <cstring>
 #include <limits>
 #include <string>
 #include <vector>
@@ -186,6 +188,17 @@ static bool dmpDeviceNamesEnabled()
              value[0] == 'n' || value[0] == 'N');
 }
 
+static constexpr bool DMP_UPLOAD_NAMES_FOR_DIRECT_CLOCK_DEBUG = false;
+static constexpr bool DMP_UPLOAD_NAMES_FOR_DRIVING_CELL_DEBUG = false;
+
+static bool dmpShouldUploadDeviceNames(bool debug_on)
+{
+    return debug_on ||
+           DMP_UPLOAD_NAMES_FOR_DIRECT_CLOCK_DEBUG ||
+           DMP_UPLOAD_NAMES_FOR_DRIVING_CELL_DEBUG ||
+           dmpDeviceNamesEnabled();
+}
+
 static bool dmpDeferTimingAlloc()
 {
     const char* value = std::getenv("DMP_DEFER_TIMING_ALLOC");
@@ -197,10 +210,10 @@ static bool dmpDeferTimingAlloc()
              value[0] == 'n' || value[0] == 'N');
 }
 __host__ DmpModel::DmpModel(GPUTimer* timer)
-        : flat_net2pin_start_map(timer -> flat_net2pin_start_map), 
-        flat_net2pin_map(timer -> flat_net2pin_map), 
+        : flat_net2pin_start_map(timer -> flat_net2pin_start_map),
+        flat_net2pin_map(timer -> flat_net2pin_map),
         pin2net_map(timer -> pin2net_map),
-        num_pins(timer -> num_pins), 
+        num_pins(timer -> num_pins),
         num_nets(timer -> num_nets),
         num_arcs(timer -> num_arcs),
         num_tests(timer -> num_tests),
@@ -224,13 +237,14 @@ __host__ DmpModel::DmpModel(GPUTimer* timer)
         testRelatedAT(timer -> testRelatedAT),
         testRAT(timer -> testRAT),
         testConstraint(timer -> testConstraint),
-        test_clock_periods(timer -> test_clock_periods),
-        test_setup_uncertainties(timer -> test_setup_uncertainties),
-        test_hold_uncertainties(timer -> test_hold_uncertainties),
-        pin_clock_periods(timer -> pin_clock_periods),
+        test_clock_ids(nullptr),
+        clock_periods(nullptr),
+        clock_count(0),
         pin_clock_rise_edges(timer -> pin_clock_rise_edges),
         pin_clock_fall_edges(timer -> pin_clock_fall_edges),
         pin_clock_slews(timer -> pin_clock_slews),
+        test_setup_uncertainties(timer -> test_setup_uncertainties),
+        test_hold_uncertainties(timer -> test_hold_uncertainties),
         arcDelay(timer -> arcDelay),
         timing_arc_id_map(timer -> timing_arc_id_map),
         at_prefix_pin(timer -> at_prefix_pin),
@@ -248,8 +262,6 @@ __host__ DmpModel::DmpModel(GPUTimer* timer)
         dmp_library_slew_lower_thresholds(timer -> dmp_library_slew_lower_thresholds),
         dmp_library_slew_upper_thresholds(timer -> dmp_library_slew_upper_thresholds),
         dmp_library_slew_derates(timer -> dmp_library_slew_derates),
-        pin_is_clk(timer -> pin_is_clk),
-        pin_is_ideal_clk(timer -> pin_is_ideal_clk),
         clock_period(timer -> clock_period),
         d_allocator(timer -> d_allocator),
         res_unit(timer -> res_unit),
@@ -292,13 +304,6 @@ __host__ DmpModel::DmpModel(GPUTimer* timer)
     }
     C1 = C2 = r_pi = nullptr;
     pin_at_winner = nullptr;
-    pin_slew_winner = nullptr;
-    arc_delay_winner = nullptr;
-    driving_cell_timing_id = nullptr;
-    driving_cell_input_rf = nullptr;
-    driving_cell_input_slew = nullptr;
-    pin_ids = nullptr;
-    arc_ids = nullptr;
     pin_names = nullptr;
     net_names = nullptr;
     edge_from = nullptr;
@@ -321,17 +326,50 @@ __host__ DmpModel::DmpModel(GPUTimer* timer)
     y3 = nullptr;
     down_cap = nullptr;
     elmore_delay = nullptr;
-    dmpCudaMallocChecked(&pin_is_primary_input, num_pins, "pin_is_primary_input");
-    std::vector<int> host_pin_is_primary_input(num_pins, 0);
+    dmpCudaMallocChecked(&pin_flags, num_pins, "pin_flags");
+    std::vector<uint8_t> host_pin_flags(num_pins, 0);
     for (int pin_id : timer->gtdb.primary_inputs) {
         if (pin_id >= 0 && pin_id < num_pins) {
-            host_pin_is_primary_input[pin_id] = 1;
+            host_pin_flags[pin_id] |= DMP_PIN_PRIMARY_INPUT;
         }
     }
-    cudaMemcpy(pin_is_primary_input,
-               host_pin_is_primary_input.data(),
-               sizeof(int) * num_pins,
+    for (int pin_id = 0; pin_id < num_pins; ++pin_id) {
+        if (pin_id < static_cast<int>(timer->gtdb.pin_is_clk.size()) &&
+            timer->gtdb.pin_is_clk[pin_id]) {
+            host_pin_flags[pin_id] |= DMP_PIN_CLK;
+        }
+        if (pin_id < static_cast<int>(timer->gtdb.pin_is_ideal_clk.size()) &&
+            timer->gtdb.pin_is_ideal_clk[pin_id]) {
+            host_pin_flags[pin_id] |= DMP_PIN_IDEAL_CLK;
+        }
+    }
+    cudaMemcpy(pin_flags,
+               host_pin_flags.data(),
+               sizeof(uint8_t) * num_pins,
                cudaMemcpyHostToDevice);
+    const std::vector<float>& host_clock_periods = timer->gtdb.clock_periods;
+    std::vector<uint8_t> host_test_clock_ids(num_tests, std::numeric_limits<uint8_t>::max());
+    const int host_test_clock_id_count = static_cast<int>(timer->gtdb.test_clock_ids.size());
+    for (int test_id = 0; test_id < num_tests; ++test_id) {
+        if (test_id < host_test_clock_id_count) {
+            host_test_clock_ids[test_id] = timer->gtdb.test_clock_ids[test_id];
+        }
+    }
+    clock_count = static_cast<int>(host_clock_periods.size());
+    dmpCudaMallocChecked(&clock_periods, host_clock_periods.size(), "clock_periods");
+    if (!host_clock_periods.empty()) {
+        cudaMemcpy(clock_periods,
+                   host_clock_periods.data(),
+                   sizeof(float) * host_clock_periods.size(),
+                   cudaMemcpyHostToDevice);
+    }
+    dmpCudaMallocChecked(&test_clock_ids, host_test_clock_ids.size(), "test_clock_ids");
+    if (!host_test_clock_ids.empty()) {
+        cudaMemcpy(test_clock_ids,
+                   host_test_clock_ids.data(),
+                   sizeof(uint8_t) * host_test_clock_ids.size(),
+                   cudaMemcpyHostToDevice);
+    }
     if (dmpDeferTimingAlloc()) {
         if (dmpInitSummaryEnabled()) {
             std::fprintf(stderr, "[DMP INIT] timing scratch allocation deferred until after RC propagation\n");
@@ -339,7 +377,7 @@ __host__ DmpModel::DmpModel(GPUTimer* timer)
         return;
     }
     allocate_timing_scratch();
-    if (!debug_on && !dmpDeviceNamesEnabled()) {
+    if (!dmpShouldUploadDeviceNames(debug_on)) {
         return;
     }
     // host-side
@@ -381,26 +419,7 @@ void DmpModel::allocate_timing_scratch()
                      dmp_work_slot_capacity);
     }
     dmpCudaMallocChecked(&pin_at_winner, dmp_pin_slot_count, "pin_at_winner");
-    dmpCudaMallocChecked(&pin_slew_winner, dmp_pin_slot_count, "pin_slew_winner");
-    const long long arc_delay_winner_count_ll =
-        static_cast<long long>(num_arcs) * NUM_ATTR;
-    dmpCudaMallocChecked(&arc_delay_winner, arc_delay_winner_count_ll, "arc_delay_winner");
-    dmpCudaMallocChecked(&driving_cell_timing_id, dmp_pin_slot_count, "driving_cell_timing_id");
-    dmpCudaMallocChecked(&driving_cell_input_rf, dmp_pin_slot_count, "driving_cell_input_rf");
-    dmpCudaMallocChecked(&driving_cell_input_slew, dmp_pin_slot_count, "driving_cell_input_slew");
-    dmpCudaMallocChecked(&pin_ids, dmp_work_slot_capacity, "pin_ids");
-    dmpCudaMallocChecked(&arc_ids, dmp_work_slot_capacity, "arc_ids");
     dmpCudaMemsetChecked(pin_at_winner, 0, dmp_pin_slot_count, "pin_at_winner");
-    dmpCudaMemsetChecked(pin_slew_winner, 0, dmp_pin_slot_count, "pin_slew_winner");
-    dmpCudaMemsetChecked(driving_cell_timing_id, -1, dmp_pin_slot_count, "driving_cell_timing_id");
-    dmpCudaMemsetChecked(driving_cell_input_rf, -1, dmp_pin_slot_count, "driving_cell_input_rf");
-    dmpCudaMemsetChecked(driving_cell_input_slew, 0, dmp_pin_slot_count, "driving_cell_input_slew");
-    if (arc_delay_winner != nullptr) {
-        dmpCudaMemsetChecked(arc_delay_winner,
-                             0,
-                             static_cast<long long>(num_arcs) * NUM_ATTR,
-                             "arc_delay_winner");
-    }
     if (dmpInitMemProfileEnabled()) {
         dmpPrintCudaMemInfo("after_timing_scratch_alloc");
     }
@@ -413,6 +432,7 @@ void DmpModel::release_rc_transient()
     cudaFree(flat_net2node_start_map);
     cudaFree(flat_net2edge_start_map);
     cudaFree(node2pin_map);
+    cudaFree(edge_wl);
     cudaFree(edge_res);
     cudaFree(node_cap);
     cudaFree(includes_pin_caps);
@@ -431,6 +451,7 @@ void DmpModel::release_rc_transient()
     flat_net2node_start_map = nullptr;
     flat_net2edge_start_map = nullptr;
     node2pin_map = nullptr;
+    edge_wl = nullptr;
     edge_res = nullptr;
     node_cap = nullptr;
     includes_pin_caps = nullptr;
@@ -452,25 +473,16 @@ void DmpModel::release_rc_transient()
 void DmpModel::release_after_timing()
 {
     cudaFree(pin_at_winner);
-    cudaFree(pin_slew_winner);
-    cudaFree(arc_delay_winner);
-    cudaFree(driving_cell_timing_id);
-    cudaFree(driving_cell_input_rf);
-    cudaFree(driving_cell_input_slew);
-    cudaFree(pin_is_primary_input);
-    cudaFree(pin_ids);
-    cudaFree(arc_ids);
+    cudaFree(pin_flags);
+    cudaFree(test_clock_ids);
+    cudaFree(clock_periods);
     cudaFree(r_pi);
     cudaFree(elmore_delay);
     pin_at_winner = nullptr;
-    pin_slew_winner = nullptr;
-    arc_delay_winner = nullptr;
-    driving_cell_timing_id = nullptr;
-    driving_cell_input_rf = nullptr;
-    driving_cell_input_slew = nullptr;
-    pin_is_primary_input = nullptr;
-    pin_ids = nullptr;
-    arc_ids = nullptr;
+    pin_flags = nullptr;
+    test_clock_ids = nullptr;
+    clock_periods = nullptr;
+    clock_count = 0;
     r_pi = nullptr;
     elmore_delay = nullptr;
     if (dmpInitMemProfileEnabled()) {
@@ -483,6 +495,12 @@ void dmp_prepare_timing_after_rc(DmpModel* h_dmp_db, DmpModel* dmp_db)
     if (h_dmp_db == nullptr || dmp_db == nullptr) {
         return;
     }
+    DmpModel device_state;
+    gpuErrchk(cudaMemcpy(&device_state, dmp_db, sizeof(DmpModel), cudaMemcpyDeviceToHost));
+    device_state.owns_allocations = false;
+    const bool owns_allocations = h_dmp_db->owns_allocations;
+    std::memcpy(h_dmp_db, &device_state, sizeof(DmpModel));
+    h_dmp_db->owns_allocations = owns_allocations;
     h_dmp_db->release_rc_transient();
     h_dmp_db->allocate_timing_scratch();
     gpuErrchk(cudaMemcpy(dmp_db, h_dmp_db, sizeof(DmpModel), cudaMemcpyHostToDevice));
@@ -503,15 +521,10 @@ __host__ DmpModel::~DmpModel(){
         if (r_pi) cudaFree(r_pi);
         if (elmore_delay) cudaFree(elmore_delay);
         cudaFree(pin_at_winner);
-        cudaFree(pin_slew_winner);
-        cudaFree(arc_delay_winner);
-        cudaFree(driving_cell_timing_id);
-        cudaFree(driving_cell_input_rf);
-        cudaFree(driving_cell_input_slew);
-        cudaFree(pin_is_primary_input);
-        cudaFree(pin_ids);
-        cudaFree(arc_ids);
-    } 
+        cudaFree(pin_flags);
+        cudaFree(test_clock_ids);
+        cudaFree(clock_periods);
+            }
 }
 
 void GPUTimer::release_dmp_timing_scratch_for_power()
@@ -524,7 +537,7 @@ void GPUTimer::initialize_dmp_model(){
     h_dmp_db = new DmpModel(this);
     cudaMalloc(&dmp_db, sizeof(DmpModel));
     cudaMemcpy(dmp_db, h_dmp_db, sizeof(DmpModel), cudaMemcpyHostToDevice);
-    
+
 }
 // __device__ void DmpModel::compute_pi_model(int net_id, int el_rf){
 //     int start_id = flat_net2pin_start_map[net_id];

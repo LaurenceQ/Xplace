@@ -1,10 +1,268 @@
-#include "DmpCudaUtils.cuh"
+#include "DmpGateModel.cuh"
 
 #include <algorithm>
 #include <cstdio>
 #include <vector>
 
 namespace gt {
+
+#ifndef DMP_DIRECT_CLOCK_DEBUG_PRINT
+#define DMP_DIRECT_CLOCK_DEBUG_PRINT 0
+#endif
+
+#ifndef DMP_DRIVING_CELL_DEBUG_PRINT
+#define DMP_DRIVING_CELL_DEBUG_PRINT 0
+#endif
+
+#ifndef DMP_ROOT_SOLVE_PROFILE
+#define DMP_ROOT_SOLVE_PROFILE 0
+#endif
+
+enum DmpRootProfileCounter {
+    DMP_ROOT_VO_CALLS = 0,
+    DMP_ROOT_VO_SUCCESS = 1,
+    DMP_ROOT_VO_ITERS = 2,
+    DMP_ROOT_VO_BRACKET_FAIL = 3,
+    DMP_ROOT_VO_ENDPOINT_HIT = 4,
+    DMP_ROOT_VO_MAXITER_FAIL = 5,
+    DMP_ROOT_ONEPOLE_CALLS = 6,
+    DMP_ROOT_ONEPOLE_SUCCESS = 7,
+    DMP_ROOT_ONEPOLE_ITERS = 8,
+    DMP_ROOT_ONEPOLE_FAIL = 9,
+    DMP_ROOT_PI_CALLS = 10,
+    DMP_ROOT_PI_SUCCESS = 11,
+    DMP_ROOT_PI_ITERS = 12,
+    DMP_ROOT_PI_FAIL = 13,
+    DMP_ROOT_PROFILE_COUNT = 14
+};
+
+#if DMP_ROOT_SOLVE_PROFILE
+__device__ unsigned long long dmp_root_profile_counts[DMP_ROOT_PROFILE_COUNT];
+
+__global__ void resetDmpRootProfileKernel()
+{
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < DMP_ROOT_PROFILE_COUNT) {
+        dmp_root_profile_counts[idx] = 0ULL;
+    }
+}
+
+__global__ void copyDmpRootProfileKernel(unsigned long long* out)
+{
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < DMP_ROOT_PROFILE_COUNT) {
+        out[idx] = dmp_root_profile_counts[idx];
+    }
+}
+#endif
+
+__device__ void dmpRootProfileAddCounter(int counter, unsigned long long value) {
+#if DMP_ROOT_SOLVE_PROFILE
+    atomicAdd(&dmp_root_profile_counts[counter], value);
+#else
+    (void)counter;
+    (void)value;
+#endif
+}
+
+__device__ void dmpRootProfileVoCall() {
+    dmpRootProfileAddCounter(DMP_ROOT_VO_CALLS, 1ULL);
+}
+
+__device__ void dmpRootProfileVoSuccess() {
+    dmpRootProfileAddCounter(DMP_ROOT_VO_SUCCESS, 1ULL);
+}
+
+__device__ void dmpRootProfileVoIters(unsigned long long value) {
+    dmpRootProfileAddCounter(DMP_ROOT_VO_ITERS, value);
+}
+
+__device__ void dmpRootProfileVoBracketFail() {
+    dmpRootProfileAddCounter(DMP_ROOT_VO_BRACKET_FAIL, 1ULL);
+}
+
+__device__ void dmpRootProfileVoEndpointHit() {
+    dmpRootProfileAddCounter(DMP_ROOT_VO_ENDPOINT_HIT, 1ULL);
+}
+
+__device__ void dmpRootProfileVoMaxIterFail() {
+    dmpRootProfileAddCounter(DMP_ROOT_VO_MAXITER_FAIL, 1ULL);
+}
+
+void reset_dmp_root_profile_cuda()
+{
+#if DMP_ROOT_SOLVE_PROFILE
+    resetDmpRootProfileKernel<<<1, 32>>>();
+    gpuErrchk(cudaGetLastError());
+    gpuErrchk(cudaDeviceSynchronize());
+#endif
+}
+
+void print_dmp_root_profile_cuda()
+{
+#if DMP_ROOT_SOLVE_PROFILE
+    unsigned long long counts[DMP_ROOT_PROFILE_COUNT] = {};
+    unsigned long long* d_counts = nullptr;
+    gpuErrchk(cudaMalloc(&d_counts, sizeof(unsigned long long) * DMP_ROOT_PROFILE_COUNT));
+    copyDmpRootProfileKernel<<<1, 32>>>(d_counts);
+    gpuErrchk(cudaGetLastError());
+    gpuErrchk(cudaDeviceSynchronize());
+    gpuErrchk(cudaMemcpy(counts,
+                         d_counts,
+                         sizeof(unsigned long long) * DMP_ROOT_PROFILE_COUNT,
+                         cudaMemcpyDeviceToHost));
+    gpuErrchk(cudaFree(d_counts));
+    const auto avg = [](unsigned long long total, unsigned long long calls) {
+        return calls == 0ULL ? 0.0 : static_cast<double>(total) / static_cast<double>(calls);
+    };
+    printf("[DMP ROOT PROFILE] vo calls=%llu success=%llu avg_iter_success=%.3f bracket_fail=%llu endpoint=%llu maxiter_fail=%llu\n",
+           counts[DMP_ROOT_VO_CALLS],
+           counts[DMP_ROOT_VO_SUCCESS],
+           avg(counts[DMP_ROOT_VO_ITERS], counts[DMP_ROOT_VO_SUCCESS]),
+           counts[DMP_ROOT_VO_BRACKET_FAIL],
+           counts[DMP_ROOT_VO_ENDPOINT_HIT],
+           counts[DMP_ROOT_VO_MAXITER_FAIL]);
+    printf("[DMP ROOT PROFILE] onepole calls=%llu success=%llu avg_iter_success=%.3f fail=%llu\n",
+           counts[DMP_ROOT_ONEPOLE_CALLS],
+           counts[DMP_ROOT_ONEPOLE_SUCCESS],
+           avg(counts[DMP_ROOT_ONEPOLE_ITERS], counts[DMP_ROOT_ONEPOLE_SUCCESS]),
+           counts[DMP_ROOT_ONEPOLE_FAIL]);
+    printf("[DMP ROOT PROFILE] pi calls=%llu success=%llu avg_iter_success=%.3f fail=%llu\n",
+           counts[DMP_ROOT_PI_CALLS],
+           counts[DMP_ROOT_PI_SUCCESS],
+           avg(counts[DMP_ROOT_PI_ITERS], counts[DMP_ROOT_PI_SUCCESS]),
+           counts[DMP_ROOT_PI_FAIL]);
+#else
+    printf("[DMP ROOT PROFILE] disabled at compile time; set DMP_ROOT_SOLVE_PROFILE=1 for a profiling build.\n");
+#endif
+    fflush(stdout);
+}
+
+__device__ void dmpGateNetPairCount(unsigned long long* counts, int counter) {
+    if (counts != nullptr) {
+        atomicAdd(&counts[counter], 1ULL);
+    }
+}
+
+__device__ void dmpDrivingCellCount(unsigned long long* counts, int counter) {
+    if (counts != nullptr) {
+        atomicAdd(&counts[counter], 1ULL);
+    }
+}
+
+__device__ __forceinline__ bool dmpDebugStringEquals(const char* lhs, const char* rhs) {
+    if (lhs == nullptr || rhs == nullptr) {
+        return false;
+    }
+    int idx = 0;
+    while (lhs[idx] != '\0' && rhs[idx] != '\0') {
+        if (lhs[idx] != rhs[idx]) {
+            return false;
+        }
+        ++idx;
+    }
+    return lhs[idx] == rhs[idx];
+}
+
+__device__ void dmpDebugPrintDirectClock(const DmpModel* dmp_db,
+                                         int from_pin_id,
+                                         int to_pin_id,
+                                         int from_slot,
+                                         int attr,
+                                         float source_slew,
+                                         double final_slew,
+                                         double elmore,
+                                         double extra_delay,
+                                         double vo_delay,
+                                         double final_delay,
+                                         int alg,
+                                         bool used_dmp_load,
+                                         bool used_driving_cell) {
+    if (!DMP_DIRECT_CLOCK_DEBUG_PRINT ||
+        dmp_db == nullptr ||
+        dmp_db->pin_names == nullptr ||
+        from_pin_id < 0 ||
+        to_pin_id < 0 ||
+        !dmpDebugStringEquals(dmp_db->pin_names[from_pin_id], "clk") ||
+        !dmpDebugStringEquals(dmp_db->pin_names[to_pin_id], "clkbuf_0_clk:A")) {
+        return;
+    }
+    const float src_at = dmp_db->pinAt != nullptr ? dmp_db->pinAt[from_slot] : nanf("");
+    const double cand_at = isfinite(src_at) && isfinite(final_delay)
+                               ? static_cast<double>(src_at) + final_delay
+                               : nan("");
+    printf("[DMP DIRECT CLOCK] attr=%d source_slew=%.9f load_slew=%.9f elmore=%.9f extra_delay=%.9f vo_delay=%.9f wire_delay=%.9f at=%.9f alg=%d dmp_load=%d driving_cell=%d\n",
+           attr,
+           static_cast<double>(source_slew),
+           final_slew,
+           elmore,
+           extra_delay,
+           vo_delay,
+           final_delay,
+           cand_at,
+           alg,
+           used_dmp_load ? 1 : 0,
+           used_driving_cell ? 1 : 0);
+}
+
+__device__ void dmpDebugPrintDrivingCell(const DmpModel* dmp_db,
+                                         int pin_id,
+                                         int attr,
+                                         float input_slew,
+                                         const DmpDriverWave& driver_wave,
+                                         float gate_delay,
+                                         float intrinsic_delay,
+                                         double extra_delay) {
+    if (!DMP_DRIVING_CELL_DEBUG_PRINT ||
+        dmp_db == nullptr ||
+        dmp_db->pin_names == nullptr ||
+        pin_id < 0 ||
+        !dmpDebugStringEquals(dmp_db->pin_names[pin_id], "clk")) {
+        return;
+    }
+    printf("[DMP DRIVING CELL DBG] pin=clk attr=%d alg=%d dmp_valid=%d input_slew=%.9f source_slew=%.9f gate_delay=%.9f intrinsic=%.9f extra=%.9f t0=%.9e dt=%.9e vo_upper=%.9e\n",
+           attr,
+           driver_wave.alg,
+           driver_wave.hasValidDriver() ? 1 : 0,
+           static_cast<double>(input_slew),
+           driver_wave.vo_slew,
+           static_cast<double>(gate_delay),
+           static_cast<double>(intrinsic_delay),
+           extra_delay,
+           driver_wave.t0,
+           driver_wave.dt,
+           driver_wave.vo_upper_time);
+}
+
+
+void dmp_debug_print_driving_cell_counts(int num_sources,
+                                         int total,
+                                         const unsigned long long* counts) {
+    const unsigned long long zeros[DMP_DRIVING_CELL_COUNTER_COUNT] = {};
+    const unsigned long long* c = counts != nullptr ? counts : zeros;
+    printf("[DMP DRIVING CELL] sources=%d lanes=%d applied=%llu skipped=%llu cap=%llu zero_c2=%llu pi=%llu dmp_valid=%llu fallback=%llu\n",
+           num_sources,
+           total,
+           c[DMP_DRIVING_CELL_APPLIED],
+           c[DMP_DRIVING_CELL_SKIPPED],
+           c[DMP_DRIVING_CELL_CAP],
+           c[DMP_DRIVING_CELL_ZERO_C2],
+           c[DMP_DRIVING_CELL_PI],
+           c[DMP_DRIVING_CELL_DMP_VALID],
+           c[DMP_DRIVING_CELL_FALLBACK]);
+}
+
+void dmp_debug_print_driving_cell_kernel_profile(float elapsed_ms, int total) {
+    printf("[DMP KERNEL PROFILE] name=applyDrivingCellSourceSlewKernel launches=1 total_ms=%.3f avg_us=%.3f max_ms=%.3f work_items=%d blocks=%d block=(%d,1) work_per_ms=%.1f\n",
+           elapsed_ms,
+           static_cast<double>(elapsed_ms) * 1000.0,
+           elapsed_ms,
+           total,
+           DMP_TIMING_BLOCK_NUMBER(total),
+           DMP_TIMING_BLOCK_SIZE,
+           elapsed_ms > 0.0f ? static_cast<double>(total) / static_cast<double>(elapsed_ms) : 0.0);
+}
+
 __global__ void dmp_debug_count_kernel(DmpModel* dmp_db, unsigned long long* counts, int total) {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= total) return;

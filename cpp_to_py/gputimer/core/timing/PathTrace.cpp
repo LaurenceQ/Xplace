@@ -1,5 +1,5 @@
 
-#include "GPUTimer.h"
+#include "gputimer/core/GPUTimer.h"
 #include "gputimer/db/GTDatabase.h"
 #include <cmath>
 

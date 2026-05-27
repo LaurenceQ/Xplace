@@ -1,6 +1,7 @@
 #pragma once
 
 #include "gputimer/base.h"
+
 namespace gt {
 
 __device__ __forceinline__ float pin_cap_attr(const float *pinCap, int pin, int cond) {
@@ -86,6 +87,5 @@ __global__ void device_copy_batch(T *src, T *dst, int size) {
     const int index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index < size) dst[index] = src[index];
 }
-
 
 }  // namespace gt

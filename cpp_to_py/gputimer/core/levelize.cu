@@ -12,183 +12,167 @@
 
 namespace gt {
 
-__global__ void advanceLevel(index_type *frontiers,
-                             index_type *next_frontiers,
-                             index_type *level_list,
-                             index_type *pin_fanout_list_end,
-                             index_type *pin_fanout_list,
-                             int *pin_num_fanin,
-                             int num_frontiers,
-                             int *next_num_frontiers,
-                             int *last_idx) {
+struct TimingLevelizeModel {
+    index_type *frontiers = nullptr;
+    index_type *next_frontiers = nullptr;
+    index_type *level_list = nullptr;
+    index_type *pin_fanout_list_end = nullptr;
+    index_type *pin_fanout_list = nullptr;
+    int *pin_num_fanin = nullptr;
+    int *next_num_frontiers = nullptr;
+    int *last_idx = nullptr;
+};
+
+struct PowerLevelizeModel {
+    index_type *frontiers = nullptr;
+    index_type *next_frontiers = nullptr;
+    index_type *level_list = nullptr;
+    index_type *pin_forward_arc_list_end = nullptr;
+    index_type *pin_forward_arc_list = nullptr;
+    index_type *timing_arc_to_pin_id = nullptr;
+    const int *arc_types = nullptr;
+    const int *arc_id2test_id = nullptr;
+    const uint8_t* is_seq_output_pin = nullptr;
+    const uint8_t* is_load_pin = nullptr;
+    const int* pin2net_map = nullptr;
+    const int* net_driver_pin = nullptr;
+    const int* flat_net2pin_start_map = nullptr;
+    const int* flat_net2pin_map = nullptr;
+    int *power_num_fanin = nullptr;
+    uint8_t *emitted = nullptr;
+    int *num_frontiers = nullptr;
+    int *next_num_frontiers = nullptr;
+    int *last_idx = nullptr;
+    int num_nets = 0;
+    int num_arcs = 0;
+    int num_pins = 0;
+};
+
+__global__ void advanceLevel(TimingLevelizeModel *model, int num_frontiers) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < num_frontiers) {
-        index_type pin_id = frontiers[idx];
-        index_type ptr = atomicAdd(last_idx, 1);
-        level_list[ptr] = pin_id;
-        for (index_type i = pin_fanout_list_end[pin_id]; i < pin_fanout_list_end[pin_id + 1]; i++) {
-            index_type fo_pin_id = pin_fanout_list[i];
-            int prev_num = atomicAdd(&pin_num_fanin[fo_pin_id], -1);
+        index_type pin_id = model->frontiers[idx];
+        index_type ptr = atomicAdd(model->last_idx, 1);
+        model->level_list[ptr] = pin_id;
+        for (index_type i = model->pin_fanout_list_end[pin_id]; i < model->pin_fanout_list_end[pin_id + 1]; i++) {
+            index_type fo_pin_id = model->pin_fanout_list[i];
+            int prev_num = atomicAdd(&model->pin_num_fanin[fo_pin_id], -1);
             if (prev_num == 1) {
-                index_type end = atomicAdd(next_num_frontiers, 1);
-                next_frontiers[end] = fo_pin_id;
+                index_type end = atomicAdd(model->next_num_frontiers, 1);
+                model->next_frontiers[end] = fo_pin_id;
             }
         }
     }
 }
 
 __device__ bool power_levelize_valid_edge(index_type arc,
-                                          const index_type* timing_arc_to_pin_id,
-                                          const int* arc_types,
-                                          const int* arc_id2test_id,
-                                          int num_arcs,
-                                          const uint8_t* is_seq_output_pin,
-                                          int num_pins,
+                                          const PowerLevelizeModel *model,
                                           int& to_pin) {
-    if (arc < 0 || arc >= num_arcs) return false;
-    if (arc_id2test_id && arc_id2test_id[arc] != -1) return false;
-    to_pin = timing_arc_to_pin_id[arc];
-    if (to_pin < 0 || to_pin >= num_pins) return false;
+    if (arc < 0 || arc >= model->num_arcs) return false;
+    if (model->arc_id2test_id && model->arc_id2test_id[arc] != -1) return false;
+    to_pin = model->timing_arc_to_pin_id[arc];
+    if (to_pin < 0 || to_pin >= model->num_pins) return false;
     // OpenSTA power activity seeds sequential Q/Q_N separately; do not levelize
     // ordinary D/CLK -> Q timing arcs as activity propagation edges.
-    if (arc_types && arc_types[arc] == 1 && is_seq_output_pin && is_seq_output_pin[to_pin]) return false;
+    if (model->arc_types && model->arc_types[arc] == 1 && model->is_seq_output_pin && model->is_seq_output_pin[to_pin]) return false;
     return true;
 }
 
-__global__ void countPowerFanin(index_type* pin_forward_arc_list_end,
-                                index_type* pin_forward_arc_list,
-                                index_type* timing_arc_to_pin_id,
-                                const int* arc_types,
-                                const int* arc_id2test_id,
-                                const uint8_t* is_seq_output_pin,
-                                const uint8_t* is_load_pin,
-                                const int* pin2net_map,
-                                const int* net_driver_pin,
-                                const int* flat_net2pin_start_map,
-                                const int* flat_net2pin_map,
-                                int* power_num_fanin,
-                                int num_nets,
-                                int num_arcs,
-                                int num_pins) {
+__global__ void countPowerFanin(PowerLevelizeModel *model) {
     int pin = blockIdx.x * blockDim.x + threadIdx.x;
+    const int num_pins = model->num_pins;
     if (pin >= num_pins) return;
-    if (is_load_pin && pin2net_map && net_driver_pin && flat_net2pin_start_map && flat_net2pin_map) {
-        const int net = pin2net_map[pin];
-        if (net >= 0 && net < num_nets && net_driver_pin[net] == pin) {
-            const int start = flat_net2pin_start_map[net];
-            const int end = flat_net2pin_start_map[net + 1];
+    if (model->is_load_pin && model->pin2net_map && model->net_driver_pin && model->flat_net2pin_start_map && model->flat_net2pin_map) {
+        const int net = model->pin2net_map[pin];
+        if (net >= 0 && net < model->num_nets && model->net_driver_pin[net] == pin) {
+            const int start = model->flat_net2pin_start_map[net];
+            const int end = model->flat_net2pin_start_map[net + 1];
             if (start >= 0 && end >= start && end <= num_pins) {
                 for (int pos = start; pos < end; ++pos) {
-                    const int sink = flat_net2pin_map[pos];
-                    if (sink < 0 || sink >= num_pins || sink == pin || !is_load_pin[sink]) continue;
-                    atomicAdd(&power_num_fanin[sink], 1);
+                    const int sink = model->flat_net2pin_map[pos];
+                    if (sink < 0 || sink >= num_pins || sink == pin || !model->is_load_pin[sink]) continue;
+                    atomicAdd(&model->power_num_fanin[sink], 1);
                 }
             }
         }
     }
-    const index_type arc_start = pin_forward_arc_list_end[pin];
-    const index_type arc_end = pin_forward_arc_list_end[pin + 1];
-    if (arc_start < 0 || arc_end < arc_start || arc_end > num_arcs) return;
+    const index_type arc_start = model->pin_forward_arc_list_end[pin];
+    const index_type arc_end = model->pin_forward_arc_list_end[pin + 1];
+    if (arc_start < 0 || arc_end < arc_start || arc_end > model->num_arcs) return;
     for (index_type i = arc_start; i < arc_end; i++) {
         int to_pin = -1;
-        if (power_levelize_valid_edge(pin_forward_arc_list[i], timing_arc_to_pin_id, arc_types, arc_id2test_id, num_arcs,
-                                      is_seq_output_pin, num_pins, to_pin)) {
-            atomicAdd(&power_num_fanin[to_pin], 1);
+        if (power_levelize_valid_edge(model->pin_forward_arc_list[i], model, to_pin)) {
+            atomicAdd(&model->power_num_fanin[to_pin], 1);
         }
     }
 }
 
-__global__ void seedPowerFrontiers(const int* power_num_fanin,
-                                   index_type* frontiers,
-                                   int* num_frontiers,
-                                   int num_pins) {
+__global__ void seedPowerFrontiers(PowerLevelizeModel *model) {
     int pin = blockIdx.x * blockDim.x + threadIdx.x;
+    const int num_pins = model->num_pins;
     if (pin >= num_pins) return;
-    if (power_num_fanin[pin] == 0) {
-        int pos = atomicAdd(num_frontiers, 1);
-        frontiers[pos] = pin;
+    if (model->power_num_fanin[pin] == 0) {
+        int pos = atomicAdd(model->num_frontiers, 1);
+        model->frontiers[pos] = pin;
     }
 }
 
-__global__ void advancePowerLevel(index_type *frontiers,
-                                  index_type *next_frontiers,
-                                  index_type *level_list,
-                                  index_type *pin_forward_arc_list_end,
-                                  index_type *pin_forward_arc_list,
-                                  index_type *timing_arc_to_pin_id,
-                                  const int *arc_types,
-                                  const int *arc_id2test_id,
-                                  const uint8_t* is_seq_output_pin,
-                                  const uint8_t* is_load_pin,
-                                  const int* pin2net_map,
-                                  const int* net_driver_pin,
-                                  const int* flat_net2pin_start_map,
-                                  const int* flat_net2pin_map,
-                                  int *power_num_fanin,
-                                  uint8_t *emitted,
-                                  int num_frontiers,
-                                  int *next_num_frontiers,
-                                  int *last_idx,
-                                  int num_nets,
-                                  int num_arcs,
-                                  int num_pins) {
+__global__ void advancePowerLevel(PowerLevelizeModel *model, int num_frontiers) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int num_pins = model->num_pins;
     if (idx >= num_frontiers) return;
-    index_type pin_id = frontiers[idx];
+    index_type pin_id = model->frontiers[idx];
     if (pin_id < 0 || pin_id >= num_pins) return;
-    index_type ptr = atomicAdd(last_idx, 1);
+    index_type ptr = atomicAdd(model->last_idx, 1);
     if (ptr >= 0 && ptr < num_pins) {
-        level_list[ptr] = pin_id;
+        model->level_list[ptr] = pin_id;
     }
-    emitted[pin_id] = 1;
-    if (is_load_pin && pin2net_map && net_driver_pin && flat_net2pin_start_map && flat_net2pin_map) {
-        const int net = pin2net_map[pin_id];
-        if (net >= 0 && net < num_nets && net_driver_pin[net] == pin_id) {
-            const int start = flat_net2pin_start_map[net];
-            const int end = flat_net2pin_start_map[net + 1];
+    model->emitted[pin_id] = 1;
+    if (model->is_load_pin && model->pin2net_map && model->net_driver_pin && model->flat_net2pin_start_map && model->flat_net2pin_map) {
+        const int net = model->pin2net_map[pin_id];
+        if (net >= 0 && net < model->num_nets && model->net_driver_pin[net] == pin_id) {
+            const int start = model->flat_net2pin_start_map[net];
+            const int end = model->flat_net2pin_start_map[net + 1];
             if (start >= 0 && end >= start && end <= num_pins) {
                 for (int pos = start; pos < end; ++pos) {
-                    const int sink = flat_net2pin_map[pos];
-                    if (sink < 0 || sink >= num_pins || sink == pin_id || !is_load_pin[sink]) continue;
-                    int prev_num = atomicAdd(&power_num_fanin[sink], -1);
+                    const int sink = model->flat_net2pin_map[pos];
+                    if (sink < 0 || sink >= num_pins || sink == pin_id || !model->is_load_pin[sink]) continue;
+                    int prev_num = atomicAdd(&model->power_num_fanin[sink], -1);
                     if (prev_num == 1) {
-                        index_type end_pos = atomicAdd(next_num_frontiers, 1);
+                        index_type end_pos = atomicAdd(model->next_num_frontiers, 1);
                         if (end_pos >= 0 && end_pos < num_pins) {
-                            next_frontiers[end_pos] = sink;
+                            model->next_frontiers[end_pos] = sink;
                         }
                     }
                 }
             }
         }
     }
-    const index_type arc_start = pin_forward_arc_list_end[pin_id];
-    const index_type arc_end = pin_forward_arc_list_end[pin_id + 1];
-    if (arc_start < 0 || arc_end < arc_start || arc_end > num_arcs) return;
+    const index_type arc_start = model->pin_forward_arc_list_end[pin_id];
+    const index_type arc_end = model->pin_forward_arc_list_end[pin_id + 1];
+    if (arc_start < 0 || arc_end < arc_start || arc_end > model->num_arcs) return;
     for (index_type i = arc_start; i < arc_end; i++) {
         int to_pin = -1;
-        if (!power_levelize_valid_edge(pin_forward_arc_list[i], timing_arc_to_pin_id, arc_types, arc_id2test_id,
-                                       num_arcs, is_seq_output_pin, num_pins, to_pin)) {
+        if (!power_levelize_valid_edge(model->pin_forward_arc_list[i], model, to_pin)) {
             continue;
         }
-        int prev_num = atomicAdd(&power_num_fanin[to_pin], -1);
+        int prev_num = atomicAdd(&model->power_num_fanin[to_pin], -1);
         if (prev_num == 1) {
-            index_type end = atomicAdd(next_num_frontiers, 1);
+            index_type end = atomicAdd(model->next_num_frontiers, 1);
             if (end >= 0 && end < num_pins) {
-                next_frontiers[end] = to_pin;
+                model->next_frontiers[end] = to_pin;
             }
         }
     }
 }
 
-__global__ void appendUnemittedPowerPins(index_type* level_list,
-                                         const uint8_t* emitted,
-                                         int* last_idx,
-                                         int num_pins) {
+__global__ void appendUnemittedPowerPins(PowerLevelizeModel *model) {
     int pin = blockIdx.x * blockDim.x + threadIdx.x;
-    if (pin >= num_pins || emitted[pin]) return;
-    int pos = atomicAdd(last_idx, 1);
+    const int num_pins = model->num_pins;
+    if (pin >= num_pins || model->emitted[pin]) return;
+    int pos = atomicAdd(model->last_idx, 1);
     if (pos >= 0 && pos < num_pins) {
-        level_list[pos] = pin;
+        model->level_list[pos] = pin;
     }
 }
 
@@ -239,6 +223,18 @@ void GPUTimer::levelize() {
     cudaMemset(next_num_frontiers, 0, sizeof(int));
     cudaMemset(last_idx, 0, sizeof(int));
     cudaMemcpy(frontiers, gtdb.pin_frontiers.data(), num_frontiers * sizeof(index_type), cudaMemcpyHostToDevice);
+    TimingLevelizeModel level_model;
+    level_model.frontiers = frontiers;
+    level_model.next_frontiers = next_frontiers;
+    level_model.level_list = level_list;
+    level_model.pin_fanout_list_end = pin_fanout_list_end;
+    level_model.pin_fanout_list = pin_fanout_list;
+    level_model.pin_num_fanin = pin_num_fanin;
+    level_model.next_num_frontiers = next_num_frontiers;
+    level_model.last_idx = last_idx;
+    TimingLevelizeModel* d_level_model = nullptr;
+    cudaMalloc(&d_level_model, sizeof(TimingLevelizeModel));
+    cudaMemcpy(d_level_model, &level_model, sizeof(TimingLevelizeModel), cudaMemcpyHostToDevice);
 
     level_list_end_cpu.clear();
     level_list_end_cpu.push_back(0);
@@ -246,14 +242,14 @@ void GPUTimer::levelize() {
     while (num_frontiers) {
         total_num_frontiers += num_frontiers;
         level_list_end_cpu.push_back(total_num_frontiers);
-        advanceLevel<<<BLOCK_NUMBER(num_pins), BLOCK_SIZE>>>(
-            frontiers, next_frontiers, level_list, pin_fanout_list_end, pin_fanout_list, pin_num_fanin, num_frontiers, next_num_frontiers, last_idx);
+        advanceLevel<<<BLOCK_NUMBER(num_pins), BLOCK_SIZE>>>(d_level_model, num_frontiers);
         CUDA_CHECK("advanceLevel");
         cudaMemcpy(&num_frontiers, next_num_frontiers, sizeof(int), cudaMemcpyDeviceToHost);
         device_copy<index_type><<<1, 1>>>(next_frontiers, frontiers, num_frontiers);
         cudaMemset(next_num_frontiers, 0, sizeof(int));
         // debugPrint<int><<<1, 1>>>(next_num_frontiers, 1);
     }
+    cudaFree(d_level_model);
     cudaMalloc(&level_list_end, level_list_end_cpu.size() * sizeof(index_type));
     cudaMemcpy(level_list_end, level_list_end_cpu.data(), level_list_end_cpu.size() * sizeof(index_type), cudaMemcpyHostToDevice);
     index_type *level_list_cpu = new index_type[total_num_frontiers];
@@ -316,14 +312,37 @@ void GPUTimer::levelize_power(const uint8_t* d_is_seq_output_pin,
     CUDA_CALL(cudaMemset(power_num_fanin, 0, num_pins * sizeof(int)), "memset power_num_fanin");
     CUDA_CALL(cudaMemset(emitted, 0, num_pins * sizeof(uint8_t)), "memset emitted");
 
-    countPowerFanin<<<BLOCK_NUMBER(num_pins), BLOCK_SIZE>>>(
-        pin_forward_arc_list_end, pin_forward_arc_list, timing_arc_to_pin_id,
-        d_power_arc_types ? d_power_arc_types : arc_types,
-        d_power_arc_id2test_id ? d_power_arc_id2test_id : arc_id2test_id,
-        d_is_seq_output_pin, d_is_load_pin, d_pin2net_map, d_net_driver_pin,
-        d_flat_net2pin_start_map, d_flat_net2pin_map, power_num_fanin, num_nets, num_arcs, num_pins);
+    PowerLevelizeModel power_model;
+    power_model.frontiers = frontiers;
+    power_model.next_frontiers = next_frontiers;
+    power_model.level_list = power_level_list;
+    power_model.pin_forward_arc_list_end = pin_forward_arc_list_end;
+    power_model.pin_forward_arc_list = pin_forward_arc_list;
+    power_model.timing_arc_to_pin_id = timing_arc_to_pin_id;
+    power_model.arc_types = d_power_arc_types ? d_power_arc_types : arc_types;
+    power_model.arc_id2test_id = d_power_arc_id2test_id ? d_power_arc_id2test_id : arc_id2test_id;
+    power_model.is_seq_output_pin = d_is_seq_output_pin;
+    power_model.is_load_pin = d_is_load_pin;
+    power_model.pin2net_map = d_pin2net_map;
+    power_model.net_driver_pin = d_net_driver_pin;
+    power_model.flat_net2pin_start_map = d_flat_net2pin_start_map;
+    power_model.flat_net2pin_map = d_flat_net2pin_map;
+    power_model.power_num_fanin = power_num_fanin;
+    power_model.emitted = emitted;
+    power_model.num_frontiers = num_frontiers_dev;
+    power_model.next_num_frontiers = next_num_frontiers;
+    power_model.last_idx = last_idx;
+    power_model.num_nets = num_nets;
+    power_model.num_arcs = num_arcs;
+    power_model.num_pins = num_pins;
+    PowerLevelizeModel* d_power_model = nullptr;
+    CUDA_CALL(cudaMalloc(&d_power_model, sizeof(PowerLevelizeModel)), "malloc power levelize model");
+    CUDA_CALL(cudaMemcpy(d_power_model, &power_model, sizeof(PowerLevelizeModel), cudaMemcpyHostToDevice),
+              "copy power levelize model");
+
+    countPowerFanin<<<BLOCK_NUMBER(num_pins), BLOCK_SIZE>>>(d_power_model);
     CUDA_CHECK("countPowerFanin");
-    seedPowerFrontiers<<<BLOCK_NUMBER(num_pins), BLOCK_SIZE>>>(power_num_fanin, frontiers, num_frontiers_dev, num_pins);
+    seedPowerFrontiers<<<BLOCK_NUMBER(num_pins), BLOCK_SIZE>>>(d_power_model);
     CUDA_CHECK("seedPowerFrontiers");
 
     int num_frontiers = 0;
@@ -337,15 +356,7 @@ void GPUTimer::levelize_power(const uint8_t* d_is_seq_output_pin,
     while (num_frontiers > 0) {
         total_num_frontiers = std::min(total_num_frontiers + num_frontiers, num_pins);
         power_level_list_end_cpu.push_back(total_num_frontiers);
-        advancePowerLevel<<<BLOCK_NUMBER(num_frontiers), BLOCK_SIZE>>>(
-            frontiers, next_frontiers, power_level_list, pin_forward_arc_list_end, pin_forward_arc_list,
-            timing_arc_to_pin_id,
-            d_power_arc_types ? d_power_arc_types : arc_types,
-            d_power_arc_id2test_id ? d_power_arc_id2test_id : arc_id2test_id,
-            d_is_seq_output_pin,
-            d_is_load_pin, d_pin2net_map, d_net_driver_pin, d_flat_net2pin_start_map, d_flat_net2pin_map,
-            power_num_fanin, emitted,
-            num_frontiers, next_num_frontiers, last_idx, num_nets, num_arcs, num_pins);
+        advancePowerLevel<<<BLOCK_NUMBER(num_frontiers), BLOCK_SIZE>>>(d_power_model, num_frontiers);
         CUDA_CHECK("advancePowerLevel");
         cudaMemcpy(&num_frontiers, next_num_frontiers, sizeof(int), cudaMemcpyDeviceToHost);
         if (num_frontiers < 0) num_frontiers = 0;
@@ -360,7 +371,7 @@ void GPUTimer::levelize_power(const uint8_t* d_is_seq_output_pin,
     if (emitted_count > num_pins) emitted_count = num_pins;
     if (emitted_count < num_pins) {
         const int unemitted_start = emitted_count;
-        appendUnemittedPowerPins<<<BLOCK_NUMBER(num_pins), BLOCK_SIZE>>>(power_level_list, emitted, last_idx, num_pins);
+        appendUnemittedPowerPins<<<BLOCK_NUMBER(num_pins), BLOCK_SIZE>>>(d_power_model);
         CUDA_CHECK("appendUnemittedPowerPins");
         cudaMemcpy(&emitted_count, last_idx, sizeof(int), cudaMemcpyDeviceToHost);
         if (emitted_count < 0) emitted_count = 0;
@@ -412,6 +423,7 @@ void GPUTimer::levelize_power(const uint8_t* d_is_seq_output_pin,
     cudaFree(last_idx);
     cudaFree(power_num_fanin);
     cudaFree(emitted);
+    cudaFree(d_power_model);
     CUDA_CHECK("power exit");
 }
 

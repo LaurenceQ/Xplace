@@ -1,4 +1,4 @@
-#include "GPUTimer.h"
+#include "gputimer/core/GPUTimer.h"
 #include "common/utils/utils.h"
 #include "common/db/Database.h"
 #include "gputimer/db/GTDatabase.h"

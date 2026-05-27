@@ -1,126 +1,72 @@
 
 #include "GPUTimer.h"
+#include "timing/TimingPropagationModel.h"
 
 namespace gt {
 
-void update_timing_cuda(index_type *level_list,
-                        vector<int> level_list_end_cpu,
-                        index_type *pin_forward_arc_list_end,
-                        index_type *pin_forward_arc_list,
-                        index_type *timing_arc_to_pin_id,
-                        index_type *pin_backward_arc_list_end,
-                        index_type *pin_backward_arc_list,
-                        index_type *timing_arc_from_pin_id,
-                        int *arc_types,
-                        int *arc_id2test_id,
-                        float *pinSlew,
-                        float *pinLoad,
-                        float *pinImpulse,
-                        float *pinRootDelay,
-                        float *pinAT,
-                        float *pinRAT,
-                        float *testRelatedAT,
-                        float *testRAT,
-                        float *testConstraint,
-                        float *arcDelay,
-                        int *timing_arc_id_map,
-                        index_type *at_prefix_pin,
-                        index_type *at_prefix_arc,
-                        index_type *at_prefix_attr,
-                        float clock_period,
-                        GPULutAllocator *d_allocator,
-                        int num_pins,
-                        bool deterministic);
-
-void propagate_infer_timing_impl(
-                        index_type *level_list,
-                        vector<int> level_list_end_cpu,
-                        index_type *pin_forward_arc_list_end,
-                        index_type *pin_forward_arc_list,
-                        index_type *timing_arc_to_pin_id,
-                        index_type *pin_backward_arc_list_end,
-                        index_type *pin_backward_arc_list,
-                        index_type *timing_arc_from_pin_id,
-                        int *arc_types,
-                        int *arc_id2test_id,
-                        float *pinSlew,
-                        float *pinAt,
-                        float *pinRat,
-                        float *arcDelay,
-                        float *testRelatedAT,
-                        float *testRAT,
-                        float *testConstraint,
-                        int *timing_arc_id_map,
-                        index_type *at_prefix_pin,
-                        index_type *at_prefix_arc,
-                        index_type *at_prefix_attr,
-                        float clock_period,
-                        GPULutAllocator *d_allocator,
-                        int *pin_is_clk,
-                        int *pin_is_ideal_clk,
-                        const float *pin_clock_fall_edges,
-                        int num_pins);
-
-
 void GPUTimer::update_timing() {
-    update_timing_cuda(level_list,
-                       level_list_end_cpu,
-                       pin_forward_arc_list_end,
-                       pin_forward_arc_list,
-                       timing_arc_to_pin_id,
-                       pin_backward_arc_list_end,
-                       pin_backward_arc_list,
-                       timing_arc_from_pin_id,
-                       arc_types,
-                       arc_id2test_id,
-                       pinSlew,
-                       pinLoad,
-                       pinImpulse,
-                       pinRootDelay,
-                       pinAT,
-                       pinRAT,
-                       testRelatedAT,
-                       testRAT,
-                       testConstraint,
-                       arcDelay,
-                       timing_arc_id_map,
-                       at_prefix_pin,
-                       at_prefix_arc,
-                       at_prefix_attr,
-                       clock_period,
-                       d_allocator,
-                       num_pins,
-                       true);
+    TimingPropagationModel model;
+    model.level_list = level_list;
+    model.level_list_end_cpu = &level_list_end_cpu;
+    model.pin_forward_arc_list_end = pin_forward_arc_list_end;
+    model.pin_forward_arc_list = pin_forward_arc_list;
+    model.timing_arc_to_pin_id = timing_arc_to_pin_id;
+    model.pin_backward_arc_list_end = pin_backward_arc_list_end;
+    model.pin_backward_arc_list = pin_backward_arc_list;
+    model.timing_arc_from_pin_id = timing_arc_from_pin_id;
+    model.arc_types = arc_types;
+    model.arc_id2test_id = arc_id2test_id;
+    model.pinSlew = pinSlew;
+    model.pinLoad = pinLoad;
+    model.pinImpulse = pinImpulse;
+    model.pinRootDelay = pinRootDelay;
+    model.pinAT = pinAT;
+    model.pinRAT = pinRAT;
+    model.testRelatedAT = testRelatedAT;
+    model.testRAT = testRAT;
+    model.testConstraint = testConstraint;
+    model.arcDelay = arcDelay;
+    model.timing_arc_id_map = timing_arc_id_map;
+    model.at_prefix_pin = at_prefix_pin;
+    model.at_prefix_arc = at_prefix_arc;
+    model.at_prefix_attr = at_prefix_attr;
+    model.clock_period = clock_period;
+    model.d_allocator = d_allocator;
+    model.num_pins = num_pins;
+    model.deterministic = true;
+    update_timing_cuda(model);
 }
 
 void GPUTimer::propagate_infer_timing() {
-    propagate_infer_timing_impl(level_list,
-                                level_list_end_cpu,
-                                pin_forward_arc_list_end,
-                                pin_forward_arc_list,
-                                timing_arc_to_pin_id,
-                                pin_backward_arc_list_end,
-                                pin_backward_arc_list,
-                                timing_arc_from_pin_id,
-                                arc_types,
-                                arc_id2test_id,
-                                pinSlew,
-                                pinAT,
-                                pinRAT,
-                                arcDelay,
-                                testRelatedAT,
-                                testRAT,
-                                testConstraint,
-                                timing_arc_id_map,
-                                at_prefix_pin,
-                                at_prefix_arc,
-                                at_prefix_attr,
-                                clock_period,
-                                d_allocator,
-                                pin_is_clk,
-                                pin_is_ideal_clk,
-                                pin_clock_fall_edges,
-                                num_pins);
+    InferTimingModel model;
+    model.level_list = level_list;
+    model.level_list_end_cpu = &level_list_end_cpu;
+    model.pin_forward_arc_list_end = pin_forward_arc_list_end;
+    model.pin_forward_arc_list = pin_forward_arc_list;
+    model.timing_arc_to_pin_id = timing_arc_to_pin_id;
+    model.pin_backward_arc_list_end = pin_backward_arc_list_end;
+    model.pin_backward_arc_list = pin_backward_arc_list;
+    model.timing_arc_from_pin_id = timing_arc_from_pin_id;
+    model.arc_types = arc_types;
+    model.arc_id2test_id = arc_id2test_id;
+    model.pinSlew = pinSlew;
+    model.pinAT = pinAT;
+    model.pinRAT = pinRAT;
+    model.arcDelay = arcDelay;
+    model.testRelatedAT = testRelatedAT;
+    model.testRAT = testRAT;
+    model.testConstraint = testConstraint;
+    model.timing_arc_id_map = timing_arc_id_map;
+    model.at_prefix_pin = at_prefix_pin;
+    model.at_prefix_arc = at_prefix_arc;
+    model.at_prefix_attr = at_prefix_attr;
+    model.clock_period = clock_period;
+    model.d_allocator = d_allocator;
+    model.pin_is_clk = pin_is_clk;
+    model.pin_is_ideal_clk = pin_is_ideal_clk;
+    model.pin_clock_fall_edges = pin_clock_fall_edges;
+    model.num_pins = num_pins;
+    propagate_infer_timing_impl(model);
 }
 
 }  // namespace gt

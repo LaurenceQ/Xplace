@@ -136,10 +136,34 @@ bool GTDatabase::is_redundant_timing(const TimingArc* timing_arc, Split el) {
 }
 
 
+Clock::Clock(const std::string& name, float period)
+    : _name(name), _period(period), _fall_edge(period * 0.5f), _source_id(-1) {}
+
+Clock::Clock(const std::string& name, int source_id, float period)
+    : _name(name), _period(period), _fall_edge(period * 0.5f), _source_id(source_id) {}
+
+const std::string& Clock::name() const { return _name; }
+float Clock::period() const { return _period; }
+int Clock::source_id() const { return _source_id; }
+float Clock::rise_edge() const { return _rise_edge + _latency; }
+float Clock::fall_edge() const { return _fall_edge + _latency; }
+float Clock::waveform_rise_edge() const { return _rise_edge; }
+float Clock::waveform_fall_edge() const { return _fall_edge; }
+float Clock::latency() const { return _latency; }
+
+void Clock::set_waveform(float rise_edge, float fall_edge) {
+    _rise_edge = rise_edge;
+    _fall_edge = fall_edge;
+}
+
+void Clock::set_latency(float latency) { _latency = latency; }
+
 GTDatabase::GTDatabase(shared_ptr<db::Database> rawdb_, shared_ptr<gp::GPDatabase> gpdb_, shared_ptr<TimingTorchRawDB> timing_raw_db_) : rawdb(*rawdb_), gpdb(*gpdb_), timing_raw_db(*timing_raw_db_) {
     cell_libs_[MIN] = rawdb.cell_libs_[MIN];
     cell_libs_[MAX] = rawdb.cell_libs_[MAX];
 }
+
+GTDatabase::~GTDatabase() { logger.info("destruct gtdb"); }
 
 
 void GTDatabase::ExtractTimingGraph() {
@@ -191,36 +215,54 @@ void GTDatabase::ExtractTimingGraph() {
     extract_profile.log("thresholds");
 
     //  Flatten Liberty Cell Timing
-    std::map<std::array<float, 9>, int> dmp_library_id_by_thresholds;
+    std::map<std::array<float, 18>, int> dmp_library_id_by_thresholds;
     std::unordered_map<const LibertyCell*, int> dmp_library_id_by_cell;
-    auto register_dmp_library = [&](const LibertyCell* liberty_cell) -> int {
-        if (liberty_cell == nullptr) {
+    auto register_dmp_library = [&](const LibertyCell* min_cell,
+                                    const LibertyCell* max_cell) -> int {
+        if (min_cell == nullptr || max_cell == nullptr) {
             return -1;
         }
-        auto cached_cell = dmp_library_id_by_cell.find(liberty_cell);
-        if (cached_cell != dmp_library_id_by_cell.end()) {
-            return cached_cell->second;
+        auto cached_min_cell = dmp_library_id_by_cell.find(min_cell);
+        if (cached_min_cell != dmp_library_id_by_cell.end()) {
+            return cached_min_cell->second;
         }
-        std::array<float, 9> threshold_key = {
-            liberty_cell->input_threshold_pct[RISE],
-            liberty_cell->input_threshold_pct[FALL],
-            liberty_cell->output_threshold_pct[RISE],
-            liberty_cell->output_threshold_pct[FALL],
-            liberty_cell->slew_lower_threshold_pct[RISE],
-            liberty_cell->slew_lower_threshold_pct[FALL],
-            liberty_cell->slew_upper_threshold_pct[RISE],
-            liberty_cell->slew_upper_threshold_pct[FALL],
-            liberty_cell->slew_derate_from_library,
+        auto cached_max_cell = dmp_library_id_by_cell.find(max_cell);
+        if (cached_max_cell != dmp_library_id_by_cell.end()) {
+            return cached_max_cell->second;
+        }
+        std::array<float, 18> threshold_key = {
+            min_cell->input_threshold_pct[RISE],
+            min_cell->input_threshold_pct[FALL],
+            min_cell->output_threshold_pct[RISE],
+            min_cell->output_threshold_pct[FALL],
+            min_cell->slew_lower_threshold_pct[RISE],
+            min_cell->slew_lower_threshold_pct[FALL],
+            min_cell->slew_upper_threshold_pct[RISE],
+            min_cell->slew_upper_threshold_pct[FALL],
+            min_cell->slew_derate_from_library,
+            max_cell->input_threshold_pct[RISE],
+            max_cell->input_threshold_pct[FALL],
+            max_cell->output_threshold_pct[RISE],
+            max_cell->output_threshold_pct[FALL],
+            max_cell->slew_lower_threshold_pct[RISE],
+            max_cell->slew_lower_threshold_pct[FALL],
+            max_cell->slew_upper_threshold_pct[RISE],
+            max_cell->slew_upper_threshold_pct[FALL],
+            max_cell->slew_derate_from_library,
         };
         auto cached_thresholds = dmp_library_id_by_thresholds.find(threshold_key);
         if (cached_thresholds != dmp_library_id_by_thresholds.end()) {
-            dmp_library_id_by_cell.emplace(liberty_cell, cached_thresholds->second);
+            dmp_library_id_by_cell.emplace(min_cell, cached_thresholds->second);
+            dmp_library_id_by_cell.emplace(max_cell, cached_thresholds->second);
             return cached_thresholds->second;
         }
-        const int lib_id = static_cast<int>(dmp_library_input_thresholds.size() / MAX_TRAN);
+        const int lib_id = static_cast<int>(dmp_library_input_thresholds.size() / NUM_ATTR);
         dmp_library_id_by_thresholds.emplace(threshold_key, lib_id);
-        dmp_library_id_by_cell.emplace(liberty_cell, lib_id);
-        for (auto rf : TRAN) {
+        dmp_library_id_by_cell.emplace(min_cell, lib_id);
+        dmp_library_id_by_cell.emplace(max_cell, lib_id);
+        const std::array<const LibertyCell*, MAX_SPLIT> cells = {min_cell, max_cell};
+        for_each_el_rf_if(el, rf, true) {
+            const LibertyCell* liberty_cell = cells[el];
             dmp_library_input_thresholds.push_back(liberty_cell->input_threshold_pct[rf]);
             dmp_library_output_thresholds.push_back(liberty_cell->output_threshold_pct[rf]);
             dmp_library_slew_lower_thresholds.push_back(liberty_cell->slew_lower_threshold_pct[rf]);
@@ -229,12 +271,14 @@ void GTDatabase::ExtractTimingGraph() {
         }
         return lib_id;
     };
+    auto dmp_library_id_for_cell = [&](const LibertyCell* liberty_cell) -> int {
+        auto cached_cell = dmp_library_id_by_cell.find(liberty_cell);
+        return cached_cell != dmp_library_id_by_cell.end() ? cached_cell->second : -1;
+    };
     for (db::CellType* cell_type : rawdb.celltypes) {
         string cell_type_name = cell_type->name;
         array<LibertyCell*, 2> liberty_cell_view = {cell_libs_[MIN]->get_cell(cell_type_name), cell_libs_[MAX]->get_cell(cell_type_name)};
-        for_each_el(el) {
-            register_dmp_library(liberty_cell_view[el]);
-        }
+        register_dmp_library(liberty_cell_view[MIN], liberty_cell_view[MAX]);
         if (!liberty_cell_view[MIN] || !liberty_cell_view[MAX]) {
             liberty_cell_type2port_list_end.push_back(liberty_cell_type2port_list_end.back());
             for_each_el(el) {
@@ -295,7 +339,7 @@ void GTDatabase::ExtractTimingGraph() {
         LibertyCell* liberty_cell = timing_arc && timing_arc->liberty_port_
                                         ? timing_arc->liberty_port_->cell_
                                         : nullptr;
-        dmp_timing_library_ids[timing_id] = register_dmp_library(liberty_cell);
+        dmp_timing_library_ids[timing_id] = dmp_library_id_for_cell(liberty_cell);
     }
     extract_profile.log("liberty_threshold_vectors");
 
@@ -337,7 +381,7 @@ void GTDatabase::ExtractTimingGraph() {
     extract_profile.log("pin_name_map");
     pin_id2cell_type_id.resize(num_pins);
     pin_id2port_offset_id.resize(num_pins);
-    dmp_pin_library_ids.assign(num_pins * MAX_SPLIT, -1);
+    dmp_pin_library_ids.assign(num_pins, -1);
     pin_is_clk.assign(num_pins, 0);
     pin_is_ideal_clk.assign(num_pins, 0);
     pin_case_values.assign(num_pins, -1);
@@ -364,11 +408,7 @@ void GTDatabase::ExtractTimingGraph() {
             auto& dbcell = rawdb.cells[ori_node_id];
             LibertyCell* liberty_cell = dbcell->ctype()->liberty_cell;
             pin_id2cell_type_id[pin_id] = dbcell->ctype()->libcell();
-            for_each_el(el) {
-                LibertyCell* corner_liberty_cell = cell_libs_[el]->get_cell(dbcell->ctype()->name);
-                dmp_pin_library_ids[pin_id * MAX_SPLIT + static_cast<int>(el)] =
-                    register_dmp_library(corner_liberty_cell);
-            }
+            dmp_pin_library_ids[pin_id] = dmp_library_id_for_cell(liberty_cell);
             if (!liberty_cell) {
                 pin_id2port_offset_id[pin_id] = 0;
                 continue;

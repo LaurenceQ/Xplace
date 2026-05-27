@@ -2,6 +2,7 @@
 
 #pragma once
 #include <torch/extension.h>
+#include <cstdint>
 
 #include <memory>
 #include <unordered_set>
@@ -54,23 +55,18 @@ private:
     float _latency = .0f;
     int _source_id = -1;
 public:
-    Clock(const std::string& name, float period)
-        : _name(name), _period(period), _fall_edge(period * 0.5f), _source_id(-1) {};
-    Clock(const std::string& name, int source_id, float period)
-        : _name(name), _period(period), _fall_edge(period * 0.5f), _source_id(source_id) {};
-    inline const std::string& name() const { return _name; }
-    inline float period() const { return _period; }
-    inline int source_id() const { return _source_id; }
-    inline float rise_edge() const { return _rise_edge + _latency; }
-    inline float fall_edge() const { return _fall_edge + _latency; }
-    inline float waveform_rise_edge() const { return _rise_edge; }
-    inline float waveform_fall_edge() const { return _fall_edge; }
-    inline float latency() const { return _latency; }
-    inline void set_waveform(float rise_edge, float fall_edge) {
-        _rise_edge = rise_edge;
-        _fall_edge = fall_edge;
-    }
-    inline void set_latency(float latency) { _latency = latency; }
+    Clock(const std::string& name, float period);
+    Clock(const std::string& name, int source_id, float period);
+    const std::string& name() const;
+    float period() const;
+    int source_id() const;
+    float rise_edge() const;
+    float fall_edge() const;
+    float waveform_rise_edge() const;
+    float waveform_fall_edge() const;
+    float latency() const;
+    void set_waveform(float rise_edge, float fall_edge);
+    void set_latency(float latency);
 };
 
 class STAPin {
@@ -95,7 +91,7 @@ public:
     std::array<std::shared_ptr<gt::CellLib>, MAX_SPLIT> cell_libs_;
 
     GTDatabase(shared_ptr<db::Database> rawdb_, shared_ptr<gp::GPDatabase> gpdb_, shared_ptr<TimingTorchRawDB> timing_raw_db_);
-    ~GTDatabase() { logger.info("destruct gtdb"); }
+    ~GTDatabase();
 
 public:
     void ExtractTimingGraph();
@@ -188,6 +184,9 @@ public:
     vector<int> timing_arc_id_map;
     vector<int> arc_types, arc_id2test_id;
     vector<int> test_id2_arc_id;
+    vector<float> clock_periods;
+    vector<uint8_t> pin_clock_ids;
+    vector<uint8_t> test_clock_ids;
     vector<float> test_clock_periods;
     vector<float> test_setup_uncertainties;
     vector<float> test_hold_uncertainties;
@@ -370,6 +369,9 @@ public:
     torch::Tensor test_id2_arc_id;
     torch::Tensor test_id2_endpoint_id;
     torch::Tensor primary_output2_endpoint_id;
+    torch::Tensor clock_periods;
+    torch::Tensor pin_clock_ids;
+    torch::Tensor test_clock_ids;
     torch::Tensor test_clock_periods;
     torch::Tensor test_setup_uncertainties;
     torch::Tensor test_hold_uncertainties;

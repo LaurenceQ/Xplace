@@ -7,8 +7,12 @@
 #include <vector>
 #ifdef __CUDACC__
 #define CUDA_DEV __device__
+#define CUDA_DEV_INLINE __device__ inline
+#define CUDA_DEV_NOINLINE __device__ __noinline__
 #else
 #define CUDA_DEV
+#define CUDA_DEV_INLINE
+#define CUDA_DEV_NOINLINE
 #endif
 
 
@@ -16,8 +20,20 @@
 namespace gt {
 class GPUTimer;
 class GPULutAllocator;
+struct DmpGateArcMeta;
+struct DmpDriverThresholds;
+struct DmpRcParams;
+struct DmpWaveCoeffs;
+struct DmpDriverWave;
 
 enum DmpAlgKind { DMP_ALG_CAP = 0, DMP_ALG_ZERO_C2 = 1, DMP_ALG_PI = 2 };
+// Source pins terminate path tracing, so their prefix slots are otherwise unused.
+// For set_driving_cell sources, at_prefix_arc stores (timing_id << 1) | input_rf,
+// at_prefix_attr is this sentinel, and pinSlew stores the SDC input transition.
+static constexpr int DMP_DRIVING_CELL_PREFIX_ATTR = -2;
+static constexpr uint8_t DMP_PIN_PRIMARY_INPUT = 1u << 0;
+static constexpr uint8_t DMP_PIN_CLK = 1u << 1;
+static constexpr uint8_t DMP_PIN_IDEAL_CLK = 1u << 2;
 
 struct DmpModel {
     const char **pin_names;
@@ -29,11 +45,6 @@ struct DmpModel {
     int dmp_pin_slot_count, dmp_slot_capacity, dmp_work_slot_capacity;
     bool owns_allocations;
     unsigned long long *pin_at_winner;
-    unsigned long long *pin_slew_winner;
-    unsigned long long *arc_delay_winner;
-    int *driving_cell_timing_id;
-    int *driving_cell_input_rf;
-    float *driving_cell_input_slew;
     const float *dmp_input_thresholds;
     const float *dmp_output_thresholds;
     const float *dmp_slew_lower_thresholds;
@@ -46,10 +57,7 @@ struct DmpModel {
     const float *dmp_library_slew_lower_thresholds;
     const float *dmp_library_slew_upper_thresholds;
     const float *dmp_library_slew_derates;
-    int *pin_is_primary_input;
-    int *pin_is_clk;
-    int *pin_is_ideal_clk;
-    int *pin_ids, *arc_ids;
+    uint8_t *pin_flags;
     index_type *level_list;
     index_type *pin_forward_arc_list_end;
     index_type *pin_forward_arc_list;
@@ -69,13 +77,14 @@ struct DmpModel {
     float *testRelatedAT;
     float *testRAT;
     float *testConstraint;
-    const float *test_clock_periods;
-    const float *test_setup_uncertainties;
-    const float *test_hold_uncertainties;
-    const float *pin_clock_periods;
+    uint8_t *test_clock_ids;
+    float *clock_periods;
+    int clock_count;
     const float *pin_clock_rise_edges;
     const float *pin_clock_fall_edges;
     const float *pin_clock_slews;
+    const float *test_setup_uncertainties;
+    const float *test_hold_uncertainties;
     float *arcDelay;
     int *timing_arc_id_map;
     float clock_period;
@@ -101,10 +110,6 @@ struct DmpModel {
                   timing_arc_from_pin_id(nullptr),
                   arc_types(nullptr), arc_id2test_id(nullptr),
                   pin_at_winner(nullptr),
-                  pin_slew_winner(nullptr), arc_delay_winner(nullptr),
-                  driving_cell_timing_id(nullptr),
-                  driving_cell_input_rf(nullptr),
-                  driving_cell_input_slew(nullptr),
                   dmp_input_thresholds(nullptr), dmp_output_thresholds(nullptr),
                   dmp_slew_lower_thresholds(nullptr), dmp_slew_upper_thresholds(nullptr),
                   dmp_slew_derates(nullptr), dmp_timing_library_ids(nullptr),
@@ -113,14 +118,13 @@ struct DmpModel {
                   dmp_library_output_thresholds(nullptr),
                   dmp_library_slew_lower_thresholds(nullptr),
                   dmp_library_slew_upper_thresholds(nullptr),
-                  dmp_library_slew_derates(nullptr), pin_is_primary_input(nullptr),
-                  pin_is_clk(nullptr), pin_is_ideal_clk(nullptr),
+                  dmp_library_slew_derates(nullptr), pin_flags(nullptr),
                   pinSlew(nullptr), elmore_delay(nullptr), pinAt(nullptr), pinRat(nullptr),
                   testRelatedAT(nullptr), testRAT(nullptr), testConstraint(nullptr),
-                  test_clock_periods(nullptr), test_setup_uncertainties(nullptr),
-                  test_hold_uncertainties(nullptr), pin_clock_periods(nullptr),
+                  test_clock_ids(nullptr), clock_periods(nullptr), clock_count(0),
                   pin_clock_rise_edges(nullptr), pin_clock_fall_edges(nullptr),
                   pin_clock_slews(nullptr),
+                  test_setup_uncertainties(nullptr), test_hold_uncertainties(nullptr),
                   arcDelay(nullptr),
                   timing_arc_id_map(nullptr),
                   at_prefix_pin(nullptr), at_prefix_arc(nullptr), at_prefix_attr(nullptr),
@@ -131,17 +135,120 @@ struct DmpModel {
     ~DmpModel();
 
     // CUDA_DEV void compute_pi_model(int net_id, int el_rf); 
-    CUDA_DEV double y0(double t, double rd, double cl);
-    CUDA_DEV double y(double t, double t0, double dt, double rd, double cl);
-    CUDA_DEV double y0dt(double t, double rd, double cl);
-    CUDA_DEV double y0dcl(double t, double rd, double cl);
-    CUDA_DEV void dy(double t, double t0, double dt, double rd, double cl,
-                     double &dydt0, double &dyddt, double &dydcl);
-    CUDA_DEV void propagateLoadSlewDelay();
-    CUDA_DEV bool updateLoadWinner(int net_arc_id, int load_attr, float wire_delay, float load_slew);
-    CUDA_DEV bool updateAtWinner(int to_slot, float at, bool pick_max, int arc_id, int from_attr);
-    CUDA_DEV void propagateTest();
-    CUDA_DEV void propagatePinTests(int to_pin_idx);
+    CUDA_DEV_INLINE bool hasPinFlag(int pin_id, uint8_t flag) const {
+        return pin_flags != nullptr && pin_id >= 0 && pin_id < num_pins &&
+               (pin_flags[pin_id] & flag) != 0u;
+    }
+    CUDA_DEV int timingLibraryId(int timing_id) const;
+    CUDA_DEV int pinLibraryId(int pin_id) const;
+    CUDA_DEV_INLINE void loadPinThresholds(int pin_id,
+                                    int attr,
+                                    double& vth,
+                                    double& vl,
+                                    double& vh,
+                                    double& slew_derate) const;
+    CUDA_DEV void driverLibraryThresholds(int library_id,
+                                          int attr,
+                                          double& vth,
+                                          double& vl,
+                                          double& vh,
+                                          double& slew_derate) const;
+    CUDA_DEV void thresholdAdjust(int load_pin_id,
+                                  int load_attr,
+                                  float driver_vth,
+                                  float driver_vl,
+                                  float driver_vh,
+                                  float driver_derate,
+                                  int driver_library_id,
+                                  double& wire_delay,
+                                  double& load_slew) const;
+    CUDA_DEV void inputPortDelaySlew(int load_pin_id,
+                                     int load_attr,
+                                     double source_slew,
+                                     double elmore,
+                                     double& wire_delay,
+                                     double& load_slew) const;
+    CUDA_DEV void gateCapDelaySlew(int timing_id,
+                                   int input_rf,
+                                   int output_rf,
+                                   float input_slew,
+                                   double load_cap,
+                                   double& delay,
+                                   double& slew);
+    CUDA_DEV_INLINE DmpGateArcMeta makeGateArcMeta(int pin_id,
+                                            int attr,
+                                            int timing_id,
+                                            int input_rf,
+                                            int output_rf,
+                                            float input_slew,
+                                            DmpDriverThresholds& thresholds);
+    CUDA_DEV_INLINE DmpGateArcMeta makeGateArcMetaForTiming(int timing_id,
+                                                          int input_rf,
+                                                          int to_attr,
+                                                          float input_slew,
+                                                          DmpDriverThresholds& thresholds);
+    CUDA_DEV_NOINLINE bool findDriverParamsLocalOnePole(const DmpGateArcMeta& gate_arc_meta,
+                                               const DmpDriverThresholds& thresholds,
+                                               const DmpRcParams& rc,
+                                               double& t0,
+                                               double& dt);
+    CUDA_DEV_NOINLINE bool findDriverParamsLocalPi(const DmpGateArcMeta& gate_arc_meta,
+                                          const DmpDriverThresholds& thresholds,
+                                          const DmpRcParams& rc,
+                                          const DmpWaveCoeffs& coeffs,
+                                          double A,
+                                          double B,
+                                          double D,
+                                          bool use_c2_initial_ceff,
+                                          double& t0,
+                                          double& dt,
+                                          double& ceff);
+    CUDA_DEV_INLINE void initDriverWave(DmpDriverWave& driver_wave);
+    CUDA_DEV_NOINLINE bool computeGateDriverWaveForSlot(const DmpGateArcMeta& gate_arc_meta,
+                                               const DmpDriverThresholds& thresholds,
+                                               int rc_slot,
+                                               DmpDriverWave& driver_wave,
+                                               float& gate_delay);
+    CUDA_DEV_NOINLINE bool computeZeroC2DriverWave(const DmpGateArcMeta& gate_arc_meta,
+                                               const DmpDriverThresholds& thresholds,
+                                               const DmpRcParams& rc,
+                                               DmpDriverWave& driver_wave,
+                                               float& gate_delay);
+    CUDA_DEV_NOINLINE bool computePiDriverWave(const DmpGateArcMeta& gate_arc_meta,
+                                               const DmpDriverThresholds& thresholds,
+                                               const DmpRcParams& rc,
+                                               DmpDriverWave& driver_wave,
+                                               float& gate_delay);
+    CUDA_DEV_INLINE bool computeGateArcDriverWave(int to_attr,
+                                         int input_rf,
+                                         int output_rf,
+                                         int to_slot,
+                                         int timing_id,
+                                         float input_slew,
+                                         DmpDriverWave& driver_wave,
+                                         float& gate_delay);
+    CUDA_DEV_INLINE bool computeDrivingCellDriverWave(int pin_slot,
+                                               int attr,
+                                               int timing_id,
+                                               int input_rf,
+                                               float input_slew,
+                                               DmpDriverWave& driver_wave,
+                                               float& gate_delay);
+    CUDA_DEV_NOINLINE void loadDelaySlewFromDriverWave(const DmpDriverWave& driver_wave,
+                                            const DmpDriverThresholds& thresholds,
+                                            int load_pin_id,
+                                            int load_attr,
+                                            double elmore,
+                                            double& wire_delay,
+                                            double& load_slew);
+    CUDA_DEV bool isIdealClockTimingArc(int timing_id, int from_pin_id) const;
+    CUDA_DEV_INLINE float clockPeriodForTest(int test_id) const;
+    CUDA_DEV float idealClockEdgeTime(int timing_id, int from_pin_id) const;
+    CUDA_DEV float idealClockSlew(int from_pin_id, int attr) const;
+    CUDA_DEV void propagateLoadSlewDelay(int arc_id, int attr);
+    CUDA_DEV bool updateAtWinner(int to_slot, float at, int arc_id, int from_attr);
+    CUDA_DEV_INLINE void propagateTest(int test_id, int from_pin_id, int attr, int el, int rf, int timing_id, int to_slot);
+    CUDA_DEV_INLINE void propagatePinTests(int to_pin_idx);
     CUDA_DEV void updatePinRat(int arc_id, float *from_rats);
     CUDA_DEV void propagateRAT(int arc_id, float *from_rats);
     CUDA_DEV void propagatePinBack(int level_idx, float *from_rats);
