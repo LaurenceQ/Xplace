@@ -151,7 +151,7 @@ def compare_spef_vs_ml(gputimer, infer_file, logger):
     t = gputimer.timer.time_unit() * 1e9
     gputimer.update_timing_spef()
     wns_early, tns_early, wns_late, tns_late = gputimer.report_timing_slack()
-    logger.info("SPEF Evaluation wns_early: %.3f, tns_early: %.3f, wns_late: %.3f, tns_late: %.3f" % (wns_early, tns_early, wns_late, tns_late))
+    logger.info("SPEF Evaluation wns_early: %.4f, tns_early: %.4f, wns_late: %.4f, tns_late: %.4f" % (wns_early, tns_early, wns_late, tns_late))
     at_spef = gputimer.timer.report_pin_at() * t
     gputimer.update_timing_infer(infer_file)
     at_ml   = gputimer.timer.report_pin_at() * t
@@ -162,7 +162,7 @@ def compare_opr_vs_ml(gputimer, infer_file, logger):
     """Compare OpenROAD GT AT vs ML inference AT. Returns (r2_per_corner, r2_overall)."""
     gputimer.update_timing_opr_infer(infer_file)
     wns_early, tns_early, wns_late, tns_late = gputimer.report_timing_slack()
-    logger.info("OPR Evaluation wns_early: %.3f, tns_early: %.3f, wns_late: %.3f, tns_late: %.3f" % (wns_early, tns_early, wns_late, tns_late))
+    logger.info("OPR Evaluation wns_early: %.4f, tns_early: %.4f, wns_late: %.4f, tns_late: %.4f" % (wns_early, tns_early, wns_late, tns_late))
     gputimer.timer.report_K_path(10, 1, 1, True)
     # gputimer.report_path("_81438_:D", 1, 0, True)
     # gputimer.report_path("qnt_cnt[3]", 1, 1, True)
@@ -251,7 +251,7 @@ def main():
         gputimer.update_timing_dmp_spef()
         label = "DMP SPEF evaluation"
     wns_early, tns_early, wns_late, tns_late = gputimer.report_timing_slack()
-    logger.info("%s: wns_early: %.3f, tns_early: %.3f, wns_late: %.3f, tns_late: %.3f" % (label, wns_early, tns_early, wns_late, tns_late))
+    logger.info("%s: wns_early: %.4f, tns_early: %.4f, wns_late: %.4f, tns_late: %.4f" % (label, wns_early, tns_early, wns_late, tns_late))
     time_to_ns = gputimer.timer.time_unit() * 1e9
     for pin_name in args.debug_pin_timing:
         try:

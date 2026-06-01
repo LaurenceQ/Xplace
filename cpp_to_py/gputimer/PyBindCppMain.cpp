@@ -46,6 +46,8 @@ std::shared_ptr<gt::GPUTimer> create_gputimer(const py::dict& kwargs,
         throw std::invalid_argument("Liberty file not found. Please check!");
     }
     std::shared_ptr<gt::GTDatabase> gtdb = std::make_shared<gt::GTDatabase>(rawdb, gpdb, timing_raw_db);
+    const bool direct_rc_mode = kwargs.contains("route_segments") || kwargs.contains("gr_rc");
+    gtdb->skip_legacy_rc_tensors = direct_rc_mode;
     profile_log("construct_gtdb");
     auto sdc = std::make_shared<gt::sdc::SDC>();
 
@@ -66,7 +68,6 @@ std::shared_ptr<gt::GPUTimer> create_gputimer(const py::dict& kwargs,
     std::shared_ptr<gt::GPUTimer> gputimer = std::make_shared<gt::GPUTimer>(gtdb, timing_raw_db);
     profile_log("construct_gputimer");
 
-    const bool direct_rc_mode = kwargs.contains("route_segments") || kwargs.contains("gr_rc");
     if (!direct_rc_mode) {
         readLUT("thirdparty/flute_mp/lut.ICCAD2015/POWV9.dat", "thirdparty/flute_mp/lut.ICCAD2015/POST9.dat");
         profile_log("read_flute_lut");

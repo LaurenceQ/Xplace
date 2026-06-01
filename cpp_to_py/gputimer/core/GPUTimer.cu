@@ -345,13 +345,18 @@ void GPUTimer::initialize() {
     __pinLoad__ = nullptr;
     __pinRAT__ = nullptr;
     __pinAT__ = nullptr;
+    pinWireCap = nullptr;
+    pinRootRes = nullptr;
     cudaMalloc(&pinCap, num_pins * (NUM_ATTR + 2) * sizeof(float));
-    cudaMalloc(&pinWireCap, num_pins * NUM_ATTR * sizeof(float));
+    if (!gtdb.skip_legacy_rc_tensors) {
+        cudaMalloc(&pinWireCap, num_pins * NUM_ATTR * sizeof(float));
+    }
     cudaMalloc(&testRelatedAT, num_tests * NUM_ATTR * sizeof(float));
     cudaMalloc(&testRAT, num_tests * NUM_ATTR * sizeof(float));
     cudaMalloc(&testConstraint, num_tests * NUM_ATTR * sizeof(float));
-    cudaMalloc(&pinRootRes, num_pins * NUM_ATTR * sizeof(float));
-    cudaMalloc(&arcSlew, num_arcs * 2 * NUM_ATTR * sizeof(float));
+    if (!gtdb.skip_legacy_rc_tensors) {
+        cudaMalloc(&pinRootRes, num_pins * NUM_ATTR * sizeof(float));
+    }
 
     cudaMalloc(&net_is_clock, num_nets * sizeof(int));
     cudaMalloc(&pin_is_clk, num_pins * sizeof(int));
@@ -415,7 +420,6 @@ GPUTimer::~GPUTimer() {
     cudaFree(testRAT);
     cudaFree(testConstraint);
     cudaFree(pinRootRes);
-    cudaFree(arcSlew);
 
     cudaFree(net_is_clock);
     cudaFree(pin_is_clk);
@@ -470,13 +474,12 @@ torch::Tensor GPUTimer::report_power_internal_lut_cuda_probe() {
 }
 
 void GPUTimer::update_states() {
-    cudaMemset(pinImpulse, 0, num_pins * NUM_ATTR * sizeof(float));
-    cudaMemset(pinRootRes, 0, num_pins * NUM_ATTR * sizeof(float));
-    cudaMemset(pinRootDelay, 0, num_pins * NUM_ATTR * sizeof(float));
-    cudaMemset(pinWireCap, 0, num_pins * NUM_ATTR * sizeof(float));
+    if (pinImpulse != nullptr) cudaMemset(pinImpulse, 0, num_pins * NUM_ATTR * sizeof(float));
+    if (pinRootRes != nullptr) cudaMemset(pinRootRes, 0, num_pins * NUM_ATTR * sizeof(float));
+    if (pinRootDelay != nullptr) cudaMemset(pinRootDelay, 0, num_pins * NUM_ATTR * sizeof(float));
+    if (pinWireCap != nullptr) cudaMemset(pinWireCap, 0, num_pins * NUM_ATTR * sizeof(float));
 
     reset_val<float><<<BLOCK_NUMBER(2 * num_arcs * NUM_ATTR), BLOCK_SIZE>>>(arcDelay, 2 * num_arcs * NUM_ATTR);
-    reset_val<float><<<BLOCK_NUMBER(2 * num_arcs * NUM_ATTR), BLOCK_SIZE>>>(arcSlew, 2 * num_arcs * NUM_ATTR);
     reset_val<float><<<BLOCK_NUMBER(num_tests * NUM_ATTR), BLOCK_SIZE>>>(testRelatedAT, num_tests * NUM_ATTR);
     reset_val<float><<<BLOCK_NUMBER(num_tests * NUM_ATTR), BLOCK_SIZE>>>(testRAT, num_tests * NUM_ATTR);
     reset_val<float><<<BLOCK_NUMBER(num_tests * NUM_ATTR), BLOCK_SIZE>>>(testConstraint, num_tests * NUM_ATTR);

@@ -2,7 +2,7 @@
 #include "gputiming.h"
 #include "utils.cuh"
 #include "GPUTimer.h"
-#include "power/PowerCudaModel.h"
+#include "power/common/PowerCudaModel.h"
 #include "timing/TimingPropagationModel.h"
 
 #include <algorithm>

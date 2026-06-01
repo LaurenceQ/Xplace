@@ -23,6 +23,14 @@ struct DmpForwardArcLevels {
     int max_net_level = -1;
     int max_level_direct_net_arcs = 0;
     int max_direct_net_level = -1;
+    long long gate_net_pairs = 0;
+    long long pair_lanes = 0;
+    long long valid_pair_lanes = 0;
+    long long invalid_pair_lanes = 0;
+    long long max_level_gate_net_pairs = 0;
+    int max_gate_net_pair_level = -1;
+    long long max_level_valid_pair_lanes = 0;
+    int max_valid_pair_lane_level = -1;
     int scratch_capacity_items = 0;
     int num_pins = 0;
     int num_arcs = 0;
@@ -70,6 +78,12 @@ static void dmp_init_kernel_profiles(DmpKernelProfile profiles[DMP_PROFILE_COUNT
 static bool dmp_root_profile_enabled()
 {
     const char* env = std::getenv("DMP_PROFILE_ROOTS");
+    return env != nullptr && env[0] != '\0' && env[0] != '0';
+}
+
+static bool dmp_level_arc_profile_enabled()
+{
+    const char* env = std::getenv("DMP_PROFILE_LEVEL_ARCS");
     return env != nullptr && env[0] != '\0' && env[0] != '0';
 }
 
@@ -152,6 +166,7 @@ static DmpForwardArcLevels build_forward_arc_levels(DmpModel* dmp_db,
     gpuErrchk(cudaMemcpy(&h_dmp, dmp_db, sizeof(DmpModel), cudaMemcpyDeviceToHost));
     h_dmp.owns_allocations = false;
     const bool log_schedule = dmp_kernel_profile_enabled() || dmp_timing_debug_enabled();
+    const bool log_level_arcs = dmp_level_arc_profile_enabled();
     if (h_dmp.num_pins <= 0 || h_dmp.num_arcs < 0 || level_list_end_cpu.empty()) {
         if (log_schedule) {
             printf("[DMP FORWARD SCHEDULE] skip build invalid dimensions pins=%d arcs=%d levels=%zu\n",
@@ -167,7 +182,11 @@ static DmpForwardArcLevels build_forward_arc_levels(DmpModel* dmp_db,
     vector<index_type> level_list(level_list_end_cpu.back());
     vector<index_type> fanin_end(h_dmp.num_pins + 1);
     vector<index_type> fanin_arcs(h_dmp.num_arcs);
+    vector<index_type> fanout_end(h_dmp.num_pins + 1);
+    vector<index_type> fanout_arcs(h_dmp.num_arcs);
     vector<index_type> timing_from(h_dmp.num_arcs);
+    vector<index_type> timing_to(h_dmp.num_arcs);
+    vector<int> timing_id_map(static_cast<size_t>(h_dmp.num_arcs) * 2u);
     vector<int> arc_types(h_dmp.num_arcs);
     if (!level_list.empty()) {
         gpuErrchk(cudaMemcpy(level_list.data(), h_dmp.level_list,
@@ -177,13 +196,31 @@ static DmpForwardArcLevels build_forward_arc_levels(DmpModel* dmp_db,
     gpuErrchk(cudaMemcpy(fanin_end.data(), h_dmp.pin_backward_arc_list_end,
                          sizeof(index_type) * fanin_end.size(),
                          cudaMemcpyDeviceToHost));
+    if (h_dmp.pin_forward_arc_list_end != nullptr) {
+        gpuErrchk(cudaMemcpy(fanout_end.data(), h_dmp.pin_forward_arc_list_end,
+                             sizeof(index_type) * fanout_end.size(),
+                             cudaMemcpyDeviceToHost));
+    }
     if (!fanin_arcs.empty()) {
         gpuErrchk(cudaMemcpy(fanin_arcs.data(), h_dmp.pin_backward_arc_list,
                              sizeof(index_type) * fanin_arcs.size(),
                              cudaMemcpyDeviceToHost));
+        if (h_dmp.pin_forward_arc_list != nullptr) {
+            gpuErrchk(cudaMemcpy(fanout_arcs.data(), h_dmp.pin_forward_arc_list,
+                                 sizeof(index_type) * fanout_arcs.size(),
+                                 cudaMemcpyDeviceToHost));
+        }
         gpuErrchk(cudaMemcpy(timing_from.data(), h_dmp.timing_arc_from_pin_id,
                              sizeof(index_type) * timing_from.size(),
                              cudaMemcpyDeviceToHost));
+        gpuErrchk(cudaMemcpy(timing_to.data(), h_dmp.timing_arc_to_pin_id,
+                             sizeof(index_type) * timing_to.size(),
+                             cudaMemcpyDeviceToHost));
+        if (h_dmp.timing_arc_id_map != nullptr) {
+            gpuErrchk(cudaMemcpy(timing_id_map.data(), h_dmp.timing_arc_id_map,
+                                 sizeof(int) * timing_id_map.size(),
+                                 cudaMemcpyDeviceToHost));
+        }
         gpuErrchk(cudaMemcpy(arc_types.data(), h_dmp.arc_types,
                              sizeof(int) * arc_types.size(),
                              cudaMemcpyDeviceToHost));
@@ -195,6 +232,9 @@ static DmpForwardArcLevels build_forward_arc_levels(DmpModel* dmp_db,
         const int gate_before = static_cast<int>(result.gate_arc_list.size());
         const int net_before = static_cast<int>(result.net_arc_list.size());
         const int direct_before = static_cast<int>(result.direct_net_arc_list.size());
+        long long level_gate_net_pairs = 0;
+        long long level_pair_lanes = 0;
+        long long level_valid_pair_lanes = 0;
         for (int pos = start; pos < end; ++pos) {
             const int pin = level_list[pos];
             for (index_type arc_pos = fanin_end[pin]; arc_pos < fanin_end[pin + 1]; ++arc_pos) {
@@ -204,6 +244,35 @@ static DmpForwardArcLevels build_forward_arc_levels(DmpModel* dmp_db,
                 }
                 if (arc_types[arc_id] == 1) {
                     result.gate_arc_list.push_back(arc_id);
+                    const int to_pin = timing_to[arc_id];
+                    long long sink_net_arcs = 0;
+                    if (to_pin >= 0 && to_pin < h_dmp.num_pins &&
+                        h_dmp.pin_forward_arc_list_end != nullptr &&
+                        h_dmp.pin_forward_arc_list != nullptr) {
+                        for (index_type fanout_pos = fanout_end[to_pin];
+                             fanout_pos < fanout_end[to_pin + 1];
+                             ++fanout_pos) {
+                            const int net_arc = fanout_arcs[fanout_pos];
+                            if (net_arc >= 0 && net_arc < h_dmp.num_arcs &&
+                                arc_types[net_arc] == 0) {
+                                ++sink_net_arcs;
+                            }
+                        }
+                    }
+                    int valid_lanes = DMP_PIN_GROUP_SIZE;
+                    if (h_dmp.timing_arc_id_map != nullptr) {
+                        valid_lanes = 0;
+                        for (int lane = 0; lane < DMP_PIN_GROUP_SIZE; ++lane) {
+                            const int el = lane >> 2;
+                            const int timing_id = timing_id_map[arc_id * 2 + el];
+                            if (timing_id >= 0) {
+                                ++valid_lanes;
+                            }
+                        }
+                    }
+                    level_gate_net_pairs += sink_net_arcs;
+                    level_pair_lanes += sink_net_arcs * DMP_PIN_GROUP_SIZE;
+                    level_valid_pair_lanes += sink_net_arcs * valid_lanes;
                 } else if (arc_types[arc_id] == 0) {
                     result.net_arc_list.push_back(arc_id);
                     const int from_pin = timing_from[arc_id];
@@ -228,6 +297,28 @@ static DmpForwardArcLevels build_forward_arc_levels(DmpModel* dmp_db,
         const int level_gate_arcs = static_cast<int>(result.gate_arc_list.size()) - gate_before;
         const int level_net_arcs = static_cast<int>(result.net_arc_list.size()) - net_before;
         const int level_direct_net_arcs = static_cast<int>(result.direct_net_arc_list.size()) - direct_before;
+        const long long level_invalid_pair_lanes = level_pair_lanes - level_valid_pair_lanes;
+        result.gate_net_pairs += level_gate_net_pairs;
+        result.pair_lanes += level_pair_lanes;
+        result.valid_pair_lanes += level_valid_pair_lanes;
+        result.invalid_pair_lanes += level_invalid_pair_lanes;
+        if (log_level_arcs) {
+            const int level_pins = end - start;
+            const int level_arcs = level_gate_arcs + level_net_arcs;
+            const long long gate_lanes = static_cast<long long>(level_gate_arcs) * DMP_PIN_GROUP_SIZE;
+            printf("[DMP LEVEL ARCS] L%d pins=%d arcs=%d gate_arcs=%d net_arcs=%d direct_net_arcs=%d gate_lanes=%lld gate_net_pairs=%lld pair_lanes=%lld valid_pair_lanes=%lld invalid_pair_lanes=%lld\n",
+                   level,
+                   level_pins,
+                   level_arcs,
+                   level_gate_arcs,
+                   level_net_arcs,
+                   level_direct_net_arcs,
+                   gate_lanes,
+                   level_gate_net_pairs,
+                   level_pair_lanes,
+                   level_valid_pair_lanes,
+                   level_invalid_pair_lanes);
+        }
         if (level_gate_arcs > result.max_level_gate_arcs) {
             result.max_level_gate_arcs = level_gate_arcs;
             result.max_gate_level = level;
@@ -240,23 +331,38 @@ static DmpForwardArcLevels build_forward_arc_levels(DmpModel* dmp_db,
             result.max_level_direct_net_arcs = level_direct_net_arcs;
             result.max_direct_net_level = level;
         }
+        if (level_gate_net_pairs > result.max_level_gate_net_pairs) {
+            result.max_level_gate_net_pairs = level_gate_net_pairs;
+            result.max_gate_net_pair_level = level;
+        }
+        if (level_valid_pair_lanes > result.max_level_valid_pair_lanes) {
+            result.max_level_valid_pair_lanes = level_valid_pair_lanes;
+            result.max_valid_pair_lane_level = level;
+        }
         result.gate_arc_end.push_back(static_cast<int>(result.gate_arc_list.size()));
         result.net_arc_end.push_back(static_cast<int>(result.net_arc_list.size()));
         result.direct_net_arc_end.push_back(static_cast<int>(result.direct_net_arc_list.size()));
     }
 
     if (log_schedule) {
-        printf("[DMP FORWARD SCHEDULE] built levels=%zu gate_arcs=%zu net_arcs=%zu direct_net_arcs=%zu max_gate=%d@L%d max_net=%d@L%d max_direct_net=%d@L%d scratch_capacity_items=%d mode=direct\n",
+        printf("[DMP FORWARD SCHEDULE] built levels=%zu gate_arcs=%zu net_arcs=%zu direct_net_arcs=%zu gate_net_pairs=%lld valid_pair_lanes=%lld invalid_pair_lanes=%lld max_gate=%d@L%d max_net=%d@L%d max_direct_net=%d@L%d max_pairs=%lld@L%d max_valid_pair_lanes=%lld@L%d scratch_capacity_items=%d mode=direct\n",
                result.gate_arc_end.empty() ? 0 : result.gate_arc_end.size() - 1,
                result.gate_arc_list.size(),
                result.net_arc_list.size(),
                result.direct_net_arc_list.size(),
+               result.gate_net_pairs,
+               result.valid_pair_lanes,
+               result.invalid_pair_lanes,
                result.max_level_gate_arcs,
                result.max_gate_level,
                result.max_level_net_arcs,
                result.max_net_level,
                result.max_level_direct_net_arcs,
                result.max_direct_net_level,
+               result.max_level_gate_net_pairs,
+               result.max_gate_net_pair_level,
+               result.max_level_valid_pair_lanes,
+               result.max_valid_pair_lane_level,
                result.scratch_capacity_items);
     }
     dmp_clear_stale_cuda_error("build forward arc levels");
@@ -742,7 +848,7 @@ __device__ void DmpModel::propagateRAT(int arc_id, float* from_rats)
     }
 }
 
-__device__ void DmpModel::propagatePinBack(int level_idx, float* from_rats)
+__device__ void DmpModel::propagatePinBack(int level_idx, float* from_rats) // can be arc level parallesim 
 {
     const index_type from_pin_id = level_list[level_idx];
     const int lane = threadIdx.x & (DMP_PIN_GROUP_SIZE - 1);

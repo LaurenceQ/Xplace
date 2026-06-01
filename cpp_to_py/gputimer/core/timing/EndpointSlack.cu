@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -33,8 +34,10 @@ struct EndpointSlackModel {
     float* endpoint_pin_slacks = nullptr;
     unsigned long long* debug_counts = nullptr;
     int num_pins = 0;
+    int num_arcs = 0;
     int num_tests = 0;
     int num_POs = 0;
+    int num_endpoint_pins = 0;
 };
 
 static void endpoint_clear_stale_cuda_error(const char* label)
@@ -61,6 +64,15 @@ static void endpoint_check_cuda_and_clear(const char* label)
     }
 }
 
+static void endpoint_abort_on_cuda_error(cudaError_t error, const char* label)
+{
+    if (error != cudaSuccess) {
+        fprintf(stderr, "[GPUTIMER CUDA] %s failed: %s\n",
+                label, cudaGetErrorString(error));
+        std::exit(error);
+    }
+}
+
 __global__ void update_endpoints_kernel0(EndpointSlackModel* model) {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int test_idx = idx >> 2;
@@ -68,7 +80,9 @@ __global__ void update_endpoints_kernel0(EndpointSlackModel* model) {
     const int el = i >> 1;
     if (test_idx < model->num_tests) {
         const int arc_id = model->test_id2_arc_id[test_idx];
+        if (arc_id < 0 || arc_id >= model->num_arcs) return;
         const int to_pin_id = model->timing_arc_to_pin_id[arc_id];
+        if (to_pin_id < 0 || to_pin_id >= model->num_pins) return;
         if (isnan(model->pinAT[to_pin_id * NUM_ATTR + i]) || isnan(model->testRAT[test_idx * NUM_ATTR + i])) return;
         if (el == 0) {
             model->endpoints0[test_idx * NUM_ATTR + i] = model->pinAT[to_pin_id * NUM_ATTR + i] - model->testRAT[test_idx * NUM_ATTR + i];
@@ -85,6 +99,7 @@ __global__ void update_endpoints_kernel1(EndpointSlackModel* model) {
     const int el = i >> 1;
     if (po_idx < model->num_POs) {
         const int pin_idx = model->primary_outputs[po_idx];
+        if (pin_idx < 0 || pin_idx >= model->num_pins) return;
         if (isnan(model->pinAT[pin_idx * NUM_ATTR + i]) || isnan(model->pinRAT[pin_idx * NUM_ATTR + i])) return;
         if (el == 0) {
             model->endpoints1[po_idx * NUM_ATTR + i] = model->pinAT[pin_idx * NUM_ATTR + i] - model->pinRAT[pin_idx * NUM_ATTR + i];
@@ -116,9 +131,11 @@ __global__ void update_endpoint_pin_slacks_kernel0(EndpointSlackModel* model) {
     const int el = i >> 1;
     if (test_idx < model->num_tests) {
         const int arc_id = model->test_id2_arc_id[test_idx];
+        if (arc_id < 0 || arc_id >= model->num_arcs) return;
         const int to_pin_id = model->timing_arc_to_pin_id[arc_id];
+        if (to_pin_id < 0 || to_pin_id >= model->num_pins) return;
         const int endpoint_id = model->test_id2_endpoint_id[test_idx];
-        if (endpoint_id < 0) {
+        if (endpoint_id < 0 || endpoint_id >= model->num_endpoint_pins) {
             return;
         }
         const float at = model->pinAT[to_pin_id * NUM_ATTR + i];
@@ -138,8 +155,9 @@ __global__ void update_endpoint_pin_slacks_kernel1(EndpointSlackModel* model) {
     const int el = i >> 1;
     if (po_idx < model->num_POs) {
         const int pin_idx = model->primary_outputs[po_idx];
+        if (pin_idx < 0 || pin_idx >= model->num_pins) return;
         const int endpoint_id = model->primary_output2_endpoint_id[po_idx];
-        if (endpoint_id < 0) {
+        if (endpoint_id < 0 || endpoint_id >= model->num_endpoint_pins) {
             return;
         }
         const float at = model->pinAT[pin_idx * NUM_ATTR + i];
@@ -358,13 +376,22 @@ void GPUTimer::debug_dump_endpoint_tests(const std::string& outfile,
 
 void GPUTimer::update_endpoints() {
     endpoint_clear_stale_cuda_error("update_endpoints");
-    torch::Tensor endpoints0 = torch::zeros({num_tests, NUM_ATTR}, torch::dtype(torch::kFloat32).device(torch::kCUDA)).contiguous();
-    torch::Tensor endpoints1 = torch::zeros({num_POs, NUM_ATTR}, torch::dtype(torch::kFloat32).device(torch::kCUDA)).contiguous();
+    const auto device = timing_raw_db.pinAT.device();
+    int target_device = -1;
+    if (device.is_cuda()) {
+        target_device = static_cast<int>(timing_raw_db.pinAT.get_device());
+        endpoint_abort_on_cuda_error(cudaSetDevice(target_device),
+                                     "update_endpoints cudaSetDevice");
+    }
+    auto float_options = torch::dtype(torch::kFloat32).device(device);
+
+    torch::Tensor endpoints0 = torch::zeros({num_tests, NUM_ATTR}, float_options).contiguous();
+    torch::Tensor endpoints1 = torch::zeros({num_POs, NUM_ATTR}, float_options).contiguous();
     torch::fill_(endpoints0, nanf(""));
     torch::fill_(endpoints1, nanf(""));
     endpoint_pin_slacks = torch::full({num_endpoint_pins, NUM_ATTR},
                                       FLT_MAX,
-                                      torch::dtype(torch::kFloat32).device(torch::kCUDA)).contiguous();
+                                      float_options).contiguous();
 
     EndpointSlackModel model;
     model.pinAT = pinAT;
@@ -380,11 +407,26 @@ void GPUTimer::update_endpoints() {
     model.endpoints1 = endpoints1.data_ptr<float>();
     model.endpoint_pin_slacks = endpoint_pin_slacks.data_ptr<float>();
     model.num_pins = num_pins;
+    model.num_arcs = num_arcs;
     model.num_tests = num_tests;
     model.num_POs = num_POs;
+    model.num_endpoint_pins = num_endpoint_pins;
     EndpointSlackModel* d_model = nullptr;
-    cudaMalloc(&d_model, sizeof(EndpointSlackModel));
-    cudaMemcpy(d_model, &model, sizeof(EndpointSlackModel), cudaMemcpyHostToDevice);
+    endpoint_abort_on_cuda_error(cudaMalloc(&d_model, sizeof(EndpointSlackModel)),
+                                 "update_endpoints cudaMalloc model");
+    endpoint_abort_on_cuda_error(cudaMemcpy(d_model, &model, sizeof(EndpointSlackModel), cudaMemcpyHostToDevice),
+                                 "update_endpoints cudaMemcpy model");
+
+    if (gputimer_env_enabled("GPUTIMER_ENDPOINT_DEBUG")) {
+        fprintf(stderr,
+                "[GPUTIMER ENDPOINT DEVICE] target=%d pinAT=%d pinRAT=%d endpoints0=%d endpoints1=%d endpoint_pin_slacks=%d\n",
+                target_device,
+                timing_raw_db.pinAT.is_cuda() ? static_cast<int>(timing_raw_db.pinAT.get_device()) : -1,
+                timing_raw_db.pinRAT.is_cuda() ? static_cast<int>(timing_raw_db.pinRAT.get_device()) : -1,
+                endpoints0.is_cuda() ? static_cast<int>(endpoints0.get_device()) : -1,
+                endpoints1.is_cuda() ? static_cast<int>(endpoints1.get_device()) : -1,
+                endpoint_pin_slacks.is_cuda() ? static_cast<int>(endpoint_pin_slacks.get_device()) : -1);
+    }
 
     update_endpoints_kernel0<<<BLOCK_NUMBER(num_tests * NUM_ATTR), BLOCK_SIZE>>>(d_model);
     endpoint_check_cuda_and_clear("update_endpoints_kernel0");
@@ -394,7 +436,8 @@ void GPUTimer::update_endpoints() {
     endpoint_check_cuda_and_clear("update_endpoint_pin_slacks_kernel0");
     update_endpoint_pin_slacks_kernel1<<<BLOCK_NUMBER(num_POs * NUM_ATTR), BLOCK_SIZE>>>(d_model);
     endpoint_check_cuda_and_clear("update_endpoint_pin_slacks_kernel1");
-    cudaFree(d_model);
+    endpoint_abort_on_cuda_error(cudaFree(d_model),
+                                 "update_endpoints cudaFree model");
     if (gputimer_env_enabled("GPUTIMER_ENDPOINT_DEBUG")) {
         print_endpoint_debug_summary(model);
     }

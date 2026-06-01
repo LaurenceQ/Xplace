@@ -13,7 +13,11 @@ Read this after `AGENTS.md`; open focused notes before grepping logs.
   `05_current_case_debugging.md`.
 - DMP timing path: `08_dmp_timing_path.md`, then
   `12_dmp_arc_vs_fallback_profile.md`.
-- Speed or memory: `09_speed_memory_status.md`, then `17_route_stage_speed_audit.md`.
+- Speed or memory: `09_speed_memory_status.md`, then
+  `17_route_stage_speed_audit.md`, then
+  `20_mempool_cluster_gpu_memory.md`, then
+  `21_dmp_fanout_wave_arc_level_plan.md`, then
+  `23_read_graph_rc_hotspots.md`.
 - Power accept/debug: `18_power_acceptance_plan.md`, then `15_power_alignment_flow.md`, `16_nangate45_power_alignment.md`, `13_power_merge_status.md`.
 - Power group/component alignment: `19_power_group_alignment.md`.
 - Hypotheses/results: `14_hypotheses_validation.md`.
@@ -42,6 +46,13 @@ Read this after `AGENTS.md`; open focused notes before grepping logs.
 - `15_power_alignment_flow.md`: OpenROAD oracle/cache and compare workflow.
 - `19_power_group_alignment.md`: OpenROAD power group rule, Xplace group
   implementation, current group-level status, and next activity mismatches.
+- `20_mempool_cluster_gpu_memory.md`: mempool_cluster GPU memory attribution,
+  per-array keep/remove candidates, and recommended memory optimization order.
+- `21_dmp_fanout_wave_arc_level_plan.md`: proposed fanout-wave split,
+  compact wave scratch memory budget, and arc-level backward RAT plan.
+- `22_dmp_pi_rc_derivative_chain.md`: DMP PI/RC derivative-chain notes.
+- `23_read_graph_rc_hotspots.md`: read/prep/graph/RC hotspot profile,
+  substage timing evidence, and optimization strategy.
 
 ## Do Not Confuse
 

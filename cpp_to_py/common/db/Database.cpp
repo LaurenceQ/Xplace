@@ -17,7 +17,55 @@
 #include "Via.h"
 #include "common/lib/Liberty.h"
 
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+
 using namespace db;
+
+namespace {
+
+bool xplace_io_profile_enabled()
+{
+    const char* value = std::getenv("XPLACE_IO_PROFILE");
+    if (value == nullptr || value[0] == '\0') {
+        return false;
+    }
+    return !(value[0] == '0' ||
+             value[0] == 'f' || value[0] == 'F' ||
+             value[0] == 'n' || value[0] == 'N');
+}
+
+class XplaceIoProfileTimer {
+public:
+    explicit XplaceIoProfileTimer(bool enabled)
+        : enabled_(enabled),
+          start_(std::chrono::steady_clock::now()),
+          last_(start_) {}
+
+    void log(const char* phase)
+    {
+        if (!enabled_) {
+            return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        const double elapsed = std::chrono::duration<double>(now - last_).count();
+        const double total = std::chrono::duration<double>(now - start_).count();
+        std::fprintf(stdout, "[XPLACE_IO_PROFILE] phase=%s elapsed=%.3f total=%.3f\n",
+                     phase,
+                     elapsed,
+                     total);
+        std::fflush(stdout);
+        last_ = now;
+    }
+
+private:
+    bool enabled_ = false;
+    std::chrono::steady_clock::time_point start_;
+    std::chrono::steady_clock::time_point last_;
+};
+
+}  // namespace
 
 string validate_token(string& name) {
     // remove '\'
@@ -54,29 +102,34 @@ Database::~Database() {
 }
 
 void Database::load() {
+    XplaceIoProfileTimer io_profile(xplace_io_profile_enabled());
     // ----- design related options -----
 
     if (setting.BookshelfAux != "") {
         setting.Format = "bookshelf";
         readBSAux(setting.BookshelfAux, setting.BookshelfPl);
         def_read = true;
+        io_profile.log("read_bookshelf");
     }
 
     if (setting.LefFile != "") {
         setting.Format = "lefdef";
         readLEF(setting.LefFile);
         lef_read = true;
+        io_profile.log("read_lef");
     } else if ((setting.LefCell != "") && (setting.LefTech != "")) {
         setting.Format = "lefdef";
         readLEF(setting.LefTech);
         readLEF(setting.LefCell);
         lef_read = true;
+        io_profile.log("read_lef");
     } else if (setting.LefFiles.size() > 0) {
         setting.Format = "lefdef";
         for (auto lef : setting.LefFiles) {
             readLEF(lef);
         }
         lef_read = true;
+        io_profile.log("read_lef");
     }
 
     if (setting.CellLib != "") {
@@ -89,6 +142,7 @@ void Database::load() {
         cell_libs_[gt::MIN] = lib;
         cell_libs_[gt::MAX] = cell_libs_[gt::MIN];
         liberty_read = true;
+        io_profile.log("read_liberty");
     } else if (setting.CellLib_MIN != "" && setting.CellLib_MAX != "") {
         auto lib_min = std::make_shared<gt::CellLib>();
         auto lib_max = std::make_shared<gt::CellLib>();
@@ -103,6 +157,7 @@ void Database::load() {
         cell_libs_[gt::MIN] = lib_min;
         cell_libs_[gt::MAX] = lib_max;
         liberty_read = true;
+        io_profile.log("read_liberty");
     }  else if (setting.LibFiles.size() > 0) {
         auto lib = std::make_shared<gt::CellLib>();
         if (lef_read) lib->rawdb = this;
@@ -113,30 +168,37 @@ void Database::load() {
         cell_libs_[gt::MIN] = lib;
         cell_libs_[gt::MAX] = cell_libs_[gt::MIN];
         liberty_read = true;
+        io_profile.log("read_liberty");
     }
 
 
     if (setting.DefFile != "") {
         setting.Format = "lefdef";
         readDEF(setting.DefFile);
+        io_profile.log("read_def");
         readDEFPG(setting.DefFile);
+        io_profile.log("read_def_pg");
         def_read = true;
     }
 
     if (setting.Size != "") {
         readSize(setting.Size);
+        io_profile.log("read_size");
     }
 
     if (setting.Constraints != "") {
         readConstraints(setting.Constraints);
+        io_profile.log("read_constraints");
     }
 
     // verilog is unused now
     if (setting.Verilog != "") {
         readVerilog_yy(setting.Verilog);
+        io_profile.log("read_verilog");
     }
 
     logger.info("Finish loading rawdb");
+    io_profile.log("load_done");
 }
 
 void Database::reset() {
@@ -733,18 +795,24 @@ void Database::SetupRowSegments() {
 }
 
 void Database::setup() {
+    XplaceIoProfileTimer io_profile(xplace_io_profile_enabled());
     if (def_read) {
         SetupLayers();
         SetupFloorplan();
+        io_profile.log("setup_layers_floorplan");
     }
     SetupCellLibrary();
+    io_profile.log("setup_cell_library");
     SetupRegions();
+    io_profile.log("setup_regions");
     if (!setting.liteMode) {
         SetupSiteMap();
         SetupRows();
         SetupRowSegments();
+        io_profile.log("setup_non_lite");
     }
     logger.info("Finish setting up rawdb");
+    io_profile.log("setup_done");
 }
 
 Layer& Database::addLayer(const string& name, const char type) {

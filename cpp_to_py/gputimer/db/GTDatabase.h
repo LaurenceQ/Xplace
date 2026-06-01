@@ -93,6 +93,8 @@ public:
     GTDatabase(shared_ptr<db::Database> rawdb_, shared_ptr<gp::GPDatabase> gpdb_, shared_ptr<TimingTorchRawDB> timing_raw_db_);
     ~GTDatabase();
 
+    bool skip_legacy_rc_tensors = false;
+
 public:
     void ExtractTimingGraph();
     void preparePinNameMapForSdc(const sdc::SDC& sdc);

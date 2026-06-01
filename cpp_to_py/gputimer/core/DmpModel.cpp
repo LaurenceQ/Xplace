@@ -3,6 +3,8 @@
 #include "common/utils/utils.h"
 #include "common/db/Database.h"
 #include "gputimer/db/GTDatabase.h"
+#include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <vector>
 #include <flute.hpp>
@@ -28,6 +30,36 @@ static bool dmp_progress_enabled()
            dmp_cpp_env_enabled("DMP_DEBUG_TIMING") ||
            dmp_cpp_env_enabled("DMP_RC_PROFILE");
 }
+
+class DmpRcStageProfile {
+public:
+    explicit DmpRcStageProfile(bool enabled)
+        : enabled_(enabled),
+          start_(std::chrono::steady_clock::now()),
+          last_(start_) {}
+
+    void log(const char* phase)
+    {
+        if (!enabled_) {
+            return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        const double elapsed = std::chrono::duration<double>(now - last_).count();
+        const double total = std::chrono::duration<double>(now - start_).count();
+        std::fprintf(stderr,
+                     "[DMP_RC_STAGE] phase=%s elapsed=%.3f total=%.3f\n",
+                     phase,
+                     elapsed,
+                     total);
+        std::fflush(stderr);
+        last_ = now;
+    }
+
+private:
+    bool enabled_ = false;
+    std::chrono::steady_clock::time_point start_;
+    std::chrono::steady_clock::time_point last_;
+};
 
 template <typename T>
 static void release_vector_storage(std::vector<T>& values)
@@ -412,7 +444,9 @@ void GPUTimer::init_dmp_rc_gr(const std::string& file) {
 }
 
 void GPUTimer::init_dmp_rc_route_segments(const std::string& file) {
+    DmpRcStageProfile rc_profile(dmp_cpp_env_enabled("DMP_RC_PROFILE"));
     HostRcGraph graph = build_openroad_route_segments_rc(file);
+    rc_profile.log("build_route_segments_graph");
     const int graph_num_nodes = graph.num_nodes;
     const int graph_num_edges = graph.num_edges;
     initialize_dmp_rc_explicit(graph.edge_from,
@@ -426,24 +460,30 @@ void GPUTimer::init_dmp_rc_route_segments(const std::string& file) {
                                num_nets,
                                graph.num_nodes,
                                graph.num_edges);
+    rc_profile.log("initialize_dmp_rc_explicit");
     release_host_rc_graph_storage(graph);
+    rc_profile.log("release_host_rc_graph");
     if (dmp_progress_enabled()) {
         printf("DMP route-segment RC calculation starting, num_nets: %d num_nodes: %d num_edges: %d\n",
                num_nets, graph_num_nodes, graph_num_edges);
         fflush(stdout);
     }
     calc_res_cap_dmp(dmp_db, num_nets);
+    rc_profile.log("calc_res_cap_dmp");
     if (dmp_progress_enabled()) {
         printf("DMP route-segment RC calculation done.\n");
         fflush(stdout);
     }
     propagate_rc_tree_dmp(dmp_db, num_nets);
+    rc_profile.log("propagate_rc_tree_dmp");
     if (dmp_progress_enabled()) {
         printf("DMP route-segment RC propagation done.\n");
         fflush(stdout);
     }
     dmp_prepare_timing_after_rc(h_dmp_db, dmp_db);
+    rc_profile.log("prepare_timing_after_rc");
     apply_dmp_driving_cell_source_slew(*this);
+    rc_profile.log("apply_driving_cell_source_slew");
 }
 
 void GPUTimer::debug_dump_dmp_rc_net(const std::string& net_name) {

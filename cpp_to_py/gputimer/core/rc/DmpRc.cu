@@ -324,13 +324,13 @@ __host__ void DmpModel::initialize_rc(const std::vector<int>& host_edge_from,
         cudaMalloc(&cnts, num_nodes * sizeof(int));
         cudaMalloc(&node_order, num_nodes * sizeof(int));
         cudaMalloc(&parent_node, num_nodes * sizeof(int));
-        cudaMalloc(&res_parent, num_nodes * NUM_ATTR * sizeof(float));
+        cudaMalloc(&res_parent, num_nodes * sizeof(float));
         cudaMalloc(&node_cap, num_nodes * NUM_ATTR * sizeof(float));
 
         cudaMemset(cnts, 0, num_nodes * sizeof(int));
         cudaMemset(node_order, 0, num_nodes * sizeof(int));
         cudaMemset(parent_node, -1, num_nodes * sizeof(int));
-        cudaMemset(res_parent, 0, num_nodes * NUM_ATTR * sizeof(float));
+        cudaMemset(res_parent, 0, num_nodes * sizeof(float));
         cudaMemset(node_cap, 0, num_nodes * NUM_ATTR * sizeof(float));
         cudaMemset(root_dist, -1, num_nodes * sizeof(int));
       }
@@ -389,11 +389,11 @@ __host__ void DmpModel::initialize_rc_explicit(
         dmp_rc_cuda_malloc_checked(&cnts, num_nodes, "cnts");
         dmp_rc_cuda_malloc_checked(&node_order, num_nodes, "node_order");
         dmp_rc_cuda_malloc_checked(&parent_node, num_nodes, "parent_node");
-        dmp_rc_cuda_malloc_checked(&res_parent, static_cast<size_t>(num_nodes) * NUM_ATTR, "res_parent");
+        dmp_rc_cuda_malloc_checked(&res_parent, static_cast<size_t>(num_nodes), "res_parent");
         dmp_rc_cuda_memset_checked(cnts, 0, static_cast<size_t>(num_nodes) * sizeof(int), "cnts");
         dmp_rc_cuda_memset_checked(node_order, 0, static_cast<size_t>(num_nodes) * sizeof(int), "node_order");
         dmp_rc_cuda_memset_checked(parent_node, -1, static_cast<size_t>(num_nodes) * sizeof(int), "parent_node");
-        dmp_rc_cuda_memset_checked(res_parent, 0, static_cast<size_t>(num_nodes) * NUM_ATTR * sizeof(float), "res_parent");
+        dmp_rc_cuda_memset_checked(res_parent, 0, static_cast<size_t>(num_nodes) * sizeof(float), "res_parent");
         dmp_rc_cuda_memset_checked(root_dist, -1, static_cast<size_t>(num_nodes) * sizeof(int), "root_dist");
       }
 
@@ -506,9 +506,7 @@ __device__ __forceinline__ void DmpModel::calc_dmp_rc(){
                 if ((root_dist[from] == d) && (root_dist[to] == -1)) {
                     root_dist[to] = d + 1;
                     parent_node[to] = from;
-                    for (int attr = 0; attr < NUM_ATTR; ++attr) {
-                        res_parent[to * NUM_ATTR + attr] = res;
-                    }
+                    res_parent[to] = res;
                     int order = atomicAdd(&cnts[d + nst], 1);
                     if(debug_on)printf("net:%s nst:%d offset:%d order:%d from:%d to:%d res:%.4f, cap:%.4f\n", net_names[idx], nst, offset, order, from, to, res, cap);
                     node_order[nst + offset + order] = to;
@@ -522,9 +520,7 @@ __device__ __forceinline__ void DmpModel::calc_dmp_rc(){
                 } else if ((root_dist[to] == d) && (root_dist[from] == -1)) {
                     parent_node[from] = to;
                     root_dist[from] = d + 1;
-                    for (int attr = 0; attr < NUM_ATTR; ++attr) {
-                        res_parent[from * NUM_ATTR + attr] = res;
-                    }
+                    res_parent[from] = res;
                     int order = atomicAdd(&cnts[d + nst], 1);
                     if(debug_on)printf("net:%s nst:%d offset:%d order:%d from:%d to:%d res:%.4f, cap:%.4f\n", net_names[idx], nst, offset, order, to, from, res, cap);
                     node_order[nst + offset + order] = from;
@@ -575,7 +571,7 @@ __device__ __forceinline__ void DmpModel::propagate_dmp_rc(){
             }
             if (pnode != -1){
                 const int parent_slot = pnode * NUM_ATTR + cond;
-                const float parent_res = res_parent[node_slot];
+                const float parent_res = res_parent[node];
                 const float node_y1 = y1[node_slot];
                 const float node_y2 = y2[node_slot];
                 if (down_cap != nullptr) {
@@ -626,7 +622,7 @@ __device__ __forceinline__ void DmpModel::propagate_dmp_rc(){
             int pin = node2pin_map[node];
             const int node_slot = node * NUM_ATTR + cond;
             const int parent_slot = pnode * NUM_ATTR + cond;
-            const float parent_res = res_parent[node_slot];
+            const float parent_res = res_parent[node];
             const float node_down_cap = down_cap != nullptr ? down_cap[node_slot] : y1[node_slot];
             float t = node_down_cap * parent_res;
             if(pnode != -1)delay_store[node_slot] = delay_store[parent_slot] + t;
@@ -768,7 +764,7 @@ void debug_dump_dmp_rc_net_cuda(DmpModel* h_dmp_db,
     std::vector<int> node_order_host(node_count);
     std::vector<int> parent_host(node_count);
     std::vector<int> node2pin_host(node_count);
-    std::vector<float> res_parent_host(node_count * NUM_ATTR);
+    std::vector<float> res_parent_host(node_count);
     std::vector<float> node_cap_host(node_count * NUM_ATTR);
     std::vector<float> down_cap_host(node_count * NUM_ATTR);
     std::vector<float> y1_host(node_count * NUM_ATTR);
@@ -782,7 +778,7 @@ void debug_dump_dmp_rc_net_cuda(DmpModel* h_dmp_db,
     gpuErrchk(cudaMemcpy(node_order_host.data(), h_dmp_db->node_order + nst, node_count * sizeof(int), cudaMemcpyDeviceToHost));
     gpuErrchk(cudaMemcpy(parent_host.data(), h_dmp_db->parent_node + nst, node_count * sizeof(int), cudaMemcpyDeviceToHost));
     gpuErrchk(cudaMemcpy(node2pin_host.data(), h_dmp_db->node2pin_map + nst, node_count * sizeof(int), cudaMemcpyDeviceToHost));
-    gpuErrchk(cudaMemcpy(res_parent_host.data(), h_dmp_db->res_parent + nst * NUM_ATTR, node_count * NUM_ATTR * sizeof(float), cudaMemcpyDeviceToHost));
+    gpuErrchk(cudaMemcpy(res_parent_host.data(), h_dmp_db->res_parent + nst, node_count * sizeof(float), cudaMemcpyDeviceToHost));
     gpuErrchk(cudaMemcpy(node_cap_host.data(), h_dmp_db->node_cap + nst * NUM_ATTR, node_count * NUM_ATTR * sizeof(float), cudaMemcpyDeviceToHost));
     gpuErrchk(cudaMemcpy(y1_host.data(), h_dmp_db->y1 + nst * NUM_ATTR, node_count * NUM_ATTR * sizeof(float), cudaMemcpyDeviceToHost));
     gpuErrchk(cudaMemcpy(y2_host.data(), h_dmp_db->y2 + nst * NUM_ATTR, node_count * NUM_ATTR * sizeof(float), cudaMemcpyDeviceToHost));
@@ -848,7 +844,7 @@ void debug_dump_dmp_rc_net_cuda(DmpModel* h_dmp_db,
                pos, local, node,
                parent_host[local] >= 0 ? parent_host[local] - nst : -1,
                pin, pin >= 0 ? pin_names[pin].c_str() : "<none>",
-               res_parent_host[local * NUM_ATTR + 0],
+               res_parent_host[local],
                node_cap_host[local * NUM_ATTR + 0], node_cap_host[local * NUM_ATTR + 1],
                node_cap_host[local * NUM_ATTR + 2], node_cap_host[local * NUM_ATTR + 3],
                down_cap_host[local * NUM_ATTR + 0], down_cap_host[local * NUM_ATTR + 1],

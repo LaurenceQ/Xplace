@@ -78,6 +78,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--missing-fanout-skip", default="auto")
     parser.add_argument("--force-openroad-golden", action="store_true")
     parser.add_argument("--no-instance-power-csv", action="store_true")
+    parser.add_argument("--strict-report-power-order", action="store_true")
     parser.add_argument("--worker", choices=["xplace"], default="")
     parser.add_argument("--worker-split", default="")
     parser.add_argument("--worker-design", default="")
@@ -104,6 +105,13 @@ def const_logic_value(text: str) -> str | None:
     if match and set(match.group(1)) == {"1"}:
         return "1"
     return None
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in ("", "0", "false", "no", "off")
 
 
 def write_xplace_const_port_file(split: str, design: str, out_dir: Path) -> Path | None:
@@ -995,6 +1003,8 @@ def run_xplace_parent(args: argparse.Namespace, split: str, design: str, log_pat
     ]
     if args.no_instance_power_csv:
         cmd.append("--no-instance-power-csv")
+    if args.strict_report_power_order:
+        cmd.append("--strict-report-power-order")
     xplace_root_dump = root_debug_path(args.xplace_root_dump, split, design, "xplace_roots.tsv")
     if xplace_root_dump is not None:
         xplace_root_dump.parent.mkdir(parents=True, exist_ok=True)
@@ -1024,7 +1034,15 @@ def time_stage(stages: dict[str, float], name: str, fn: Any, torch_mod: Any | No
 
 
 def tensor_sum(tensor: Any) -> float:
-    return float(tensor.detach().cpu().double().sum().item())
+    return float(tensor.detach().double().sum().item())
+
+
+def summarize_xplace_power_total(tensors: tuple[Any, ...]) -> dict[str, float]:
+    power = {component: 0.0 for component in COMPONENTS}
+    for component, tensor in zip(COMPONENTS[:3], tensors[:3]):
+        power[component] = tensor_sum(tensor)
+    power["total"] = power_result_total(power)
+    return power
 
 
 def xplace_power_group(cell_type: str) -> str:
@@ -1041,27 +1059,42 @@ def xplace_power_group(cell_type: str) -> str:
 def summarize_xplace_power_groups(gpdb: Any, tensors: tuple[Any, ...], group_codes: Any | None = None) -> dict[str, dict[str, float]]:
     import torch
 
-    cell_types = gpdb.node_id2celltype_name()
-    num_nodes = min(len(cell_types), int(tensors[0].numel()) if tensors else 0)
+    num_nodes = int(tensors[0].numel()) if tensors else 0
     group_to_code = {group: idx for idx, group in enumerate(POWER_GROUPS)}
+
+    def fallback_codes(count: int) -> list[int]:
+        cell_types = gpdb.node_id2celltype_name()
+        return [
+            group_to_code[xplace_power_group(cell_types[i] if i < len(cell_types) else "")]
+            for i in range(count)
+        ]
+
     if group_codes is None:
-        codes = [group_to_code[xplace_power_group(cell_types[i])] for i in range(num_nodes)]
-        code_tensor = torch.tensor(codes, dtype=torch.int64)
+        code_tensor = torch.tensor(fallback_codes(num_nodes), dtype=torch.int64)
     else:
-        code_tensor = group_codes.detach().cpu().to(dtype=torch.int64)[:num_nodes]
+        code_tensor = group_codes.detach().to(dtype=torch.int64)[:num_nodes]
         if int(code_tensor.numel()) < num_nodes:
-            fallback = [group_to_code[xplace_power_group(cell_types[i])] for i in range(num_nodes)]
-            fallback_tensor = torch.tensor(fallback, dtype=torch.int64)
+            fallback_tensor = torch.tensor(
+                fallback_codes(num_nodes),
+                dtype=torch.int64,
+                device=code_tensor.device,
+            )
             fallback_tensor[: int(code_tensor.numel())] = code_tensor
             code_tensor = fallback_tensor
     result = {group: {component: 0.0 for component in COMPONENTS} for group in POWER_GROUPS}
-    cpu_tensors = [tensor.detach().cpu().double()[:num_nodes] for tensor in tensors]
+    if num_nodes <= 0:
+        return result
+
+    code_tensor = code_tensor.to(device=tensors[0].device)
+    values = torch.stack([tensor.detach()[:num_nodes].double() for tensor in tensors[:3]], dim=1)
+    sums = torch.zeros((len(POWER_GROUPS), values.size(1)), dtype=values.dtype, device=values.device)
+    sums.index_add_(0, code_tensor, values)
+    sums_cpu = sums.cpu()
     for group, code in group_to_code.items():
-        mask = code_tensor == code
-        if not bool(mask.any()):
-            continue
-        for component, tensor in zip(COMPONENTS, cpu_tensors):
-            result[group][component] = float(tensor[mask].sum().item())
+        for component_idx, component in enumerate(COMPONENTS[:3]):
+            result[group][component] = float(sums_cpu[code, component_idx].item())
+    for group in POWER_GROUPS:
+        result[group]["total"] = power_result_total(result[group])
     return result
 
 
@@ -1597,7 +1630,7 @@ def run_xplace_worker(args: argparse.Namespace) -> int:
             )
             return 0
         tensors = time_stage(stages, "power", lambda: gputimer.timer.report_power_total_cuda(), torch)
-        power = {component: tensor_sum(tensor) for component, tensor in zip(COMPONENTS, tensors)}
+        power = time_stage(stages, "power_total_summary", lambda: summarize_xplace_power_total(tensors), torch)
         group_codes = time_stage(stages, "power_group_codes", lambda: gputimer.timer.report_power_group_codes(), torch)
         power_groups = time_stage(
             stages,
@@ -1619,9 +1652,19 @@ def run_xplace_worker(args: argparse.Namespace) -> int:
         report_order_power: dict[str, float] = {}
         report_order_power_groups: dict[str, Any] = {}
         report_order_stats: dict[str, Any] = {}
-        report_order_source = ""
+        report_order_source = "torch_parallel_no_order"
+        report_order_stats = {
+            "source": report_order_source,
+            "rows": int(tensors[0].numel()) if tensors else 0,
+            "matched": int(tensors[0].numel()) if tensors else 0,
+            "unmatched": 0,
+        }
         design_def = def_path(split, design)
-        if design_def.exists():
+        strict_report_order = args.strict_report_power_order or env_bool(
+            "XPLACE_POWER_STRICT_REPORT_ORDER",
+            False,
+        )
+        if strict_report_order and design_def.exists():
             report_order_source = "def_components_double"
             report_order_power, report_order_power_groups, report_order_stats = time_stage(
                 stages,
@@ -1629,7 +1672,7 @@ def run_xplace_worker(args: argparse.Namespace) -> int:
                 lambda: summarize_xplace_power_report_order(gpdb, tensors, group_codes, iter_def_component_names(design_def)),
                 torch,
             )
-        elif openroad_csv.exists():
+        elif strict_report_order and openroad_csv.exists():
             report_order_source = "openroad_csv_order_float32"
             report_order_power, report_order_power_groups, report_order_stats = time_stage(
                 stages,
@@ -1752,10 +1795,12 @@ def run_xplace_worker(args: argparse.Namespace) -> int:
                 "power_groups": report_order_power_groups or power_groups,
                 "power_double_sum": power,
                 "power_groups_double_sum": power_groups,
+                "power_tensor_device": str(tensors[0].device) if tensors else "",
+                "power_tensor_is_cuda": bool(getattr(tensors[0], "is_cuda", False)) if tensors else False,
                 "report_power_order_stats": report_order_stats,
                 "openroad_power_groups_by_xplace_group": openroad_power_groups_by_xplace_group,
                 "openroad_power_group_stats": openroad_power_group_stats,
-                "power_sum_order": report_order_source if report_order_power else "xplace_double",
+                "power_sum_order": report_order_source or "xplace_double",
                 "power_activity_engine": "cpu"
                 if os.environ.get("XPLACE_POWER_USE_CPU_ACTIVITY_FOR_POWER", "").strip()
                 not in ("", "0", "false", "False", "no", "off")
@@ -1815,6 +1860,7 @@ def flatten_row(split: str, design: str, opr: dict[str, Any], xpl: dict[str, Any
         "timer",
         "release_dmp_timing_scratch",
         "power",
+        "power_total_summary",
         "power_group_codes",
         "power_group_summary",
         "openroad_power_group_summary",
@@ -1873,6 +1919,8 @@ def flatten_row(split: str, design: str, opr: dict[str, Any], xpl: dict[str, Any
     row["openroad_power_csv"] = opr.get("power_csv")
     row["openroad_power_group_source"] = opr.get("power_group_source", "openroad_log_report_power")
     row["xplace_power_sum_order"] = xpl.get("power_sum_order")
+    row["xplace_power_tensor_device"] = xpl.get("power_tensor_device")
+    row["xplace_power_tensor_is_cuda"] = xpl.get("power_tensor_is_cuda")
     row["xplace_report_power_order_stats"] = xpl.get("report_power_order_stats")
     row["xplace_power_csv"] = xpl.get("power_csv")
     row["golden_reused"] = opr_rt.get("golden_reused")

@@ -27,6 +27,9 @@ struct GpuPowerExprOpHost {
     int var_key = -1; // Liberty port id for BDD variable identity/order
 };
 
+static constexpr int kGpuPowerExprConst0Pin = -1000000001;
+static constexpr int kGpuPowerExprConst1Pin = -1000000002;
+
 struct GpuPowerSeqHost {
     int data_expr_id = -1;
     int clk_expr_id = -1;
@@ -153,7 +156,8 @@ public:
                                               torch::Tensor* internal_row_meta_cpu = nullptr,
                                               torch::Tensor* inst_leakage_cpu = nullptr,
                                               torch::Tensor* leakage_row_power_cpu = nullptr,
-                                              torch::Tensor* leakage_row_meta_cpu = nullptr);
+                                              torch::Tensor* leakage_row_meta_cpu = nullptr,
+                                              bool output_power_tensors_cuda = false);
     void debug_dump_endpoint_tests(const std::string& outfile,
                                    const vector<std::string>& endpoint_pin_names);
 
@@ -217,7 +221,7 @@ public:
     int num_endpoint_pins;
     float *pinSlew, *pinLoad, *pinRAT, *pinAT;
     float *pinImpulse, *pinRootDelay, *pinRootRes;
-    float *arcDelay, *arcSlew;
+    float *arcDelay;
     float *pinCap, *pinWireCap;
     float *testRelatedAT, *testConstraint, *testRAT;
     float *test_clock_periods, *test_setup_uncertainties, *test_hold_uncertainties;

@@ -153,6 +153,106 @@ Built and installed from `build` with `conda activate gnn`, `make -j8`,
   old late-pass tolerance or ordered-queue diagnostics unless a new run
   regresses.
 
+## 2026-06-01 CUDA direct-expression activity fix
+
+- Current full-sweep evidence:
+  `result/codex_power_force_cuda_all_defaultmax8_20260601/summary.csv`.
+  It forces CUDA with `XPLACE_POWER_AUTO_CPU_ACTIVITY_PIN_LIMIT=0` and uses
+  default direct-expression max vars 8. All 12 visible/blind ISPD2025 rows pass
+  timing, total/component power, and every group/component row. All
+  `*.xplace.json` files report `power_activity_engine="cuda"`.
+- Root cause for the small-case activity mismatch was the direct polynomial
+  activity path using algebraically equivalent but differently rounded float
+  formulas versus the BDD/reference path. BDD-only CUDA was correct; the BDD
+  implementation was not the bad edit.
+- Fix: keep the fast direct expression path, but compute AND/OR/XOR activity
+  with BDD-style `fmaf` rounding, and default
+  `XPLACE_POWER_DIRECT_EXPR_MAX_VARS` to 8. This preserves the large-case fast
+  path while making small bsg-style feedback cases align.
+- Representative full-sweep rows:
+  visible/bsg `ptotal_err=3.44928e-08`, worst
+  `combinational.switching=1.81653e-06`; visible/group power 14.708s versus
+  OpenROAD 752.294s (51.15x), worst `clock.internal=0.000613238`;
+  visible/cluster power 49.054s versus 2607.337s (53.15x);
+  blind/group 14.834s versus 746.888s (50.35x); blind/cluster 50.215s versus
+  2603.604s (51.85x).
+- Stage profile accounting was also fixed after the full sweep: top-level
+  `XPLACE_STAGE power` had included CPU `inst_total` summation and report
+  wrapper cleanup that had no `[power_stage_profile]` row. New profile labels
+  `total_cpu_sum` and `report_total_unprofiled` close that accounting gap.
+  Verification artifacts:
+  `result/codex_power_stage_profile_sum2_ariane_20260601` and
+  `result/codex_power_stage_profile_sum2_mempool_group_20260601`; the latter
+  passes with 57.71x power speed and top/substage power-time diff 0.000369s
+  (0.003%).
+
+## 2026-06-01 report-order summary removal
+
+- The old default `report_power_order_summary` path was doing DEF-order
+  Python serial double accumulation over every instance. On
+  `visible/mempool_cluster` this meant 11.31M instance rows and about 34M
+  scalar `.item()` reads, which explained the 83.193s stage. It is not needed
+  for normal 1% OpenROAD power acceptance.
+- `tools/compare_ispd25_route_power_timing.py` now defaults to
+  `power_sum_order=torch_parallel_no_order`: total power is a torch double
+  reduce over component tensors, and group power uses `torch.bincount` by
+  `power_group_codes`. The DEF-order path is retained behind
+  `--strict-report-power-order` or `XPLACE_POWER_STRICT_REPORT_ORDER=1`.
+- Validation:
+  `result/codex_power_torch_summary_ariane_20260601` passes with
+  `power_total_summary=0.000828s`, `power_group_summary=0.099584s`, and no
+  `report_power_order_summary` stage.
+  `result/codex_power_torch_summary_mempool_group_20260601` passes with
+  `power_total_summary=0.000960s`, `power_group_summary=0.041031s`, and no
+  `report_power_order_summary` stage; previous full-sweep DEF-order
+  `visible/mempool_group` report-order time was 22.091s.
+  Strict-path smoke test
+  `result/codex_power_torch_summary_ariane_strict_20260601` still reports
+  `power_sum_order=def_components_double` and runs
+  `report_power_order_summary=0.737912s`.
+- Full forced-CUDA sweep after the change:
+  `result/codex_power_torch_summary_all_20260601/summary.csv`. All 12 rows
+  pass timing, total/component power, and every group/component row; every JSON
+  reports `power_activity_engine=cuda` and
+  `power_sum_order=torch_parallel_no_order`. No row has a
+  `report_power_order_summary` stage.
+- Large-case summary times from that full sweep:
+  visible/group `power_total_summary=0.001588s`,
+  `power_group_summary=0.041865s`; visible/cluster
+  `power_total_summary=0.031263s`, `power_group_summary=0.273047s`;
+  blind/group `power_total_summary=0.001180s`,
+  `power_group_summary=0.040609s`; blind/cluster
+  `power_total_summary=0.034732s`, `power_group_summary=0.269061s`.
+  Power-stage speedups vs cached OpenROAD power are visible/group 53.42x,
+  visible/cluster 50.68x, blind/group 52.33x, blind/cluster 46.83x.
+
+## 2026-06-01 GPU tensor reduce
+
+- Follow-up after the CPU reduce objection: `report_power_total_cuda()` now
+  asks `compute_power_activity_cuda()` to return the existing torch CUDA power
+  tensors instead of copying them to CPU. `inst_total` is formed on GPU, and
+  the C++ stage profile prints `total_gpu_sum`; the old power-tensor download
+  path is effectively zero. Other detailed probe/report helpers still default
+  to CPU tensors to avoid changing debug CSV behavior.
+- Python total summary reduces the CUDA tensors directly. Group summary now
+  stacks the three component tensors on GPU and uses one `index_add_` by
+  `power_group_codes`; the result is only a 5x3 tensor copied back for JSON.
+- Full forced-CUDA validation after this change:
+  `result/codex_power_gpu_indexadd_all_20260601/summary.csv`. All 12 rows pass
+  timing, total/component power, and every group/component row; every row
+  records `xplace_power_tensor_device=cuda:0` and
+  `xplace_power_tensor_is_cuda=True`; no row has
+  `report_power_order_summary`.
+- Large-case GPU summary times from that final sweep:
+  visible/group `power_total_summary=0.000512s`,
+  `power_group_summary=0.031480s`; visible/cluster
+  `power_total_summary=0.001061s`, `power_group_summary=0.064546s`;
+  blind/group `power_total_summary=0.000602s`,
+  `power_group_summary=0.035884s`; blind/cluster
+  `power_total_summary=0.000998s`, `power_group_summary=0.065355s`.
+  Power-stage speedups vs cached OpenROAD power are visible/group 57.96x,
+  visible/cluster 46.58x, blind/group 51.94x, blind/cluster 51.03x.
+
 ## Next debugging targets
 
 - No active numeric group/power mismatch remains for the 12-case visible/blind

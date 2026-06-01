@@ -689,21 +689,27 @@ void GTDatabase::ExtractTimingGraph() {
     timing_raw_db.pinLoad = torch::zeros({num_pins, NUM_ATTR}, torch::dtype(torch::kFloat32).device(torch::Device(device))).contiguous();
     timing_raw_db.pinRAT = torch::zeros({num_pins, NUM_ATTR}, torch::dtype(torch::kFloat32).device(torch::Device(device))).contiguous();
     timing_raw_db.pinAT = torch::zeros({num_pins, NUM_ATTR}, torch::dtype(torch::kFloat32).device(torch::Device(device))).contiguous();
-    timing_raw_db.pinImpulse = torch::zeros({num_pins, NUM_ATTR}, torch::dtype(torch::kFloat32).device(torch::Device(device))).contiguous();
-    timing_raw_db.pinRootDelay = torch::zeros({num_pins, NUM_ATTR}, torch::dtype(torch::kFloat32).device(torch::Device(device))).contiguous();
+    if (!skip_legacy_rc_tensors) {
+        timing_raw_db.pinImpulse = torch::zeros({num_pins, NUM_ATTR}, torch::dtype(torch::kFloat32).device(torch::Device(device))).contiguous();
+        timing_raw_db.pinRootDelay = torch::zeros({num_pins, NUM_ATTR}, torch::dtype(torch::kFloat32).device(torch::Device(device))).contiguous();
+    }
     timing_raw_db.at_prefix_pin = torch::zeros({num_pins, NUM_ATTR}, torch::dtype(torch::kInt32).device(torch::Device(device))).contiguous();
     timing_raw_db.at_prefix_arc = torch::zeros({num_pins, NUM_ATTR}, torch::dtype(torch::kInt32).device(torch::Device(device))).contiguous();
     timing_raw_db.at_prefix_attr = torch::zeros({num_pins, NUM_ATTR}, torch::dtype(torch::kInt32).device(torch::Device(device))).contiguous();
     torch::fill_(timing_raw_db.pinSlew, nanf(""));
     torch::fill_(timing_raw_db.pinRAT, nanf(""));
     torch::fill_(timing_raw_db.pinAT, nanf(""));
-    torch::fill_(timing_raw_db.pinImpulse, nanf(""));
-    torch::fill_(timing_raw_db.pinRootDelay, nanf(""));
+    if (!skip_legacy_rc_tensors) {
+        torch::fill_(timing_raw_db.pinImpulse, nanf(""));
+        torch::fill_(timing_raw_db.pinRootDelay, nanf(""));
+    } else {
+        logger.info("Skipping legacy RC timing tensors pinImpulse/pinRootDelay for direct route-segment eval");
+    }
 
     timing_raw_db.arcDelay = torch::zeros({num_arcs, 2 * NUM_ATTR}, torch::dtype(torch::kFloat32).device(torch::Device(device))).contiguous();
     gputimer_log_cuda_mem_info("GTDatabase::ExtractTimingGraph after_state_tensors");
     extract_profile.log("state_tensors");
-    if (!gputimer_env_enabled("GPUTIMER_DISABLE_REF_TIMING_TENSORS")) {
+    if (!skip_legacy_rc_tensors && !gputimer_env_enabled("GPUTIMER_DISABLE_REF_TIMING_TENSORS")) {
         timing_raw_db.pinImpulse_ref = torch::zeros({num_pins, NUM_ATTR}, torch::dtype(torch::kFloat32).device(torch::Device(device))).contiguous();
         timing_raw_db.pinLoad_ref = torch::zeros({num_pins, NUM_ATTR}, torch::dtype(torch::kFloat32).device(torch::Device(device))).contiguous();
         timing_raw_db.pinLoad_ratio = torch::zeros({num_pins, NUM_ATTR}, torch::dtype(torch::kFloat32).device(torch::Device(device))).contiguous();

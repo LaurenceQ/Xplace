@@ -20,7 +20,6 @@ void GPUTimer::initialize() {
     cudaMalloc(&testRAT, num_tests * NUM_ATTR * sizeof(float));
     cudaMalloc(&testConstraint, num_tests * NUM_ATTR * sizeof(float));
     cudaMalloc(&pinRootRes, num_pins * NUM_ATTR * sizeof(float));
-    cudaMalloc(&arcSlew, num_arcs * 2 * NUM_ATTR * sizeof(float));
 
     cudaMalloc(&net_is_clock, num_nets * sizeof(int));
     cudaMalloc(&pin_is_clk, num_pins * sizeof(int));
@@ -63,7 +62,6 @@ GPUTimer::~GPUTimer() {
     cudaFree(testRAT);
     cudaFree(testConstraint);
     cudaFree(pinRootRes);
-    cudaFree(arcSlew);
 
     cudaFree(net_is_clock);
     cudaFree(pin_is_clk);

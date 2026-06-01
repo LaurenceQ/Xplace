@@ -3,8 +3,6 @@
 file(GLOB_RECURSE SRC_FILES_GT ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp
                                 ${CMAKE_CURRENT_SOURCE_DIR}/*.hpp)
 file(GLOB_RECURSE SRC_FILES_GT_CUDA ${CMAKE_CURRENT_SOURCE_DIR}/*.cu)
-list(FILTER SRC_FILES_GT EXCLUDE REGEX ".*\\.part\\.cpp$")
-list(FILTER SRC_FILES_GT_CUDA EXCLUDE REGEX ".*\\.part\\.cu$")
 
 # OpenMP
 find_package(OpenMP REQUIRED)

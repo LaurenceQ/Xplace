@@ -27,8 +27,8 @@ GPUTimer::GPUTimer(std::shared_ptr<GTDatabase> gtdb_, shared_ptr<TimingTorchRawD
       pinLoad(timing_raw_db.pinLoad.data_ptr<float>()),
       pinRAT(timing_raw_db.pinRAT.data_ptr<float>()),
       pinAT(timing_raw_db.pinAT.data_ptr<float>()),
-      pinImpulse(timing_raw_db.pinImpulse.data_ptr<float>()),
-      pinRootDelay(timing_raw_db.pinRootDelay.data_ptr<float>()),
+      pinImpulse(timing_raw_db.pinImpulse.defined() ? timing_raw_db.pinImpulse.data_ptr<float>() : nullptr),
+      pinRootDelay(timing_raw_db.pinRootDelay.defined() ? timing_raw_db.pinRootDelay.data_ptr<float>() : nullptr),
       arcDelay(timing_raw_db.arcDelay.data_ptr<float>()),
       // Critical path prefix info
       at_prefix_pin(timing_raw_db.at_prefix_pin.data_ptr<index_type>()),
