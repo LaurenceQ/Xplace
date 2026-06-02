@@ -55,6 +55,14 @@ public:
 
     const std::vector<index_type>& pins() const { return pins_id; }
     std::unordered_map<std::string, int> portMap;
+    void clearPins() {
+        portMap.clear();
+        pins_id.clear();
+    }
+    void reservePins(std::size_t count) {
+        portMap.reserve(count);
+        pins_id.reserve(count);
+    }
     void addPin(index_type pin_id, std::string macroPinName) {
         portMap[macroPinName] = pin_id;
         pins_id.emplace_back(pin_id);

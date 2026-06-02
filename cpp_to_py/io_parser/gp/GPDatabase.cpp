@@ -23,6 +23,22 @@
 
 namespace gp {
 
+namespace {
+
+int gpdbThreadCount(const char* env_name)
+{
+    int threads = std::max(1, db::setting.numThreads);
+    if (const char* thread_env = std::getenv(env_name)) {
+        const int env_threads = std::atoi(thread_env);
+        if (env_threads > 0) {
+            threads = env_threads;
+        }
+    }
+    return threads;
+}
+
+}  // namespace
+
 GPDatabase::~GPDatabase() { logger.info("destruct gpdb"); }
 
 std::vector<index_type> GPDatabase::getIONets() {
@@ -298,9 +314,88 @@ void GPDatabase::setupNodes() {
 }
 
 void GPDatabase::setupNets() {
-    // setup nets and their pins
-    for (index_type dbnet_id = 0; dbnet_id < static_cast<index_type>(database.nets.size()); dbnet_id++) {
-        addNet(dbnet_id);
+    std::vector<index_type> net_pin_start(num_nets + 1, 0);
+    for (index_type dbnet_id = 0; dbnet_id < static_cast<index_type>(database.nets.size()); ++dbnet_id) {
+        net_pin_start[dbnet_id + 1] =
+            net_pin_start[dbnet_id] + static_cast<index_type>(database.nets[dbnet_id]->pins.size());
+    }
+    assert_msg(net_pin_start[num_nets] == static_cast<index_type>(num_pins),
+               "GPDB pin prefix mismatch: prefix=%ld num_pins=%u",
+               net_pin_start[num_nets], num_pins);
+
+    nets.resize(num_nets);
+    pins.resize(num_pins);
+    net_names.resize(num_nets);
+
+    const int setup_threads = gpdbThreadCount("XPLACE_GPDB_SETUP_THREADS");
+#pragma omp parallel for num_threads(setup_threads) schedule(dynamic, 1024)
+    for (index_type dbnet_id = 0; dbnet_id < static_cast<index_type>(database.nets.size()); ++dbnet_id) {
+        auto dbnet = database.nets[dbnet_id];
+        GPNet& net = nets[dbnet_id];
+        net.setId(dbnet_id);
+        net.setName(dbnet->name);
+        net.setOriDBId(dbnet_id);
+        dbnet->gpdb_id = dbnet_id;
+        net_names[dbnet_id] = dbnet->name;
+
+        const index_type pin_begin = net_pin_start[dbnet_id];
+        for (index_type pin_offset = 0; pin_offset < static_cast<index_type>(dbnet->pins.size()); ++pin_offset) {
+            db::Pin* dbpin = dbnet->pins[pin_offset];
+            assert_msg(dbpin->is_connected, "Pin is not connected!");
+            const bool is_iopin = dbpin->iopin != nullptr;
+            const db::PinType* pintype = is_iopin ? dbpin->iopin->type : dbpin->type;
+            GPNode& node = is_iopin ? nodes.at(dbpin->iopin->gpdb_id)
+                                    : nodes.at(dbpin->cell->gpdb_id);
+            const index_type pin_id = pin_begin + pin_offset;
+
+            GPPin& pin = pins[pin_id];
+            pin.setId(pin_id);
+            const std::string inst_name = node.getName();
+            const std::string macro_pin_name = pintype->name();
+            pin.setName(is_iopin ? macro_pin_name : inst_name + ":" + macro_pin_name);
+            pin.setMacroName(macro_pin_name);
+            pin.setRelLx(pintype->boundLX);
+            pin.setRelLy(pintype->boundLY);
+            pin.setWidth(pintype->getW());
+            pin.setHeight(pintype->getH());
+            pin.setDirection(pintype->direction());
+            pin.setType(pintype->type());
+            pin.setParNodeId(node.getId());
+            pin.setParNetId(net.getId());
+            pin.setOriDBInfo({node.getOriDBId(), is_iopin ? -1 : dbpin->parentCellPinId, net.getOriDBId()});
+
+            net.addPin(pin.getId(), pintype->direction() == 'o');
+            dbpin->gpdb_id = pin.getId();
+        }
+    }
+
+    std::vector<index_type> node_pin_counts(num_nodes, 0);
+    for (const GPPin& pin : pins) {
+        ++node_pin_counts[pin.getParNodeId()];
+    }
+
+    std::vector<index_type> node_pin_start(num_nodes + 1, 0);
+    for (index_type node_id = 0; node_id < static_cast<index_type>(num_nodes); ++node_id) {
+        node_pin_start[node_id + 1] = node_pin_start[node_id] + node_pin_counts[node_id];
+    }
+    std::vector<index_type> node_pin_cursor = node_pin_start;
+    std::vector<index_type> flat_node_pins(num_pins);
+    for (const GPPin& pin : pins) {
+        const index_type node_id = pin.getParNodeId();
+        flat_node_pins[node_pin_cursor[node_id]++] = pin.getId();
+    }
+
+#pragma omp parallel for num_threads(setup_threads) schedule(static)
+    for (index_type node_id = 0; node_id < static_cast<index_type>(num_nodes); ++node_id) {
+        GPNode& node = nodes[node_id];
+        const index_type begin = node_pin_start[node_id];
+        const index_type end = node_pin_start[node_id + 1];
+        node.clearPins();
+        node.reservePins(static_cast<std::size_t>(end - begin));
+        for (index_type pos = begin; pos < end; ++pos) {
+            const index_type pin_id = flat_node_pins[pos];
+            node.addPin(pin_id, pins[pin_id].getMacroName());
+        }
     }
 }
 
@@ -313,16 +408,26 @@ void GPDatabase::setupRegions() {
 }
 
 void GPDatabase::setupIndexMap() {
-    for (auto& pin : pins) {
-        const GPNode& node = nodes.at(pin.getParNodeId());
-        const GPNet& net = nets.at(pin.getParNetId());
-        pin_id2node_id.emplace_back(node.getId());
-        pin_id2net_id.emplace_back(net.getId());
-        pin_names.push_back(pin.getName());
+    pin_id2node_id.resize(num_pins);
+    pin_id2net_id.resize(num_pins);
+    pin_names.resize(num_pins);
+    node_id2node_name.resize(num_nodes);
+    node_id2celltype_name.resize(num_nodes);
+
+    const int setup_threads = gpdbThreadCount("XPLACE_GPDB_SETUP_THREADS");
+#pragma omp parallel for num_threads(setup_threads) schedule(static)
+    for (index_type pin_id = 0; pin_id < static_cast<index_type>(pins.size()); ++pin_id) {
+        const GPPin& pin = pins[pin_id];
+        pin_id2node_id[pin_id] = pin.getParNodeId();
+        pin_id2net_id[pin_id] = pin.getParNetId();
+        pin_names[pin_id] = pin.getName();
     }
-    for (auto& node : nodes) {
-        node_id2node_name.emplace_back(node.getName());
-        node_id2celltype_name.emplace_back(node.getCellTypeName());
+
+#pragma omp parallel for num_threads(setup_threads) schedule(static)
+    for (index_type node_id = 0; node_id < static_cast<index_type>(nodes.size()); ++node_id) {
+        const GPNode& node = nodes[node_id];
+        node_id2node_name[node_id] = node.getName();
+        node_id2celltype_name[node_id] = node.getCellTypeName();
     }
 }
 
@@ -497,13 +602,7 @@ void GPDatabase::transferOrient() {
 
     // create a vector to restore statistics
     constexpr int numOrientTypes = 9;  // 0:N, 1:W, 2:S, 3:E, 4:FN, 5:FW, 6:FS, 7:FE, -1:NONE
-    int orient_threads = std::max(1, db::setting.numThreads);
-    if (const char* thread_env = std::getenv("XPLACE_GPDB_ORIENT_THREADS")) {
-        const int env_threads = std::atoi(thread_env);
-        if (env_threads > 0) {
-            orient_threads = env_threads;
-        }
-    }
+    const int orient_threads = gpdbThreadCount("XPLACE_GPDB_ORIENT_THREADS");
     std::vector<std::array<int, numOrientTypes>> thread_orient_counts(orient_threads);
     for (auto& counts : thread_orient_counts) {
         counts.fill(0);
