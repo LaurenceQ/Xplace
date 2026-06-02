@@ -209,7 +209,7 @@ PowerCudaRunBuffers preparePowerCudaRunBuffers(GPUTimer& timer,
         out_gpu_ptr = out_gpu.data_ptr<float>();
     }
 
-    constexpr int64_t default_cpu_activity_pin_limit = 4000000;
+    constexpr int64_t default_cpu_activity_pin_limit = 0;
     const int64_t auto_cpu_activity_pin_limit =
         readPowerEnvInt64("XPLACE_POWER_AUTO_CPU_ACTIVITY_PIN_LIMIT", default_cpu_activity_pin_limit);
     const bool force_cpu_activity_for_power =
