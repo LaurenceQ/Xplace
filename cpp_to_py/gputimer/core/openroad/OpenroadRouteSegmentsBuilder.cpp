@@ -980,37 +980,45 @@ HostRcGraph GPUTimer::build_openroad_route_segments_rc(const std::string& file) 
     graph.num_edges = static_cast<int>(total_edges);
 
     const auto materialize_start = std::chrono::steady_clock::now();
-    graph.edge_from.reserve(static_cast<std::size_t>(graph.num_edges));
-    graph.edge_to.reserve(static_cast<std::size_t>(graph.num_edges));
-    graph.edge_res.reserve(static_cast<std::size_t>(graph.num_edges));
-    graph.node2pin.reserve(static_cast<std::size_t>(graph.num_nodes));
-    graph.node_cap.reserve(static_cast<std::size_t>(graph.num_nodes) * NUM_ATTR);
+    graph.edge_from.resize(static_cast<std::size_t>(graph.num_edges));
+    graph.edge_to.resize(static_cast<std::size_t>(graph.num_edges));
+    graph.edge_res.resize(static_cast<std::size_t>(graph.num_edges));
+    graph.node2pin.resize(static_cast<std::size_t>(graph.num_nodes));
+    graph.node_cap.resize(static_cast<std::size_t>(graph.num_nodes) * NUM_ATTR);
     if (keep_route_node_names) {
-        graph.node_names.reserve(static_cast<std::size_t>(graph.num_nodes));
+        graph.node_names.resize(static_cast<std::size_t>(graph.num_nodes));
     }
 
+    int materialize_threads = finalize_threads;
+    if (const char* thread_env = std::getenv("GPUTIMER_ROUTE_SEG_MATERIALIZE_THREADS")) {
+        const int env_threads = std::atoi(thread_env);
+        if (env_threads > 0) {
+            materialize_threads = env_threads;
+        }
+    }
+
+#pragma omp parallel for num_threads(materialize_threads) schedule(dynamic, 1024)
     for (int net_idx = 0; net_idx < num_nets; ++net_idx) {
         LocalSpefNetRc* local = local_nets[net_idx].get();
         if (local == nullptr) {
             continue;
         }
         const int node_base = graph.net2node_start[net_idx];
-        for (std::size_t edge = 0; edge < local->edge_from.size(); ++edge) {
-            graph.edge_from.emplace_back(node_base + local->edge_from[edge]);
-            graph.edge_to.emplace_back(node_base + local->edge_to[edge]);
-            graph.edge_res.emplace_back(local->edge_res[edge]);
+        const int edge_base = graph.net2edge_start[net_idx];
+        for (int edge = 0; edge < static_cast<int>(local->edge_from.size()); ++edge) {
+            const int global_edge = edge_base + edge;
+            graph.edge_from[global_edge] = node_base + local->edge_from[edge];
+            graph.edge_to[global_edge] = node_base + local->edge_to[edge];
+            graph.edge_res[global_edge] = local->edge_res[edge];
         }
         for (int node = 0; node < static_cast<int>(local->node2pin.size()); ++node) {
-            graph.node2pin.emplace_back(local->node2pin[node]);
-            if (keep_route_node_names) {
-                if (node < static_cast<int>(local->node_names.size())) {
-                    graph.node_names.emplace_back(std::move(local->node_names[node]));
-                } else {
-                    graph.node_names.emplace_back("");
-                }
+            const int global_node = node_base + node;
+            graph.node2pin[global_node] = local->node2pin[node];
+            if (keep_route_node_names && node < static_cast<int>(local->node_names.size())) {
+                graph.node_names[global_node] = std::move(local->node_names[node]);
             }
             for (int attr = 0; attr < NUM_ATTR; ++attr) {
-                graph.node_cap.emplace_back(local->node_cap[node * NUM_ATTR + attr]);
+                graph.node_cap[global_node * NUM_ATTR + attr] = local->node_cap[node * NUM_ATTR + attr];
             }
         }
         local_nets[net_idx].reset();
