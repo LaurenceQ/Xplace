@@ -477,7 +477,7 @@ void GTDatabase::ExtractTimingGraph() {
     for (int pin_index = 0; pin_index < gp_pin_count; ++pin_index) {
         const auto& gppin = gp_pins[pin_index];
         int pin_id = static_cast<int>(gppin.getId());
-        string pin_macro_name = gppin.getMacroName();
+        const std::string& pin_macro_name = gppin.getMacroName();
         auto [ori_node_id, ori_node_pin_id, ori_net_id] = gppin.getOriDBInfo();
         (void) ori_net_id;
         if (ori_node_pin_id == -1) {

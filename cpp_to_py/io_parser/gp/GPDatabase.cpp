@@ -37,6 +37,15 @@ int gpdbThreadCount(const char* env_name)
     return threads;
 }
 
+bool gpdbProfileEnabled()
+{
+    const char* profile_env = std::getenv("XPLACE_IO_PROFILE");
+    return profile_env != nullptr && profile_env[0] != '\0' &&
+           profile_env[0] != '0' &&
+           profile_env[0] != 'f' && profile_env[0] != 'F' &&
+           profile_env[0] != 'n' && profile_env[0] != 'N';
+}
+
 }  // namespace
 
 GPDatabase::~GPDatabase() { logger.info("destruct gpdb"); }
@@ -143,10 +152,13 @@ void GPDatabase::addPin(db::Pin* dbpin, const db::PinType* pintype, GPNode& node
     GPPin& pin = pins.back();
     pin.setId(pins.size() - 1);
 
-    std::string instName = node.getName();
-    std::string macroPinName = pintype->name();
-    isIOPin ? pin.setName(macroPinName) : pin.setName(instName + ":" + macroPinName);
-    pin.setMacroName(macroPinName);
+    const std::string& macroPinName = pintype->name();
+    if (isIOPin) {
+        pin.setName(macroPinName);
+    } else {
+        pin.setName(node.getName() + ":" + macroPinName);
+    }
+    pin.setMacroNameRef(macroPinName);
 
     pin.setRelLx(pintype->boundLX);
     pin.setRelLy(pintype->boundLY);
@@ -314,6 +326,24 @@ void GPDatabase::setupNodes() {
 }
 
 void GPDatabase::setupNets() {
+    const int setup_threads = gpdbThreadCount("XPLACE_GPDB_SETUP_THREADS");
+    const bool profile = gpdbProfileEnabled();
+    const auto profile_start = std::chrono::steady_clock::now();
+    auto profile_last = profile_start;
+    auto profile_log = [&](const char* phase) {
+        if (!profile) {
+            return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        const double elapsed = std::chrono::duration<double>(now - profile_last).count();
+        const double total = std::chrono::duration<double>(now - profile_start).count();
+        std::fprintf(stdout,
+                     "[XPLACE_GPDB_SETUP_NETS_PROFILE] phase=%s elapsed=%.3f total=%.3f threads=%d\n",
+                     phase, elapsed, total, setup_threads);
+        std::fflush(stdout);
+        profile_last = now;
+    };
+
     std::vector<index_type> net_pin_start(num_nets + 1, 0);
     for (index_type dbnet_id = 0; dbnet_id < static_cast<index_type>(database.nets.size()); ++dbnet_id) {
         net_pin_start[dbnet_id + 1] =
@@ -322,12 +352,13 @@ void GPDatabase::setupNets() {
     assert_msg(net_pin_start[num_nets] == static_cast<index_type>(num_pins),
                "GPDB pin prefix mismatch: prefix=%ld num_pins=%u",
                net_pin_start[num_nets], num_pins);
+    profile_log("net_pin_prefix");
 
     nets.resize(num_nets);
     pins.resize(num_pins);
     net_names.resize(num_nets);
+    profile_log("resize");
 
-    const int setup_threads = gpdbThreadCount("XPLACE_GPDB_SETUP_THREADS");
 #pragma omp parallel for num_threads(setup_threads) schedule(dynamic, 1024)
     for (index_type dbnet_id = 0; dbnet_id < static_cast<index_type>(database.nets.size()); ++dbnet_id) {
         auto dbnet = database.nets[dbnet_id];
@@ -350,10 +381,13 @@ void GPDatabase::setupNets() {
 
             GPPin& pin = pins[pin_id];
             pin.setId(pin_id);
-            const std::string inst_name = node.getName();
-            const std::string macro_pin_name = pintype->name();
-            pin.setName(is_iopin ? macro_pin_name : inst_name + ":" + macro_pin_name);
-            pin.setMacroName(macro_pin_name);
+            const std::string& macro_pin_name = pintype->name();
+            if (is_iopin) {
+                pin.setName(macro_pin_name);
+            } else {
+                pin.setName(node.getName() + ":" + macro_pin_name);
+            }
+            pin.setMacroNameRef(macro_pin_name);
             pin.setRelLx(pintype->boundLX);
             pin.setRelLy(pintype->boundLY);
             pin.setWidth(pintype->getW());
@@ -368,22 +402,27 @@ void GPDatabase::setupNets() {
             dbpin->gpdb_id = pin.getId();
         }
     }
+    profile_log("pin_fill");
 
     std::vector<index_type> node_pin_counts(num_nodes, 0);
     for (const GPPin& pin : pins) {
         ++node_pin_counts[pin.getParNodeId()];
     }
+    profile_log("node_pin_count");
 
     std::vector<index_type> node_pin_start(num_nodes + 1, 0);
     for (index_type node_id = 0; node_id < static_cast<index_type>(num_nodes); ++node_id) {
         node_pin_start[node_id + 1] = node_pin_start[node_id] + node_pin_counts[node_id];
     }
+    profile_log("node_pin_prefix");
+
     std::vector<index_type> node_pin_cursor = node_pin_start;
     std::vector<index_type> flat_node_pins(num_pins);
     for (const GPPin& pin : pins) {
         const index_type node_id = pin.getParNodeId();
         flat_node_pins[node_pin_cursor[node_id]++] = pin.getId();
     }
+    profile_log("node_pin_flatten");
 
 #pragma omp parallel for num_threads(setup_threads) schedule(static)
     for (index_type node_id = 0; node_id < static_cast<index_type>(num_nodes); ++node_id) {
@@ -397,6 +436,7 @@ void GPDatabase::setupNets() {
             node.addPin(pin_id, pins[pin_id].getMacroName());
         }
     }
+    profile_log("node_pin_rebuild");
 }
 
 void GPDatabase::setupRegions() {
@@ -683,11 +723,7 @@ void GPDatabase::transferOrient() {
 }
 
 bool GPDatabase::setup() {
-    const char* profile_env = std::getenv("XPLACE_IO_PROFILE");
-    const bool profile = profile_env != nullptr && profile_env[0] != '\0' &&
-                         profile_env[0] != '0' &&
-                         profile_env[0] != 'f' && profile_env[0] != 'F' &&
-                         profile_env[0] != 'n' && profile_env[0] != 'N';
+    const bool profile = gpdbProfileEnabled();
     auto profile_start = std::chrono::steady_clock::now();
     auto profile_last = profile_start;
     auto profile_log = [&](const char* phase) {

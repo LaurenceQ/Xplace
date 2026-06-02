@@ -2,6 +2,8 @@
 #include <torch/extension.h>
 #include "common/common.h"
 
+#include <memory>
+
 namespace db {
 class Database;
 class Pin;
@@ -20,7 +22,7 @@ class Basic {
 public:
     index_type getId() const { return id; }
     void setId(const index_type& i) { id = i; }
-    std::string getName() const { return name; }
+    const std::string& getName() const { return name; }
     void setName(const std::string& name_str) { name = name_str; }
 
 protected:
@@ -63,11 +65,14 @@ public:
         portMap.reserve(count);
         pins_id.reserve(count);
     }
-    void addPin(index_type pin_id, std::string macroPinName) {
-        portMap[macroPinName] = pin_id;
+    void addPin(index_type pin_id, const std::string& macroPinName) {
+        auto [iter, inserted] = portMap.emplace(macroPinName, static_cast<int>(pin_id));
+        if (!inserted) {
+            iter->second = static_cast<int>(pin_id);
+        }
         pins_id.emplace_back(pin_id);
     }
-    const int getPinbyPortName(std::string portName) const {
+    const int getPinbyPortName(const std::string& portName) const {
         auto it = portMap.find(portName);
         if (it == portMap.end()) {
             return -1;
@@ -119,11 +124,20 @@ public:
     }
     const std::tuple<index_type, index_type, index_type>& getOriDBInfo() const { return ori_db_info; }
 
-    std::string getMacroName() const { return macro_name; }
-    void setMacroName(const std::string& name_str) { macro_name = name_str; }
+    const std::string& getMacroName() const { return macro_name_ref ? *macro_name_ref : macro_name; }
+    void setMacroName(const std::string& name_str) {
+        macro_name = name_str;
+        macro_name_ref = nullptr;
+    }
+    void setMacroNameRef(const std::string& name_ref) {
+        macro_name.clear();
+        macro_name_ref = &name_ref;
+    }
 
 protected:
     std::string macro_name = "";
+    // Borrowed from db::PinType owned by the raw database held by GPDatabase.
+    const std::string* macro_name_ref = nullptr;
     coord_type rel_lx = std::numeric_limits<coord_type>::max();  // relative position from node_lx to pin_lx
     coord_type rel_ly = std::numeric_limits<coord_type>::max();  // relative position from node_ly to pin_ly
     coord_type width = 0;
@@ -177,6 +191,7 @@ protected:
 
 class GPDatabase {
 protected:
+    std::shared_ptr<db::Database> database_owner;
     db::Database& database;
 
     std::tuple<int, int, int, int> dieInfo;   // dieLX, dieHX, dieLY, dieHY
@@ -210,7 +225,8 @@ protected:
     std::vector<std::vector<index_type>> nets_id2pins_id;
 
 public:
-    GPDatabase(std::shared_ptr<db::Database> database_) : database(*database_) {}
+    GPDatabase(std::shared_ptr<db::Database> database_)
+        : database_owner(database_), database(*database_owner) {}
     ~GPDatabase();
     point_type getAbsolutePinPos(const GPPin& pin) const;
 
