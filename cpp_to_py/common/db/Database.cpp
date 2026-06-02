@@ -18,6 +18,10 @@
 #include "common/lib/Liberty.h"
 
 #include <chrono>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 #include <cstdio>
 #include <cstdlib>
 
@@ -475,7 +479,10 @@ void Database::SetupRegions() {
         }
     }
     // associate remaining cells to default region
-    for (Cell* cell : cells) {
+    const int setup_threads = std::max(1, setting.numThreads);
+#pragma omp parallel for num_threads(setup_threads) schedule(static)
+    for (int cell_id = 0; cell_id < static_cast<int>(cells.size()); ++cell_id) {
+        Cell* cell = cells[cell_id];
         if (!cell->region) {
             cell->region = regions[0];
         }
