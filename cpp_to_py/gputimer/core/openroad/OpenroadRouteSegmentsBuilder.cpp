@@ -231,7 +231,7 @@ HostRcGraph GPUTimer::build_openroad_route_segments_rc(const std::string& file) 
 
     std::vector<db::Pin*> pin_id_to_dbpin(num_pins, nullptr);
     const OpenroadPinMapStats pin_map_stats =
-        resolve_openroad_timer_pins(gtdb, num_pins, pin_id_to_dbpin);
+        resolve_openroad_timer_pins(gtdb, num_pins, pin_id_to_dbpin, std::max(1, num_threads));
     if (profile) {
         std::fprintf(stderr,
                      "[ROUTE_SEG_PROFILE] phase=map_pins_by_gpdb elapsed=%.3f gpdb_direct=%d unresolved=%d total_timer_pins=%d\n",

@@ -289,7 +289,8 @@ std::tuple<int, int, int, int> orient_box_for_cell(const db::CellType* ctype,
                                                    int hy);
 OpenroadPinMapStats resolve_openroad_timer_pins(const GTDatabase& gtdb,
                                                 int num_pins,
-                                                std::vector<db::Pin*>& pin_id_to_dbpin);
+                                                std::vector<db::Pin*>& pin_id_to_dbpin,
+                                                int threads);
 bool openroad_pin_route_loc(const GTDatabase& gtdb,
                             const std::vector<db::Pin*>& pin_id_to_dbpin,
                             const OpenroadInferredGrid& openroad_grid,

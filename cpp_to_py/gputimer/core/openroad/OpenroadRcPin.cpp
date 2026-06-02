@@ -1,17 +1,32 @@
 #include "gputimer/core/openroad/OpenroadRcInternal.h"
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 namespace gt {
 namespace openroad_rc {
 
 OpenroadPinMapStats resolve_openroad_timer_pins(const GTDatabase& gtdb,
                                                 int num_pins,
-                                                std::vector<db::Pin*>& pin_id_to_dbpin)
+                                                std::vector<db::Pin*>& pin_id_to_dbpin,
+                                                int threads)
 {
     OpenroadPinMapStats stats;
-    for (db::Net* dbnet : gtdb.rawdb.nets) {
+    const int worker_count = std::max(1, threads);
+    std::vector<int> direct_counts(worker_count, 0);
+
+#pragma omp parallel for num_threads(worker_count) schedule(static)
+    for (int net_idx = 0; net_idx < static_cast<int>(gtdb.rawdb.nets.size()); ++net_idx) {
+        int tid = 0;
+#ifdef _OPENMP
+        tid = omp_get_thread_num();
+#endif
+        db::Net* dbnet = gtdb.rawdb.nets[net_idx];
         if (dbnet == nullptr) {
             continue;
         }
+        int local_direct = 0;
         for (db::Pin* dbpin : dbnet->pins) {
             if (dbpin == nullptr) {
                 continue;
@@ -20,15 +35,23 @@ OpenroadPinMapStats resolve_openroad_timer_pins(const GTDatabase& gtdb,
                 dbpin->gpdb_id < num_pins &&
                 pin_id_to_dbpin[dbpin->gpdb_id] == nullptr) {
                 pin_id_to_dbpin[dbpin->gpdb_id] = dbpin;
-                stats.gpdb_direct_pins++;
+                ++local_direct;
             }
         }
+        direct_counts[tid] += local_direct;
     }
-    for (db::Pin* dbpin : pin_id_to_dbpin) {
-        if (dbpin == nullptr) {
-            stats.unresolved_pins++;
+    for (int count : direct_counts) {
+        stats.gpdb_direct_pins += count;
+    }
+
+    int unresolved_pins = 0;
+#pragma omp parallel for num_threads(worker_count) schedule(static) reduction(+:unresolved_pins)
+    for (int pin_id = 0; pin_id < static_cast<int>(pin_id_to_dbpin.size()); ++pin_id) {
+        if (pin_id_to_dbpin[pin_id] == nullptr) {
+            ++unresolved_pins;
         }
     }
+    stats.unresolved_pins = unresolved_pins;
 
     if (stats.unresolved_pins <= 0) {
         return stats;
