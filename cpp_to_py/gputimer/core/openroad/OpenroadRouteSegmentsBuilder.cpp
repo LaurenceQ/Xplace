@@ -5,6 +5,7 @@
 #endif
 
 #include <cerrno>
+#include <cstring>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -71,6 +72,12 @@ struct RouteSegmentBlock {
     int net_idx = -1;
     std::size_t begin = 0;
     std::size_t end = 0;
+};
+
+struct RouteSegmentScanCandidate {
+    int net_idx = -1;
+    std::size_t line_begin = 0;
+    std::size_t block_begin = 0;
 };
 
 bool parse_route_segment_row_range(const char* line_begin,
@@ -255,79 +262,139 @@ HostRcGraph GPUTimer::build_openroad_route_segments_rc(const std::string& file) 
     std::vector<uint8_t> parsed_net(num_nets, 0);
 
     std::vector<RouteSegmentBlock> route_blocks;
-    route_blocks.reserve(static_cast<std::size_t>(num_nets));
     long long raw_lines = 0;
     bool duplicate_route_blocks = false;
-    int current_net = -1;
     const char* route_data = mapped_file.data;
     const std::size_t route_size = mapped_file.size;
 
-    auto close_current_block = [&](std::size_t end_offset) {
-        if (current_net >= 0 && !route_blocks.empty()) {
-            route_blocks.back().end = end_offset;
+    auto next_line_start = [&](std::size_t offset) -> std::size_t {
+        if (offset >= route_size) {
+            return route_size;
         }
-        current_net = -1;
+        const void* newline = std::memchr(route_data + offset, '\n', route_size - offset);
+        if (newline == nullptr) {
+            return route_size;
+        }
+        return static_cast<const char*>(newline) - route_data + 1;
     };
 
-    for (std::size_t line_begin_offset = 0; line_begin_offset < route_size;) {
-        std::size_t line_end_offset = line_begin_offset;
-        while (line_end_offset < route_size && route_data[line_end_offset] != '\n') {
-            ++line_end_offset;
+    auto align_line_start = [&](std::size_t offset) -> std::size_t {
+        if (offset == 0 || offset >= route_size || route_data[offset - 1] == '\n') {
+            return offset;
         }
-        const std::size_t next_line_offset =
-            line_end_offset < route_size ? line_end_offset + 1 : line_end_offset;
-        ++raw_lines;
+        return next_line_start(offset);
+    };
 
-        const char* line_begin = route_data + line_begin_offset;
-        const char* line_end = route_data + line_end_offset;
-        const char* first = skip_route_ws(line_begin, line_end);
-        if (first == line_end || *first == '#') {
-            line_begin_offset = next_line_offset;
-            continue;
+    int scan_threads = std::max(1, num_threads);
+    if (const char* thread_env = std::getenv("GPUTIMER_ROUTE_SEG_SCAN_THREADS")) {
+        const int env_threads = std::atoi(thread_env);
+        if (env_threads > 0) {
+            scan_threads = env_threads;
         }
+    }
+    if (!debug_pin_net.empty()) {
+        scan_threads = 1;
+    }
 
-        const char* token_end = first;
-        while (token_end < line_end &&
-               !std::isspace(static_cast<unsigned char>(*token_end))) {
-            ++token_end;
-        }
-        const bool one_token = route_rest_is_ws(token_end, line_end);
-        if (one_token) {
-            if ((token_end - first) == 1 && *first == '(') {
+    std::vector<std::vector<RouteSegmentScanCandidate>> thread_candidates(scan_threads);
+    std::vector<OpenroadRouteSegmentsBuildStats> scan_stats(scan_threads);
+    std::vector<long long> scan_raw_lines(scan_threads, 0);
+
+#pragma omp parallel for num_threads(scan_threads) schedule(static)
+    for (int tid = 0; tid < scan_threads; ++tid) {
+        const std::size_t chunk_begin =
+            (route_size * static_cast<std::size_t>(tid)) / static_cast<std::size_t>(scan_threads);
+        const std::size_t chunk_end =
+            (route_size * static_cast<std::size_t>(tid + 1)) / static_cast<std::size_t>(scan_threads);
+        const std::size_t scan_begin = align_line_start(chunk_begin);
+        const std::size_t scan_end = (tid + 1 == scan_threads)
+                                         ? route_size
+                                         : align_line_start(chunk_end);
+
+        std::vector<RouteSegmentScanCandidate>& candidates = thread_candidates[tid];
+        candidates.reserve(static_cast<std::size_t>(num_nets / scan_threads + 1));
+        OpenroadRouteSegmentsBuildStats& local_stats = scan_stats[tid];
+        long long local_raw_lines = 0;
+
+        for (std::size_t line_begin_offset = scan_begin; line_begin_offset < scan_end;) {
+            const void* newline =
+                std::memchr(route_data + line_begin_offset, '\n', scan_end - line_begin_offset);
+            const std::size_t line_end_offset = newline == nullptr
+                                                    ? scan_end
+                                                    : static_cast<const char*>(newline) - route_data;
+            const std::size_t next_line_offset =
+                line_end_offset < scan_end ? line_end_offset + 1 : line_end_offset;
+            ++local_raw_lines;
+
+            const char* line_begin = route_data + line_begin_offset;
+            const char* line_end = route_data + line_end_offset;
+            const char* first = skip_route_ws(line_begin, line_end);
+            if (first == line_end || *first == '#') {
                 line_begin_offset = next_line_offset;
                 continue;
             }
-            if ((token_end - first) == 1 && *first == ')') {
-                close_current_block(line_begin_offset);
+
+            const char* token_end = first;
+            while (token_end < line_end &&
+                   !std::isspace(static_cast<unsigned char>(*token_end))) {
+                ++token_end;
+            }
+            if (!route_rest_is_ws(token_end, line_end)) {
+                line_begin_offset = next_line_offset;
+                continue;
+            }
+            if ((token_end - first) == 1 && (*first == '(' || *first == ')')) {
                 line_begin_offset = next_line_offset;
                 continue;
             }
 
-            close_current_block(line_begin_offset);
             const int net_idx = resolve_route_net_token(net_name_to_index, first, token_end);
             if (net_idx < 0 || net_idx >= num_nets) {
-                stats.unknown_nets++;
-                line_begin_offset = next_line_offset;
-                continue;
+                local_stats.unknown_nets++;
             }
-            if (parsed_net[net_idx]) {
-                duplicate_route_blocks = true;
-            } else {
-                parsed_net[net_idx] = 1;
-                stats.parsed_nets++;
-            }
-            current_net = net_idx;
-            route_blocks.push_back(RouteSegmentBlock{net_idx, next_line_offset, route_size});
+            candidates.push_back(RouteSegmentScanCandidate{net_idx, line_begin_offset, next_line_offset});
             line_begin_offset = next_line_offset;
+        }
+        scan_raw_lines[tid] = local_raw_lines;
+    }
+
+    std::size_t candidate_count = 0;
+    for (int tid = 0; tid < scan_threads; ++tid) {
+        raw_lines += scan_raw_lines[tid];
+        stats.unknown_nets += scan_stats[tid].unknown_nets;
+        candidate_count += thread_candidates[tid].size();
+    }
+
+    std::vector<RouteSegmentScanCandidate> route_block_candidates;
+    route_block_candidates.reserve(candidate_count);
+    for (int tid = 0; tid < scan_threads; ++tid) {
+        route_block_candidates.insert(route_block_candidates.end(),
+                                      thread_candidates[tid].begin(),
+                                      thread_candidates[tid].end());
+    }
+    thread_candidates.clear();
+    thread_candidates.shrink_to_fit();
+
+    route_blocks.reserve(route_block_candidates.size());
+    for (std::size_t candidate_idx = 0; candidate_idx < route_block_candidates.size(); ++candidate_idx) {
+        const RouteSegmentScanCandidate& candidate = route_block_candidates[candidate_idx];
+        const int net_idx = candidate.net_idx;
+        if (net_idx < 0 || net_idx >= num_nets) {
             continue;
         }
-
-        if (current_net < 0) {
-            stats.malformed_rows++;
+        if (parsed_net[net_idx]) {
+            duplicate_route_blocks = true;
+        } else {
+            parsed_net[net_idx] = 1;
+            stats.parsed_nets++;
         }
-        line_begin_offset = next_line_offset;
+        const std::size_t block_end = candidate_idx + 1 < route_block_candidates.size()
+                                          ? route_block_candidates[candidate_idx + 1].line_begin
+                                          : route_size;
+        route_blocks.push_back(RouteSegmentBlock{net_idx, candidate.block_begin, block_end});
     }
-    close_current_block(route_size);
+    route_block_candidates.clear();
+    route_block_candidates.shrink_to_fit();
 
     int parse_threads = std::max(1, num_threads);
     if (const char* thread_env = std::getenv("GPUTIMER_ROUTE_SEG_PARSE_THREADS")) {
@@ -342,13 +409,14 @@ HostRcGraph GPUTimer::build_openroad_route_segments_rc(const std::string& file) 
 
     if (profile) {
         std::fprintf(stderr,
-                     "[ROUTE_SEG_PROFILE] phase=scan_route_blocks elapsed=%.3f raw_lines=%lld blocks=%zu parsed_nets=%d unknown_nets=%d duplicate_blocks=%d parse_threads=%d\n",
+                     "[ROUTE_SEG_PROFILE] phase=scan_route_blocks elapsed=%.3f raw_lines=%lld blocks=%zu parsed_nets=%d unknown_nets=%d duplicate_blocks=%d scan_threads=%d parse_threads=%d\n",
                      seconds_since(build_start),
                      raw_lines,
                      route_blocks.size(),
                      stats.parsed_nets,
                      stats.unknown_nets,
                      duplicate_route_blocks ? 1 : 0,
+                     scan_threads,
                      parse_threads);
         std::fflush(stderr);
         std::fprintf(stderr,
