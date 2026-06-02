@@ -72,15 +72,23 @@ private:
 }  // namespace
 
 string validate_token(string& name) {
-    // remove '\'
-    string::size_type pos = 0;
-    while ((pos = name.find('\\', pos)) != string::npos) {
-        name.erase(pos, 1);
+    string::size_type write_pos = 0;
+    bool changed = false;
+    constexpr char def_escape = 0x5c;
+    constexpr char def_space = 0x20;
+    for (string::size_type read_pos = 0; read_pos < name.size(); ++read_pos) {
+        const char ch = name[read_pos];
+        if (ch == def_escape || ch == def_space) {
+            changed = true;
+            continue;
+        }
+        if (changed) {
+            name[write_pos] = ch;
+        }
+        ++write_pos;
     }
-    // remove ' '
-    pos = 0;
-    while ((pos = name.find(' ', pos)) != string::npos) {
-        name.erase(pos, 1);
+    if (changed) {
+        name.resize(write_pos);
     }
     return name;
 }

@@ -1583,7 +1583,7 @@ int readDefComponent(defrCallbackType_e c, defiComponent* co, defiUserData ud) {
     CellType* celltype = db->getCellType(co->name());
 
     string cellName(co->id());
-    cellName = validate_token(cellName);
+    validate_token(cellName);
     Cell* cell = db->addCell(cellName, celltype);
 
     if (co->isUnplaced()) {
@@ -1880,7 +1880,7 @@ int readDefNet(defrCallbackType_e c, defiNet* dnet, defiUserData ud) {
     }
 
     string netName(dnet->name());
-    netName = validate_token(netName);
+    validate_token(netName);
     // exclude VDD and VSS TODO:
     if (netName == "VDD" || netName == "VSS") {
         return 0;
@@ -1919,7 +1919,7 @@ int readDefNet(defrCallbackType_e c, defiNet* dnet, defiUserData ud) {
             iopin->is_connected = true;
         } else {
             string cellname(dnet->instance(i));
-            cellname = validate_token(cellname);
+            validate_token(cellname);
             string pinname(dnet->pin(i));
             Cell* cell = db->getCell(cellname);
             if (!cell) {
