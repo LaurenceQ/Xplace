@@ -22,12 +22,20 @@ class Basic {
 public:
     index_type getId() const { return id; }
     void setId(const index_type& i) { id = i; }
-    const std::string& getName() const { return name; }
-    void setName(const std::string& name_str) { name = name_str; }
+    const std::string& getName() const { return name_ref ? *name_ref : name; }
+    void setName(const std::string& name_str) {
+        name = name_str;
+        name_ref = nullptr;
+    }
+    void moveNameTo(std::string& dst) {
+        dst = std::move(name);
+        name_ref = &dst;
+    }
 
 protected:
     index_type id = std::numeric_limits<index_type>::max();
     std::string name = "";
+    const std::string* name_ref = nullptr;
 };
 
 class GPNode : public Basic {

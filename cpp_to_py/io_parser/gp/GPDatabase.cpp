@@ -457,10 +457,10 @@ void GPDatabase::setupIndexMap() {
     const int setup_threads = gpdbThreadCount("XPLACE_GPDB_SETUP_THREADS");
 #pragma omp parallel for num_threads(setup_threads) schedule(static)
     for (index_type pin_id = 0; pin_id < static_cast<index_type>(pins.size()); ++pin_id) {
-        const GPPin& pin = pins[pin_id];
+        GPPin& pin = pins[pin_id];
         pin_id2node_id[pin_id] = pin.getParNodeId();
         pin_id2net_id[pin_id] = pin.getParNetId();
-        pin_names[pin_id] = pin.getName();
+        pin.moveNameTo(pin_names[pin_id]);
     }
 
 #pragma omp parallel for num_threads(setup_threads) schedule(static)
@@ -770,8 +770,14 @@ bool GPDatabase::reset() {
     nodes.clear();
     pins.clear();
     nets.clear();
+    regions.clear();
 
+    node_names.clear();
+    net_names.clear();
+    pin_names.clear();
     node_types_indices.clear();
+    node_id2node_name.clear();
+    node_id2celltype_name.clear();
 
     pin_id2node_id.clear();
     pin_id2net_id.clear();
