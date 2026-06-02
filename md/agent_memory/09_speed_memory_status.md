@@ -259,3 +259,36 @@ winner/file cleanup; latest smoke 14.17s wall, RSS 1863868 KB.
 `cuobjdump` regs unchanged: gate 180, direct-net 189, driving-cell 170;
 no stack/local spill. `DmpKernels.cuh` and `DmpWaveform.cuh` were merged into
 `DmpCudaUtils.cuh`; `DmpBackward.cu` was merged into `DmpTiming.cu`.
+
+2026-06-02 power CUDA activity struct/live-range refactor:
+
+- Checkpoint before refactor: `a154221 Checkpoint power and timing refactor state`.
+- Power device helpers were moved into struct/member ops like the DMP style:
+  `PowerActivityOps`, `PowerLevelQueueOps`, `PowerExprView`, BDD/direct expr
+  evaluator structs, component expr/contrib ops.
+- Deep duplicate storage was removed. `PowerLevelQueueOps` now inherits
+  `PowerActivityOps` instead of carrying duplicate `model/scratch` fields.
+  `PowerBddExprEval` and `PowerDirectExprEval` hold a `const PowerExprView*`
+  instead of copying the view. BDD var pre-scan arrays were removed; the first
+  pass inserts sorted vars directly into the context, and the second pass only
+  calls `findVar()` so it cannot shift var indices after BDD nodes exist.
+  `PowerComponentExprOps` holds one `PowerExprView` and only updates
+  `node_id` per row.
+- Remaining overlaps are shallow pointer views (`model`, `scratch`, queue/view
+  pointers, expression ops/start/count, node-port pin maps). No duplicated large
+  arrays or deep objects remain outside the BDD context's real working arrays.
+- ptxas final spot checks:
+  - Queue ordered/persistent kernels: 56 regs, 104/128B stack, 0 spill.
+  - `enqueueMissingFuncOutputs`: 160B stack, 84/84B spill.
+  - `processPinFrontier`: 120B stack, 44/44B spill.
+  - Components slow denom/contrib kernels: 26/50 regs, 64B stack, 0 spill.
+  - BDD fallback remains stack-dominated by `PowerBddContextCuda` arrays:
+    fallback stack 20040B, 8/8B spill; removing pre-arrays did not change the
+    ptxas max frame.
+- Build/install passed in `gnn`.
+- 12-case forced-CUDA compare passed:
+  `result/codex_power_struct_refactor_pressure_final_12case_20260602`.
+  Max WNS rel err `0.000498006084581` on `visible/mempool_tile_wrap`;
+  max total-power rel err `0.000103499845952` on `visible/mempool_group`;
+  max group/component rel err `0.00528588664294` on
+  `blind/bsg_chip:combinational.internal`.
