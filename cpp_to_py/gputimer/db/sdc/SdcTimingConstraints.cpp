@@ -80,7 +80,7 @@ void GTDatabase::_read_sdc(sdc::SetInputDelay& obj) {
     std::visit(Functors{[&](sdc::AllInputs&) {
                             for (auto& pi : primary_inputs) {
                                 for_each_el_rf_if(el, rf, (mask | el) && (mask | rf)) {
-                                    timing_raw_db.pinAT[pi][(el << 1) + rf] = input_arrival();
+                                    hostPinAT(pi, (el << 1) + rf) = input_arrival();
                                 }
                             }
                         },
@@ -88,7 +88,7 @@ void GTDatabase::_read_sdc(sdc::SetInputDelay& obj) {
                             for (auto& port : get_ports.ports) {
                                 if (auto itr = primary_input2pin_id.find(port); itr != primary_input2pin_id.end()) {
                                     for_each_el_rf_if(el, rf, (mask | el) && (mask | rf)) {
-                                        timing_raw_db.pinAT[itr->second][(el << 1) + rf] = input_arrival();
+                                        hostPinAT(itr->second, (el << 1) + rf) = input_arrival();
                                     }
                                 } else {
                                     warn_missing_sdc_object(obj.command, "port", port);
@@ -111,7 +111,7 @@ void GTDatabase::_read_sdc(sdc::SetInputTransition& obj) {
                                 for_each_el_rf_if(el, rf, (mask | el) && (mask | rf)) {
                                     float transition = *obj.transition;
                                     if (sdc_time_unit.has_value()) transition = transition * *sdc_time_unit / time_unit;
-                                    timing_raw_db.pinSlew[pi][(el << 1) + rf] = transition;
+                                    hostPinSlew(pi, (el << 1) + rf) = transition;
                                 }
                             }
                         },
@@ -121,7 +121,7 @@ void GTDatabase::_read_sdc(sdc::SetInputTransition& obj) {
                                     for_each_el_rf_if(el, rf, (mask | el) && (mask | rf)) {
                                         float transition = *obj.transition;
                                         if (sdc_time_unit.has_value()) transition = transition * *sdc_time_unit / time_unit;
-                                        timing_raw_db.pinSlew[itr->second][(el << 1) + rf] = transition;
+                                        hostPinSlew(itr->second, (el << 1) + rf) = transition;
                                     }
                                 } else {
                                     warn_missing_sdc_object(obj.command, "port", port);
@@ -237,7 +237,7 @@ void GTDatabase::_read_sdc(sdc::SetDrivingCell& obj) {
                             for (auto& pi : primary_inputs) {
                                 for_each_el_rf_if(el, rf, (mask | el) && (mask | rf)) {
                                     float transition = transition_for_rf(rf);
-                                    timing_raw_db.pinSlew[pi][(el << 1) + rf] = transition;
+                                    hostPinSlew(pi, (el << 1) + rf) = transition;
                                 }
                                 record_driving_cell_source(pi);
                             }
@@ -247,7 +247,7 @@ void GTDatabase::_read_sdc(sdc::SetDrivingCell& obj) {
                                 if (auto itr = primary_input2pin_id.find(port); itr != primary_input2pin_id.end()) {
                                     for_each_el_rf_if(el, rf, (mask | el) && (mask | rf)) {
                                         float transition = transition_for_rf(rf);
-                                        timing_raw_db.pinSlew[itr->second][(el << 1) + rf] = transition;
+                                        hostPinSlew(itr->second, (el << 1) + rf) = transition;
                                     }
                                     record_driving_cell_source(itr->second);
                                 } else {
@@ -288,7 +288,7 @@ void GTDatabase::_read_sdc(sdc::SetOutputDelay& obj) {
                             for (auto& po : primary_outputs) {
                                 for_each_el_rf_if(el, rf, (mask | el) && (mask | rf)) {
 	                                    const int attr = (el << 1) + rf;
-	                                    timing_raw_db.pinRAT[po][attr] = output_required(el);
+	                                    hostPinRAT(po, attr) = output_required(el);
 	                                    output_delay_clock_by_pin_attr[po][attr] = obj.clock;
                                 }
                             }
@@ -298,7 +298,7 @@ void GTDatabase::_read_sdc(sdc::SetOutputDelay& obj) {
                                 if (auto itr = primary_output2pin_id.find(port); itr != primary_output2pin_id.end()) {
                                     for_each_el_rf_if(el, rf, (mask | el) && (mask | rf)) {
 	                                        const int attr = (el << 1) + rf;
-	                                        timing_raw_db.pinRAT[itr->second][attr] = output_required(el);
+	                                        hostPinRAT(itr->second, attr) = output_required(el);
 	                                        output_delay_clock_by_pin_attr[itr->second][attr] = obj.clock;
                                     }
                                 } else {
@@ -322,7 +322,7 @@ void GTDatabase::_read_sdc(sdc::SetLoad& obj) {
                                 for_each_el_rf_if(el, rf, (mask | el) && (mask | rf)) {
                                     float load = *obj.value;
                                     if (sdc_cap_unit.has_value()) load = load * *sdc_cap_unit / cap_unit;
-                                    timing_raw_db.pinLoad[po][(el << 1) + rf] = load;
+                                    hostPinLoad(po, (el << 1) + rf) = load;
                                     pin_capacitance[6 * po + el * 2 + rf] = load;
                                     pin_capacitance[6 * po + 4 + el] = load;
                                 }
@@ -334,7 +334,7 @@ void GTDatabase::_read_sdc(sdc::SetLoad& obj) {
                                     for_each_el_rf_if(el, rf, (mask | el) && (mask | rf)) {
                                         float load = *obj.value;
                                         if (sdc_cap_unit.has_value()) load = load * *sdc_cap_unit / cap_unit;
-                                        timing_raw_db.pinLoad[itr->second][(el << 1) + rf] = load;
+                                        hostPinLoad(itr->second, (el << 1) + rf) = load;
                                         pin_capacitance[6 * itr->second + el * 2 + rf] = load;
                                         pin_capacitance[6 * itr->second + 4 + el] = load;
                                     }

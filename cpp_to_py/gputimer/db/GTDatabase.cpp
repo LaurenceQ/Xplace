@@ -404,34 +404,56 @@ void GTDatabase::ExtractTimingGraph() {
     //  Traverse Circuit Pins
     //
     num_pins = gpdb.getPins().size();
+    const int graph_threads = graph_thread_count(timing_raw_db.num_threads);
+    logger.info("Timing graph extraction threads: %d", graph_threads);
     pin_name2pin_id.clear();
+    struct PinNameMapEntry {
+        std::string name;
+        int pin_id = -1;
+        bool emplace_only = false;
+    };
+    auto build_pin_name_map_entries = [&](bool full_map) {
+        const int pin_name_count = static_cast<int>(pin_names.size());
+        std::vector<std::vector<PinNameMapEntry>> local_entries(graph_threads);
+#pragma omp parallel num_threads(graph_threads)
+        {
+            const int tid = omp_get_thread_num();
+            const int start = (pin_name_count * tid) / graph_threads;
+            const int end = (pin_name_count * (tid + 1)) / graph_threads;
+            auto& entries = local_entries[tid];
+            if (full_map) {
+                entries.reserve(static_cast<size_t>(end - start) * 2u);
+            }
+            for (int pin_id = start; pin_id < end; ++pin_id) {
+                const std::string& pin_name = pin_names[pin_id];
+                if (!full_map && pin_name_map_targets.find(pin_name) == pin_name_map_targets.end()) {
+                    continue;
+                }
+                entries.push_back(PinNameMapEntry{pin_name, pin_id, false});
+                const auto pin_delim_pos = pin_name.rfind(':');
+                if (pin_delim_pos != std::string::npos) {
+                    std::string sdc_pin_name = pin_name;
+                    sdc_pin_name[pin_delim_pos] = '/';
+                    entries.push_back(PinNameMapEntry{std::move(sdc_pin_name), pin_id, true});
+                }
+            }
+        }
+        for (auto& entries : local_entries) {
+            for (auto& entry : entries) {
+                if (entry.emplace_only) {
+                    pin_name2pin_id.emplace(std::move(entry.name), entry.pin_id);
+                } else {
+                    pin_name2pin_id[entry.name] = entry.pin_id;
+                }
+            }
+        }
+    };
     if (build_full_pin_name_map) {
         pin_name2pin_id.reserve(pin_names.size() * 2);
-        for (int pin_id = 0; pin_id < static_cast<int>(pin_names.size()); ++pin_id) {
-            const std::string& pin_name = pin_names[pin_id];
-            pin_name2pin_id[pin_name] = pin_id;
-            const auto pin_delim_pos = pin_name.rfind(':');
-            if (pin_delim_pos != std::string::npos) {
-                std::string sdc_pin_name = pin_name;
-                sdc_pin_name[pin_delim_pos] = '/';
-                pin_name2pin_id.emplace(std::move(sdc_pin_name), pin_id);
-            }
-        }
+        build_pin_name_map_entries(true);
     } else if (!pin_name_map_targets.empty()) {
-        pin_name2pin_id.reserve(pin_name_map_targets.size());
-        for (int pin_id = 0; pin_id < static_cast<int>(pin_names.size()); ++pin_id) {
-            const std::string& pin_name = pin_names[pin_id];
-            if (pin_name_map_targets.find(pin_name) == pin_name_map_targets.end()) {
-                continue;
-            }
-            pin_name2pin_id[pin_name] = pin_id;
-            const auto pin_delim_pos = pin_name.rfind(':');
-            if (pin_delim_pos != std::string::npos) {
-                std::string sdc_pin_name = pin_name;
-                sdc_pin_name[pin_delim_pos] = '/';
-                pin_name2pin_id.emplace(std::move(sdc_pin_name), pin_id);
-            }
-        }
+        pin_name2pin_id.reserve(pin_name_map_targets.size() * 2);
+        build_pin_name_map_entries(false);
     }
     pin_name_map_targets.clear();
     extract_profile.log("pin_name_map");
@@ -442,32 +464,41 @@ void GTDatabase::ExtractTimingGraph() {
     pin_is_ideal_clk.assign(num_pins, 0);
     pin_case_values.assign(num_pins, -1);
     pin_capacitance.resize(2 * 3 * num_pins, 0.0f);
-    for (auto& gppin : gpdb.getPins()) {
+    vector<uint8_t> primary_input_pin(num_pins, 0);
+    vector<uint8_t> primary_output_pin(num_pins, 0);
+    const auto& gp_pins = gpdb.getPins();
+    const int gp_pin_count = static_cast<int>(gp_pins.size());
+    const auto& dmp_library_id_by_cell_const = dmp_library_id_by_cell;
+    auto dmp_library_id_for_cell_const = [&](const LibertyCell* liberty_cell) -> int {
+        auto cached_cell = dmp_library_id_by_cell_const.find(liberty_cell);
+        return cached_cell != dmp_library_id_by_cell_const.end() ? cached_cell->second : -1;
+    };
+#pragma omp parallel for num_threads(graph_threads) schedule(static)
+    for (int pin_index = 0; pin_index < gp_pin_count; ++pin_index) {
+        const auto& gppin = gp_pins[pin_index];
         int pin_id = static_cast<int>(gppin.getId());
-        string pin_name = gppin.getName();
         string pin_macro_name = gppin.getMacroName();
         auto [ori_node_id, ori_node_pin_id, ori_net_id] = gppin.getOriDBInfo();
+        (void) ori_net_id;
         if (ori_node_pin_id == -1) {
             auto dbiopin = rawdb.iopins[ori_node_id];
             pin_id2cell_type_id[pin_id] = -1;
             if (dbiopin->type->direction() == 'i') {
-                primary_outputs.push_back(pin_id);
-                endpoints_id.push_back(pin_id);
-                primary_output2pin_id[pin_name] = pin_id;
+                primary_output_pin[pin_id] = 1;
             } else if (dbiopin->type->direction() == 'o') {
-                primary_inputs.push_back(pin_id);
-                primary_input2pin_id[pin_name] = pin_id;
+                primary_input_pin[pin_id] = 1;
             }
         } else {
             auto& dbcell = rawdb.cells[ori_node_id];
             LibertyCell* liberty_cell = dbcell->ctype()->liberty_cell;
             pin_id2cell_type_id[pin_id] = dbcell->ctype()->libcell();
-            dmp_pin_library_ids[pin_id] = dmp_library_id_for_cell(liberty_cell);
+            dmp_pin_library_ids[pin_id] = dmp_library_id_for_cell_const(liberty_cell);
             if (!liberty_cell) {
                 pin_id2port_offset_id[pin_id] = 0;
                 continue;
             }
-            pin_id2port_offset_id[pin_id] = liberty_cell->ports_map_[pin_macro_name];
+            auto port_iter = liberty_cell->ports_map_.find(pin_macro_name);
+            pin_id2port_offset_id[pin_id] = port_iter == liberty_cell->ports_map_.end() ? 0 : port_iter->second;
             int pin_port_offset = pin_id2port_offset_id[pin_id];
             if (pin_port_offset >= 0 &&
                 pin_port_offset < static_cast<int>(liberty_cell->ports_.size()) &&
@@ -484,11 +515,20 @@ void GTDatabase::ExtractTimingGraph() {
             }
         }
     }
+    for (int pin_index = 0; pin_index < gp_pin_count; ++pin_index) {
+        const auto& gppin = gp_pins[pin_index];
+        const int pin_id = static_cast<int>(gppin.getId());
+        if (primary_output_pin[pin_id]) {
+            primary_outputs.push_back(pin_id);
+            endpoints_id.push_back(pin_id);
+            primary_output2pin_id[gppin.getName()] = pin_id;
+        } else if (primary_input_pin[pin_id]) {
+            primary_inputs.push_back(pin_id);
+            primary_input2pin_id[gppin.getName()] = pin_id;
+        }
+    }
     num_POs = primary_outputs.size();
     extract_profile.log("traverse_pins");
-
-    const int graph_threads = graph_thread_count(timing_raw_db.num_threads);
-    logger.info("Timing graph extraction threads: %d", graph_threads);
 
     const int num_nets = static_cast<int>(gpdb.getNets().size());
     const int num_cells = static_cast<int>(rawdb.cells.size());
@@ -590,6 +630,7 @@ void GTDatabase::ExtractTimingGraph() {
     };
 
     cell_node_type_map.assign(gpdb.getNodes().size(), -1);
+#pragma omp parallel for num_threads(graph_threads) schedule(static)
     for (int cell_idx = 0; cell_idx < num_cells; ++cell_idx) {
         db::Cell* dbcell = rawdb.cells[cell_idx];
         if (dbcell == nullptr || dbcell->ctype() == nullptr) continue;
@@ -767,9 +808,20 @@ void GTDatabase::ExtractTimingGraph() {
         }
     }
     pin_frontiers.clear();
-    for (int pin_id = 0; pin_id < num_pins; ++pin_id) {
-        pin_num_fanin[pin_id] = pin_backward_arc_list_end[pin_id + 1] - pin_backward_arc_list_end[pin_id];
-        if (pin_num_fanin[pin_id] == 0) pin_frontiers.push_back(pin_id);
+    std::vector<std::vector<index_type>> local_frontiers(graph_threads);
+#pragma omp parallel num_threads(graph_threads)
+    {
+        const int tid = omp_get_thread_num();
+        const int start = (num_pins * tid) / graph_threads;
+        const int end = (num_pins * (tid + 1)) / graph_threads;
+        auto& frontiers = local_frontiers[tid];
+        for (int pin_id = start; pin_id < end; ++pin_id) {
+            pin_num_fanin[pin_id] = pin_backward_arc_list_end[pin_id + 1] - pin_backward_arc_list_end[pin_id];
+            if (pin_num_fanin[pin_id] == 0) frontiers.push_back(pin_id);
+        }
+    }
+    for (auto& frontiers : local_frontiers) {
+        pin_frontiers.insert(pin_frontiers.end(), frontiers.begin(), frontiers.end());
     }
     release_vector_storage(pin_fanout_count);
     release_vector_storage(pin_backward_cursor);
@@ -853,10 +905,6 @@ void GTDatabase::ExtractTimingGraph() {
     gputimer_log_cuda_mem_info("GTDatabase::ExtractTimingGraph after_liberty_tensors");
     extract_profile.log("liberty_tensors");
 
-    timing_raw_db.pinSlew = torch::zeros({num_pins, NUM_ATTR}, torch::dtype(torch::kFloat32).device(torch::Device(device))).contiguous();
-    timing_raw_db.pinLoad = torch::zeros({num_pins, NUM_ATTR}, torch::dtype(torch::kFloat32).device(torch::Device(device))).contiguous();
-    timing_raw_db.pinRAT = torch::zeros({num_pins, NUM_ATTR}, torch::dtype(torch::kFloat32).device(torch::Device(device))).contiguous();
-    timing_raw_db.pinAT = torch::zeros({num_pins, NUM_ATTR}, torch::dtype(torch::kFloat32).device(torch::Device(device))).contiguous();
     if (!skip_legacy_rc_tensors) {
         timing_raw_db.pinImpulse = torch::zeros({num_pins, NUM_ATTR}, torch::dtype(torch::kFloat32).device(torch::Device(device))).contiguous();
         timing_raw_db.pinRootDelay = torch::zeros({num_pins, NUM_ATTR}, torch::dtype(torch::kFloat32).device(torch::Device(device))).contiguous();
@@ -864,9 +912,6 @@ void GTDatabase::ExtractTimingGraph() {
     timing_raw_db.at_prefix_pin = torch::zeros({num_pins, NUM_ATTR}, torch::dtype(torch::kInt32).device(torch::Device(device))).contiguous();
     timing_raw_db.at_prefix_arc = torch::zeros({num_pins, NUM_ATTR}, torch::dtype(torch::kInt32).device(torch::Device(device))).contiguous();
     timing_raw_db.at_prefix_attr = torch::zeros({num_pins, NUM_ATTR}, torch::dtype(torch::kInt32).device(torch::Device(device))).contiguous();
-    torch::fill_(timing_raw_db.pinSlew, nanf(""));
-    torch::fill_(timing_raw_db.pinRAT, nanf(""));
-    torch::fill_(timing_raw_db.pinAT, nanf(""));
     if (!skip_legacy_rc_tensors) {
         torch::fill_(timing_raw_db.pinImpulse, nanf(""));
         torch::fill_(timing_raw_db.pinRootDelay, nanf(""));

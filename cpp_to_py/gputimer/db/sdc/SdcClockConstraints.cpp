@@ -95,13 +95,13 @@ void GTDatabase::_read_sdc(sdc::SetClockUncertainty& obj) {
                     if (pin_clocks[attr] != clock_name) {
                         continue;
                     }
-                    if (torch::isnan(timing_raw_db.pinRAT[pin_id][attr]).item<bool>()) {
+                    if (std::isnan(hostPinRAT(pin_id, attr))) {
                         continue;
                     }
                     if (attr >= 2 && applies_to_setup) {
-                        timing_raw_db.pinRAT[pin_id][attr] -= setup_delta;
+                        hostPinRAT(pin_id, attr) -= setup_delta;
                     } else if (attr < 2 && applies_to_hold) {
-                        timing_raw_db.pinRAT[pin_id][attr] += hold_delta;
+                        hostPinRAT(pin_id, attr) += hold_delta;
                     }
                 }
             }

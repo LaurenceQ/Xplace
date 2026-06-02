@@ -4,6 +4,7 @@
 #include <torch/extension.h>
 #include <cstdint>
 
+#include <cmath>
 #include <memory>
 #include <unordered_set>
 
@@ -211,6 +212,18 @@ public:
     vector<uint8_t> pin_is_clk;  // 1 if pin is a register clock pin (from_pin of test arc)
     vector<uint8_t> pin_is_ideal_clk;  // 1 if a register clock pin is ideal, 0 if propagated.
     vector<int8_t> pin_case_values;  // -1 unset, 0/1 from set_case_analysis.
+    vector<float> host_pin_slew;
+    vector<float> host_pin_load;
+    vector<float> host_pin_rat;
+    vector<float> host_pin_at;
+
+    float& hostPinSlew(int pin_id, int attr) { return host_pin_slew[static_cast<size_t>(pin_id) * NUM_ATTR + attr]; }
+    float& hostPinLoad(int pin_id, int attr) { return host_pin_load[static_cast<size_t>(pin_id) * NUM_ATTR + attr]; }
+    float& hostPinRAT(int pin_id, int attr) { return host_pin_rat[static_cast<size_t>(pin_id) * NUM_ATTR + attr]; }
+    float& hostPinAT(int pin_id, int attr) { return host_pin_at[static_cast<size_t>(pin_id) * NUM_ATTR + attr]; }
+    bool hostPinRATIsNaN(int pin_id, int attr) const { return std::isnan(host_pin_rat[static_cast<size_t>(pin_id) * NUM_ATTR + attr]); }
+    bool hostPinSlewIsNaN(int pin_id, int attr) const { return std::isnan(host_pin_slew[static_cast<size_t>(pin_id) * NUM_ATTR + attr]); }
+    bool hostPinATIsNaN(int pin_id, int attr) const { return std::isnan(host_pin_at[static_cast<size_t>(pin_id) * NUM_ATTR + attr]); }
 
     // Timing Graph
     /// @param primary_inputs                 primary input pins

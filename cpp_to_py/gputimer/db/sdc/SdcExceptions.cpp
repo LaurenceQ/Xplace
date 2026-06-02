@@ -45,7 +45,7 @@ void GTDatabase::_read_sdc(sdc::SetCaseAnalysis& obj) {
                                 if (auto itr = primary_input2pin_id.find(port); itr != primary_input2pin_id.end()) {
                                     apply_pin(itr->second);
                                     for (int attr = 0; attr < NUM_ATTR; ++attr) {
-                                        timing_raw_db.pinAT[itr->second][attr] = nanf("");
+                                        hostPinAT(itr->second, attr) = nanf("");
                                     }
                                 }
                             }
@@ -293,7 +293,7 @@ void GTDatabase::_read_sdc(sdc::SetFalsePath& obj) {
                             for (auto& port : get_ports.ports) {
                                 if (auto itr = primary_input2pin_id.find(port); itr != primary_input2pin_id.end()) {
                                     for (int attr = 0; attr < NUM_ATTR; ++attr) {
-                                        timing_raw_db.pinAT[itr->second][attr] = nanf("");
+                                        hostPinAT(itr->second, attr) = nanf("");
                                     }
                                 }
                             }
