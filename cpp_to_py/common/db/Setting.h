@@ -14,6 +14,7 @@ public:
     bool EnableFence = true;
     bool EnablePG = true;
     bool EnableIOPin = true;
+    bool SkipDefNetWires = false;
     bool liteMode = true;
     bool random_place = false;
 

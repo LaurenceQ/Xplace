@@ -23,6 +23,7 @@ void Setting::reset() {
     
     EnablePG = true;
     EnableIOPin = true;
+    SkipDefNetWires = false;
     EnableFence = true;
     liteMode = true;
     random_place = false;

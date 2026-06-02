@@ -114,10 +114,20 @@ public:
     ViaType* addViaType(const string& name, bool isDef);
     ViaType* addViaType(const string& name) { return addViaType(name, false); }
     CellType* addCellType(const string& name, unsigned libcell);
-    void reserveCells(const size_t n) { cells.reserve(n); }
+    void reserveCells(const size_t n) {
+        cells.reserve(n);
+        name_cells.reserve(n);
+    }
     Cell* addCell(const string& name, CellType* type = nullptr);
+    void reserveIOPins(const size_t n) {
+        iopins.reserve(n);
+        name_iopins.reserve(n);
+    }
     IOPin* addIOPin(const string& name = "", const string& netName = "", const char direction = 'x');
-    void reserveNets(const size_t n) { nets.reserve(n); }
+    void reserveNets(const size_t n) {
+        nets.reserve(n);
+        name_nets.reserve(n);
+    }
     Net* addNet(const string& name = "", const NDR* ndr = nullptr);
     Row* addRow(const string& name,
                 const string& macro,
@@ -131,7 +141,13 @@ public:
                 const unsigned yStep = 0);
     Track* addTrack(char direction, double start, double num, double step);
     Region* addRegion(const string& name = "", const char type = 'x');
+    void reserveRegions(const size_t n) { regions.reserve(regions.size() + n); }
     NDR* addNDR(const string& name, const bool hardSpacing);
+    void reserveViaTypes(const size_t n) {
+        viatypes.reserve(viatypes.size() + n);
+        name_viatypes.reserve(name_viatypes.size() + n);
+    }
+    void reserveBlockages(const size_t n);
     void reserveSNets(const size_t n) { snets.reserve(n); }
     SNet* addSNet(const string& name);
 

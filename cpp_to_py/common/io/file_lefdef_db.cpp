@@ -174,16 +174,20 @@ int readDefDieArea(defrCallbackType_e c, defiBox* dbox, defiUserData ud);
 int readDefRow(defrCallbackType_e c, defiRow* drow, defiUserData ud);
 int readDefTrack(defrCallbackType_e c, defiTrack* dtrack, defiUserData ud);
 int readDefGcellGrid(defrCallbackType_e c, defiGcellGrid* dgrid, defiUserData ud);
+int readDefViaStart(defrCallbackType_e c, int num, defiUserData ud);
 int readDefVia(defrCallbackType_e c, defiVia* dvia, defiUserData ud);
 int readDefNdr(defrCallbackType_e c, defiNonDefault* nd, defiUserData ud);
 int readDefComponentStart(defrCallbackType_e c, int num, defiUserData ud);
 int readDefComponent(defrCallbackType_e c, defiComponent* co, defiUserData ud);
+int readDefPinStart(defrCallbackType_e c, int num, defiUserData ud);
 int readDefPin(defrCallbackType_e c, defiPin* dpin, defiUserData ud);
+int readDefBlockageStart(defrCallbackType_e c, int num, defiUserData ud);
 int readDefBlockage(defrCallbackType_e c, defiBlockage* dblk, defiUserData ud);
 int readDefSNetStart(defrCallbackType_e c, int num, defiUserData ud);
 int readDefSNet(defrCallbackType_e c, defiNet* dnet, defiUserData ud);
 int readDefNetStart(defrCallbackType_e c, int num, defiUserData ud);
 int readDefNet(defrCallbackType_e c, defiNet* dnet, defiUserData ud);
+int readDefRegionStart(defrCallbackType_e c, int num, defiUserData ud);
 int readDefRegion(defrCallbackType_e c, defiRegion* dreg, defiUserData ud);
 int readDefGroupName(defrCallbackType_e c, const char* cl, defiUserData ud);
 int readDefGroupMember(defrCallbackType_e c, const char* cl, defiUserData ud);
@@ -245,11 +249,14 @@ bool Database::readDEF(const std::string& file) {
     defrSetRowCbk(readDefRow);
     defrSetTrackCbk(readDefTrack);
     defrSetGcellGridCbk(readDefGcellGrid);
+    defrSetViaStartCbk(readDefViaStart);
     defrSetViaCbk(readDefVia);
     defrSetNonDefaultCbk(readDefNdr);
     defrSetComponentStartCbk(readDefComponentStart);
     defrSetComponentCbk(readDefComponent);
+    defrSetStartPinsCbk(readDefPinStart);
     defrSetPinCbk(readDefPin);
+    defrSetBlockageStartCbk(readDefBlockageStart);
     defrSetBlockageCbk(readDefBlockage);
 
     if (setting.EnablePG) {
@@ -259,9 +266,12 @@ bool Database::readDEF(const std::string& file) {
     }
     defrSetNetStartCbk(readDefNetStart);
     defrSetNetCbk(readDefNet);
-    // augment nets with path data
-    defrSetAddPathToNet();
+    if (!setting.SkipDefNetWires) {
+        // augment nets with path data
+        defrSetAddPathToNet();
+    }
 
+    defrSetRegionStartCbk(readDefRegionStart);
     defrSetRegionCbk(readDefRegion);
     //  defrSetGroupNameCbk(readDefGroupName);
     defrSetGroupMemberCbk(readDefGroupMember);
@@ -1446,6 +1456,11 @@ int readDefGcellGrid(defrCallbackType_e c, defiGcellGrid* dgrid, defiUserData ud
 }
 
 //-----Via-----
+int readDefViaStart(defrCallbackType_e c, int num, defiUserData ud) {
+    reinterpret_cast<Database*>(ud)->reserveViaTypes(num);
+    return 0;
+}
+
 int readDefVia(defrCallbackType_e c, defiVia* dvia, defiUserData ud) {
     Database* db = (Database*)ud;
 
@@ -1599,6 +1614,11 @@ int readDefComponent(defrCallbackType_e c, defiComponent* co, defiUserData ud) {
 }
 
 //-----Pin-----
+int readDefPinStart(defrCallbackType_e c, int num, defiUserData ud) {
+    reinterpret_cast<Database*>(ud)->reserveIOPins(num);
+    return 0;
+}
+
 int readDefPin(defrCallbackType_e c, defiPin* dpin, defiUserData ud) {
     Database* db = (Database*)ud;
 
@@ -1666,6 +1686,11 @@ int readDefPin(defrCallbackType_e c, defiPin* dpin, defiUserData ud) {
 }
 
 //-----Blockages-----
+int readDefBlockageStart(defrCallbackType_e c, int num, defiUserData ud) {
+    reinterpret_cast<Database*>(ud)->reserveBlockages(num);
+    return 0;
+}
+
 int readDefBlockage(defrCallbackType_e c, defiBlockage* dblk, defiUserData ud) {
     Database* db = (Database*)ud;
 
@@ -1909,6 +1934,10 @@ int readDefNet(defrCallbackType_e c, defiNet* dnet, defiUserData ud) {
         net->addPin(pin);
     }
 
+    if (setting.SkipDefNetWires) {
+        return 0;
+    }
+
     int path = DEFIPATH_DONE;
     const Layer* layer = nullptr;
     int fromx = 0;
@@ -1980,6 +2009,11 @@ int readDefNet(defrCallbackType_e c, defiNet* dnet, defiUserData ud) {
 }
 
 //-----Region-----
+int readDefRegionStart(defrCallbackType_e c, int num, defiUserData ud) {
+    reinterpret_cast<Database*>(ud)->reserveRegions(num);
+    return 0;
+}
+
 int readDefRegion(defrCallbackType_e c, defiRegion* dreg, defiUserData ud) {
     Database* db = (Database*)ud;
 

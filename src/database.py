@@ -13,6 +13,7 @@ def load_dataset(args, logger, params):
         direct_timing_only = bool(getattr(args, "route_segments", "") or getattr(args, "gr_rc", ""))
         parser_params = dict(params)
         parser_params["enable_pg"] = not direct_timing_only
+        parser_params["skip_def_net_wires"] = direct_timing_only
         rawdb, gpdb = parser.read(
             parser_params, verbose_log=args.verbose_cpp_log, log_level=args.cpp_log_level,
             lite_mode=True, random_place=False, num_threads=args.num_threads

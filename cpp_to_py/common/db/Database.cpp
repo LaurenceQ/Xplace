@@ -864,6 +864,11 @@ ViaType* Database::addViaType(const string& name, bool isDef) {
     return viatype;
 }
 
+void Database::reserveBlockages(const size_t n) {
+    routeBlockages.reserve(routeBlockages.size() + n);
+    placeBlockages.reserve(placeBlockages.size() + n);
+}
+
 CellType* Database::addCellType(const string& name, unsigned libcell) {
     CellType* celltype = getCellType(name);
     if (celltype) {
