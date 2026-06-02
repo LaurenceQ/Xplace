@@ -43,6 +43,8 @@ class MetricRecorder:
 
 class GPUTimer():
     def __init__(self, data, rawdb, gpdb, params, args):
+        params = dict(params)
+        params["num_threads"] = max(1, int(getattr(args, "num_threads", params.get("num_threads", 1))))
         profile = os.getenv("XPLACE_TIMER_PROFILE", "").lower() not in ("", "0", "false", "no")
         direct_rc_mode = bool(params.get("route_segments") or params.get("gr_rc"))
         release_direct_py_state = (
