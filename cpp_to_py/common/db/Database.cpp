@@ -176,8 +176,12 @@ void Database::load() {
         setting.Format = "lefdef";
         readDEF(setting.DefFile);
         io_profile.log("read_def");
-        readDEFPG(setting.DefFile);
-        io_profile.log("read_def_pg");
+        if (setting.EnablePG) {
+            readDEFPG(setting.DefFile);
+            io_profile.log("read_def_pg");
+        } else {
+            io_profile.log("read_def_pg_skipped");
+        }
         def_read = true;
     }
 

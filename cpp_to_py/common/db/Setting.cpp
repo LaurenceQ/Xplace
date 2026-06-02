@@ -21,6 +21,9 @@ void Setting::reset() {
     Verilog = "";
     OutputFile = "";
     
+    EnablePG = true;
+    EnableIOPin = true;
+    EnableFence = true;
     liteMode = true;
     random_place = false;
 }

@@ -74,6 +74,9 @@ bool loadParams(const pybind11::dict& kwargs) {
     if (kwargs.contains("lite_mode")) {
         db::setting.liteMode = kwargs["lite_mode"].cast<bool>();
     }
+    if (kwargs.contains("enable_pg")) {
+        db::setting.EnablePG = kwargs["enable_pg"].cast<bool>();
+    }
 
     // enable random place or not
     if (kwargs.contains("random_place")) {

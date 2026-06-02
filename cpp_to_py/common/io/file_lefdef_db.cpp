@@ -252,9 +252,11 @@ bool Database::readDEF(const std::string& file) {
     defrSetPinCbk(readDefPin);
     defrSetBlockageCbk(readDefBlockage);
 
-    defrSetSNetStartCbk(readDefSNetStart);
-    defrSetSNetCbk(readDefSNet);
-    //  defrSetSNetWireCbk(readDefSnetwire);
+    if (setting.EnablePG) {
+        defrSetSNetStartCbk(readDefSNetStart);
+        defrSetSNetCbk(readDefSNet);
+        //  defrSetSNetWireCbk(readDefSnetwire);
+    }
     defrSetNetStartCbk(readDefNetStart);
     defrSetNetCbk(readDefNet);
     // augment nets with path data

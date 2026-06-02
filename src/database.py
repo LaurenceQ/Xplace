@@ -10,11 +10,13 @@ def load_dataset(args, logger, params):
     parser = IOParser()
     if args.load_from_raw:
         logger.info("loading from original benchmark...")
+        direct_timing_only = bool(getattr(args, "route_segments", "") or getattr(args, "gr_rc", ""))
+        parser_params = dict(params)
+        parser_params["enable_pg"] = not direct_timing_only
         rawdb, gpdb = parser.read(
-            params, verbose_log=args.verbose_cpp_log, log_level=args.cpp_log_level,
+            parser_params, verbose_log=args.verbose_cpp_log, log_level=args.cpp_log_level,
             lite_mode=True, random_place=False, num_threads=args.num_threads
         )
-        direct_timing_only = bool(getattr(args, "route_segments", "") or getattr(args, "gr_rc", ""))
         debug_needs_pin_names = bool(
             getattr(args, "debug_pin_timing", None)
             or getattr(args, "debug_report_path_pin", None)
