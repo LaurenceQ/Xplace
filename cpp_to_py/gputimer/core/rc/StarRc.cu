@@ -24,7 +24,7 @@ __global__ void RCTreeNet(RcStarModel* model) {
     float* pinRootRes = model->pinRootRes;
     const int num_nets = model->num_nets;
     const float unit_to_micron = model->unit_to_micron;
-    int* net_is_clock = model->net_is_clock;
+    const uint8_t* net_is_clock = model->net_is_clock;
     const float cf = model->cf;
     const float rf = model->rf;
     if (idx < num_nets) {

@@ -358,17 +358,32 @@ void GPUTimer::initialize() {
         cudaMalloc(&pinRootRes, num_pins * NUM_ATTR * sizeof(float));
     }
 
-    cudaMalloc(&net_is_clock, num_nets * sizeof(int));
-    cudaMalloc(&pin_is_clk, num_pins * sizeof(int));
-    cudaMalloc(&pin_is_ideal_clk, num_pins * sizeof(int));
+    cudaMalloc(&net_is_clock, num_nets * sizeof(uint8_t));
+    cudaMalloc(&pin_is_clk, num_pins * sizeof(uint8_t));
+    cudaMalloc(&pin_is_ideal_clk, num_pins * sizeof(uint8_t));
     cudaMalloc(&level_list, num_pins * sizeof(int));
     cudaMalloc(&primary_outputs, num_POs * sizeof(index_type));
     gputimer_log_cuda_mem_info("GPUTimer::initialize after_core_cuda_mallocs");
 
     cudaMemcpy(pinCap, gtdb.pin_capacitance.data(), num_pins * (NUM_ATTR + 2) * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(net_is_clock, gtdb.net_is_clock.data(), num_nets * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(pin_is_clk, gtdb.pin_is_clk.data(), num_pins * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(pin_is_ideal_clk, gtdb.pin_is_ideal_clk.data(), num_pins * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemset(net_is_clock, 0, num_nets * sizeof(uint8_t));
+    cudaMemset(pin_is_clk, 0, num_pins * sizeof(uint8_t));
+    cudaMemset(pin_is_ideal_clk, 0, num_pins * sizeof(uint8_t));
+    if (!gtdb.net_is_clock.empty()) {
+        cudaMemcpy(net_is_clock, gtdb.net_is_clock.data(),
+                   std::min<int>(num_nets, static_cast<int>(gtdb.net_is_clock.size())) * sizeof(uint8_t),
+                   cudaMemcpyHostToDevice);
+    }
+    if (!gtdb.pin_is_clk.empty()) {
+        cudaMemcpy(pin_is_clk, gtdb.pin_is_clk.data(),
+                   std::min<int>(num_pins, static_cast<int>(gtdb.pin_is_clk.size())) * sizeof(uint8_t),
+                   cudaMemcpyHostToDevice);
+    }
+    if (!gtdb.pin_is_ideal_clk.empty()) {
+        cudaMemcpy(pin_is_ideal_clk, gtdb.pin_is_ideal_clk.data(),
+                   std::min<int>(num_pins, static_cast<int>(gtdb.pin_is_ideal_clk.size())) * sizeof(uint8_t),
+                   cudaMemcpyHostToDevice);
+    }
     cudaMemcpy(primary_outputs, gtdb.primary_outputs.data(), gtdb.primary_outputs.size() * sizeof(index_type), cudaMemcpyHostToDevice);
 
 

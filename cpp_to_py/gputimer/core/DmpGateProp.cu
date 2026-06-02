@@ -251,7 +251,7 @@ __device__ DmpGateLutMeta GPULutAllocator::makeGateLutMeta(int lut_id) {
     meta.x_offset = 0;
     meta.y_offset = 0;
     meta.table_offset = 0;
-    if (lut_id < 0 || !d_allocated[lut_id]) {
+    if (lut_id < 0 || !lut_allocated(lut_id)) {
         return meta;
     }
     const int num_x = d_num_x[lut_id];
@@ -511,11 +511,10 @@ __device__ __forceinline__ float DmpModel::clockPeriodForTest(int test_id) const
 __device__ float DmpModel::idealClockEdgeTime(int timing_id,
                                                               int from_pin_id) const {
     const bool latch_clock_arc = timing_id >= 0 &&
-                                 d_allocator->d_is_latch_clock_arc != nullptr &&
-                                 d_allocator->d_is_latch_clock_arc[timing_id];
+                                 d_allocator->timing_is_latch_clock_arc(timing_id);
     const bool falling_triggered = timing_id >= 0 &&
-                                   d_allocator->d_is_falling_edge_triggered[timing_id] &&
-                                   !d_allocator->d_is_rising_edge_triggered[timing_id];
+                                   d_allocator->timing_is_falling_edge_triggered(timing_id) &&
+                                   !d_allocator->timing_is_rising_edge_triggered(timing_id);
     const bool use_fall_edge = latch_clock_arc ? !falling_triggered : falling_triggered;
     if (from_pin_id >= 0) {
         if (use_fall_edge) {
@@ -569,8 +568,8 @@ __device__ inline void DmpModel::propagateTest(int test_id,
     if (attr < NUM_ATTR) {
         if ((timing_id == -1) || (isnan(pinSlew[to_slot]))) return;
         int fel = el ^ 1;  // clock -> data. clock late -> data early (hold)
-        int frf = d_allocator->d_is_rising_edge_triggered[timing_id] ? 0 : 1;
-        if (frf && !d_allocator->d_is_falling_edge_triggered[timing_id]) {
+        int frf = d_allocator->timing_is_rising_edge_triggered(timing_id) ? 0 : 1;
+        if (frf && !d_allocator->timing_is_falling_edge_triggered(timing_id)) {
             return;
         }
         const int fel_rf = (fel << 1) + frf;

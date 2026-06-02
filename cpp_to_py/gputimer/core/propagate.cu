@@ -120,8 +120,8 @@ __device__ void propagateTest(const TimingPropagationModel* model,
         int fel = el ^ 1;
         int timing_id = timing_arc_id_map[arc_id * 2 + el];
         GPULutAllocator* d_allocator = model->d_allocator;
-        int frf = d_allocator->d_is_rising_edge_triggered[timing_id] ? 0 : 1;
-        if (frf && !d_allocator->d_is_falling_edge_triggered[timing_id]) {
+        int frf = d_allocator->timing_is_rising_edge_triggered(timing_id) ? 0 : 1;
+        if (frf && !d_allocator->timing_is_falling_edge_triggered(timing_id)) {
             return;
         }
         const int fel_rf = (fel << 1) + frf;
@@ -196,7 +196,7 @@ __device__ void propagateRAT(const TimingPropagationModel* model,
         int* timing_arc_id_map = model->timing_arc_id_map;
         if (timing_arc_id_map[arc_id * 2 + el] == -1) return;
         int timing_id = timing_arc_id_map[arc_id * 2 + el];
-        if (model->d_allocator->d_is_constraint[timing_id]) return;
+        if (model->d_allocator->timing_is_constraint(timing_id)) return;
         if (isnan(pinRat[to_pin_id * NUM_ATTR + tel_rf]) || isnan(arcDelay[arc_id * 2 * NUM_ATTR + i])) return;
         float delay = arcDelay[arc_id * 2 * NUM_ATTR + i];
         float rat = pinRat[to_pin_id * NUM_ATTR + tel_rf] - delay;

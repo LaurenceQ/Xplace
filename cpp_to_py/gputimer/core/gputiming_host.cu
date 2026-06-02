@@ -3,6 +3,7 @@
 #include "common/common.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
 
 namespace gt {
@@ -124,13 +125,11 @@ void GPULutAllocator::CopyToGPU() {
     cudaMalloc(&d_x_offset, (num_luts + 1) * sizeof(size_t));
     cudaMalloc(&d_y_offset, (num_luts + 1) * sizeof(size_t));
     cudaMalloc(&d_table_offset, (num_luts + 1) * sizeof(size_t));
-    cudaMalloc(&d_allocated, num_luts * sizeof(bool));
-    cudaMalloc(&d_is_rising_edge_triggered, num_timings * sizeof(bool));
-    cudaMalloc(&d_is_falling_edge_triggered, num_timings * sizeof(bool));
-    cudaMalloc(&d_is_constraint, num_timings * sizeof(bool));
-    cudaMalloc(&d_is_latch_clock_arc, num_timings * sizeof(bool));
-    cudaMalloc(&d_timing_sense, num_timings * sizeof(int));
-    cudaMalloc(&d_lut_template_var, 2 * num_luts * sizeof(int));
+    const int allocated_word_count = std::max(1, (num_luts + 31) / 32);
+    cudaMalloc(&d_allocated_bits, allocated_word_count * sizeof(uint32_t));
+    cudaMalloc(&d_timing_flags, num_timings * sizeof(uint8_t));
+    cudaMalloc(&d_timing_sense, num_timings * sizeof(int8_t));
+    cudaMalloc(&d_lut_template_var, 2 * num_luts * sizeof(int8_t));
 
     cudaMemcpy(d_x_array, x_array, x_size * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(d_y_array, y_array, y_size * sizeof(float), cudaMemcpyHostToDevice);
@@ -141,13 +140,27 @@ void GPULutAllocator::CopyToGPU() {
     cudaMemcpy(d_x_offset, x_offset, (num_luts + 1) * sizeof(size_t), cudaMemcpyHostToDevice);
     cudaMemcpy(d_y_offset, y_offset, (num_luts + 1) * sizeof(size_t), cudaMemcpyHostToDevice);
     cudaMemcpy(d_table_offset, table_offset, (num_luts + 1) * sizeof(size_t), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_allocated, allocated, num_luts * sizeof(bool), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_is_rising_edge_triggered, is_rising_edge_triggered, num_timings * sizeof(bool), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_is_falling_edge_triggered, is_falling_edge_triggered, num_timings * sizeof(bool), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_is_constraint, is_constraint, num_timings * sizeof(bool), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_is_latch_clock_arc, is_latch_clock_arc, num_timings * sizeof(bool), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_timing_sense, timing_sense, num_timings * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_lut_template_var, lut_template_var, 2 * num_luts * sizeof(int), cudaMemcpyHostToDevice);
+    std::vector<uint32_t> allocated_bits(allocated_word_count, 0);
+    for (int i = 0; i < num_luts; ++i) {
+        if (allocated[i]) allocated_bits[i >> 5] |= (1u << (i & 31));
+    }
+    cudaMemcpy(d_allocated_bits, allocated_bits.data(), allocated_word_count * sizeof(uint32_t), cudaMemcpyHostToDevice);
+    std::vector<uint8_t> timing_flags(num_timings, 0);
+    for (int i = 0; i < num_timings; ++i) {
+        if (is_rising_edge_triggered[i]) timing_flags[i] |= GT_TIMING_FLAG_RISING_EDGE;
+        if (is_falling_edge_triggered[i]) timing_flags[i] |= GT_TIMING_FLAG_FALLING_EDGE;
+        if (is_constraint[i]) timing_flags[i] |= GT_TIMING_FLAG_CONSTRAINT;
+        if (is_latch_clock_arc[i]) timing_flags[i] |= GT_TIMING_FLAG_LATCH_CLOCK_ARC;
+    }
+    cudaMemcpy(d_timing_flags, timing_flags.data(), num_timings * sizeof(uint8_t), cudaMemcpyHostToDevice);
+    std::vector<int8_t> timing_sense_i8(num_timings, -1);
+    for (int i = 0; i < num_timings; ++i)
+        timing_sense_i8[i] = static_cast<int8_t>(timing_sense[i]);
+    std::vector<int8_t> lut_template_var_i8(2 * num_luts, -1);
+    for (int i = 0; i < 2 * num_luts; ++i)
+        lut_template_var_i8[i] = static_cast<int8_t>(lut_template_var[i]);
+    cudaMemcpy(d_timing_sense, timing_sense_i8.data(), num_timings * sizeof(int8_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_lut_template_var, lut_template_var_i8.data(), 2 * num_luts * sizeof(int8_t), cudaMemcpyHostToDevice);
 }
 
 void GPULutAllocator::CopyToGPU(GPULutAllocator* d_gpuluts) {
@@ -160,12 +173,10 @@ void GPULutAllocator::CopyToGPU(GPULutAllocator* d_gpuluts) {
     cudaMemcpy(&(d_gpuluts->d_x_offset), &d_x_offset, sizeof(size_t*), cudaMemcpyHostToDevice);
     cudaMemcpy(&(d_gpuluts->d_y_offset), &d_y_offset, sizeof(size_t*), cudaMemcpyHostToDevice);
     cudaMemcpy(&(d_gpuluts->d_table_offset), &d_table_offset, sizeof(size_t*), cudaMemcpyHostToDevice);
-    cudaMemcpy(&(d_gpuluts->d_allocated), &d_allocated, sizeof(bool*), cudaMemcpyHostToDevice);
-    cudaMemcpy(&(d_gpuluts->d_is_rising_edge_triggered), &d_is_rising_edge_triggered, sizeof(bool*), cudaMemcpyHostToDevice);
-    cudaMemcpy(&(d_gpuluts->d_is_falling_edge_triggered), &d_is_falling_edge_triggered, sizeof(bool*), cudaMemcpyHostToDevice);
-    cudaMemcpy(&(d_gpuluts->d_is_latch_clock_arc), &d_is_latch_clock_arc, sizeof(bool*), cudaMemcpyHostToDevice);
-    cudaMemcpy(&(d_gpuluts->d_timing_sense), &d_timing_sense, sizeof(int*), cudaMemcpyHostToDevice);
-    cudaMemcpy(&(d_gpuluts->d_lut_template_var), &d_lut_template_var, sizeof(int*), cudaMemcpyHostToDevice);
+    cudaMemcpy(&(d_gpuluts->d_allocated_bits), &d_allocated_bits, sizeof(uint32_t*), cudaMemcpyHostToDevice);
+    cudaMemcpy(&(d_gpuluts->d_timing_flags), &d_timing_flags, sizeof(uint8_t*), cudaMemcpyHostToDevice);
+    cudaMemcpy(&(d_gpuluts->d_timing_sense), &d_timing_sense, sizeof(int8_t*), cudaMemcpyHostToDevice);
+    cudaMemcpy(&(d_gpuluts->d_lut_template_var), &d_lut_template_var, sizeof(int8_t*), cudaMemcpyHostToDevice);
 }
 
 void GPULutAllocator::freeMem() {
@@ -195,12 +206,10 @@ void GPULutAllocator::freeMem() {
         cudaFree(d_x_offset);
         cudaFree(d_y_offset);
         cudaFree(d_table_offset);
-        cudaFree(d_allocated);
-        cudaFree(d_is_rising_edge_triggered);
-        cudaFree(d_is_falling_edge_triggered);
-        cudaFree(d_is_constraint);
-        cudaFree(d_is_latch_clock_arc);
+        cudaFree(d_allocated_bits);
+        cudaFree(d_timing_flags);
         cudaFree(d_timing_sense);
+        cudaFree(d_lut_template_var);
     }
 }
 
@@ -283,8 +292,9 @@ void GPUPowerLutAllocator::CopyToGPU() {
     cudaMalloc(&d_x_offset, std::max(1, num_luts + 1) * sizeof(size_t));
     cudaMalloc(&d_y_offset, std::max(1, num_luts + 1) * sizeof(size_t));
     cudaMalloc(&d_table_offset, std::max(1, num_luts + 1) * sizeof(size_t));
-    cudaMalloc(&d_allocated, std::max(1, num_luts) * sizeof(bool));
-    cudaMalloc(&d_lut_template_var, std::max(1, num_luts * 2) * sizeof(int));
+    const int allocated_word_count = std::max(1, (num_luts + 31) / 32);
+    cudaMalloc(&d_allocated_bits, allocated_word_count * sizeof(uint32_t));
+    cudaMalloc(&d_lut_template_var, std::max(1, num_luts * 2) * sizeof(int8_t));
     if (x_size) cudaMemcpy(d_x_array, x_array, x_size * sizeof(float), cudaMemcpyHostToDevice);
     if (y_size) cudaMemcpy(d_y_array, y_array, y_size * sizeof(float), cudaMemcpyHostToDevice);
     if (table_size) cudaMemcpy(d_table_array, table_array, table_size * sizeof(float), cudaMemcpyHostToDevice);
@@ -294,8 +304,16 @@ void GPUPowerLutAllocator::CopyToGPU() {
     cudaMemcpy(d_x_offset, x_offset, std::max(1, num_luts + 1) * sizeof(size_t), cudaMemcpyHostToDevice);
     cudaMemcpy(d_y_offset, y_offset, std::max(1, num_luts + 1) * sizeof(size_t), cudaMemcpyHostToDevice);
     cudaMemcpy(d_table_offset, table_offset, std::max(1, num_luts + 1) * sizeof(size_t), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_allocated, allocated, std::max(1, num_luts) * sizeof(bool), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_lut_template_var, lut_template_var, std::max(1, num_luts * 2) * sizeof(int), cudaMemcpyHostToDevice);
+    std::vector<uint32_t> allocated_bits(allocated_word_count, 0);
+    for (int i = 0; i < num_luts; ++i) {
+        if (allocated[i]) allocated_bits[i >> 5] |= (1u << (i & 31));
+    }
+    cudaMemcpy(d_allocated_bits, allocated_bits.data(), allocated_word_count * sizeof(uint32_t), cudaMemcpyHostToDevice);
+    const int power_lut_template_count = std::max(1, num_luts * 2);
+    std::vector<int8_t> lut_template_var_i8(power_lut_template_count, -1);
+    for (int i = 0; i < num_luts * 2; ++i)
+        lut_template_var_i8[i] = static_cast<int8_t>(lut_template_var[i]);
+    cudaMemcpy(d_lut_template_var, lut_template_var_i8.data(), power_lut_template_count * sizeof(int8_t), cudaMemcpyHostToDevice);
 }
 
 void GPUPowerLutAllocator::CopyToGPU(GPUPowerLutAllocator* d_gpu_luts) {
@@ -308,8 +326,8 @@ void GPUPowerLutAllocator::CopyToGPU(GPUPowerLutAllocator* d_gpu_luts) {
     cudaMemcpy(&(d_gpu_luts->d_x_offset), &d_x_offset, sizeof(size_t*), cudaMemcpyHostToDevice);
     cudaMemcpy(&(d_gpu_luts->d_y_offset), &d_y_offset, sizeof(size_t*), cudaMemcpyHostToDevice);
     cudaMemcpy(&(d_gpu_luts->d_table_offset), &d_table_offset, sizeof(size_t*), cudaMemcpyHostToDevice);
-    cudaMemcpy(&(d_gpu_luts->d_allocated), &d_allocated, sizeof(bool*), cudaMemcpyHostToDevice);
-    cudaMemcpy(&(d_gpu_luts->d_lut_template_var), &d_lut_template_var, sizeof(int*), cudaMemcpyHostToDevice);
+    cudaMemcpy(&(d_gpu_luts->d_allocated_bits), &d_allocated_bits, sizeof(uint32_t*), cudaMemcpyHostToDevice);
+    cudaMemcpy(&(d_gpu_luts->d_lut_template_var), &d_lut_template_var, sizeof(int8_t*), cudaMemcpyHostToDevice);
 }
 
 void GPUPowerLutAllocator::freeMem() {
@@ -320,7 +338,7 @@ void GPUPowerLutAllocator::freeMem() {
     if (d_num_x) cudaFree(d_num_x); if (d_num_y) cudaFree(d_num_y); if (d_num_table) cudaFree(d_num_table);
     if (d_x_array) cudaFree(d_x_array); if (d_y_array) cudaFree(d_y_array); if (d_table_array) cudaFree(d_table_array);
     if (d_x_offset) cudaFree(d_x_offset); if (d_y_offset) cudaFree(d_y_offset); if (d_table_offset) cudaFree(d_table_offset);
-    if (d_allocated) cudaFree(d_allocated); if (d_lut_template_var) cudaFree(d_lut_template_var);
+    if (d_allocated_bits) cudaFree(d_allocated_bits); if (d_lut_template_var) cudaFree(d_lut_template_var);
     num_x = num_y = num_table = nullptr;
     x_array = y_array = table_array = nullptr;
     x_offset = y_offset = table_offset = nullptr;
@@ -328,7 +346,7 @@ void GPUPowerLutAllocator::freeMem() {
     d_num_x = d_num_y = d_num_table = nullptr;
     d_x_array = d_y_array = d_table_array = nullptr;
     d_x_offset = d_y_offset = d_table_offset = nullptr;
-    d_allocated = nullptr; d_lut_template_var = nullptr;
+    d_allocated_bits = nullptr; d_lut_template_var = nullptr;
 }
 
 GPUPowerLutAllocator::~GPUPowerLutAllocator() { freeMem(); }

@@ -90,9 +90,9 @@ void GTDatabase::_read_sdc(sdc::SetClockUncertainty& obj) {
         }
         if ((applies_to_setup && setup_delta != 0.0f) ||
             (applies_to_hold && hold_delta != 0.0f)) {
-            for (int pin_id = 0; pin_id < static_cast<int>(output_delay_clock_by_pin_attr.size()); ++pin_id) {
+            for (auto& [pin_id, pin_clocks] : output_delay_clock_by_pin_attr) {
                 for (int attr = 0; attr < NUM_ATTR; ++attr) {
-                    if (output_delay_clock_by_pin_attr[pin_id][attr] != clock_name) {
+                    if (pin_clocks[attr] != clock_name) {
                         continue;
                     }
                     if (torch::isnan(timing_raw_db.pinRAT[pin_id][attr]).item<bool>()) {

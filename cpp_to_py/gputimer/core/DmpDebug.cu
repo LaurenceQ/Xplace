@@ -352,14 +352,14 @@ void dmp_debug_print_first_level_sample(DmpModel* dmp_db, int level_idx, index_t
     index_type arc_end = -1;
     index_type arc_id = -1;
     index_type from_pin = -1;
-    int arc_type = -1;
+    uint8_t arc_type_u8 = 0xffu;
     gpuErrchk(cudaMemcpy(&to_pin, h_dmp.level_list + level_start_offset, sizeof(index_type), cudaMemcpyDeviceToHost));
     gpuErrchk(cudaMemcpy(&arc_start, h_dmp.pin_backward_arc_list_end + to_pin, sizeof(index_type), cudaMemcpyDeviceToHost));
     gpuErrchk(cudaMemcpy(&arc_end, h_dmp.pin_backward_arc_list_end + to_pin + 1, sizeof(index_type), cudaMemcpyDeviceToHost));
     if (arc_start < arc_end) {
         gpuErrchk(cudaMemcpy(&arc_id, h_dmp.pin_backward_arc_list + arc_start, sizeof(index_type), cudaMemcpyDeviceToHost));
         gpuErrchk(cudaMemcpy(&from_pin, h_dmp.timing_arc_from_pin_id + arc_id, sizeof(index_type), cudaMemcpyDeviceToHost));
-        gpuErrchk(cudaMemcpy(&arc_type, h_dmp.arc_types + arc_id, sizeof(int), cudaMemcpyDeviceToHost));
+        gpuErrchk(cudaMemcpy(&arc_type_u8, h_dmp.arc_types + arc_id, sizeof(uint8_t), cudaMemcpyDeviceToHost));
     }
     float from_slew[NUM_ATTR];
     float to_slew[NUM_ATTR];
@@ -384,7 +384,8 @@ void dmp_debug_print_first_level_sample(DmpModel* dmp_db, int level_idx, index_t
         gpuErrchk(cudaMemcpy(delay, h_dmp.arcDelay + arc_id * 2 * NUM_ATTR, sizeof(float) * 2 * NUM_ATTR, cudaMemcpyDeviceToHost));
     }
     printf("[DMP DEBUG SAMPLE] level=%d to_pin=%d arc_range=[%d,%d) arc=%d type=%d from=%d\n",
-           level_idx, (int)to_pin, (int)arc_start, (int)arc_end, (int)arc_id, arc_type, (int)from_pin);
+           level_idx, (int)to_pin, (int)arc_start, (int)arc_end, (int)arc_id,
+           arc_type_u8 == 0xffu ? -1 : static_cast<int>(arc_type_u8), (int)from_pin);
     printf("[DMP DEBUG SAMPLE] from_slew=(%e,%e,%e,%e) to_slew=(%e,%e,%e,%e) to_at=(%e,%e,%e,%e) elmore=(%e,%e,%e,%e)\n",
            from_slew[0], from_slew[1], from_slew[2], from_slew[3],
            to_slew[0], to_slew[1], to_slew[2], to_slew[3],
@@ -424,7 +425,7 @@ void dmp_debug_print_parallel_stats(DmpModel* dmp_db,
     vector<index_type> level_list(level_list_end_cpu.back());
     vector<index_type> fanin_end(h_dmp.num_pins + 1);
     vector<index_type> fanout_end(h_dmp.num_pins + 1);
-    vector<int> arc_types(h_dmp.num_arcs);
+    vector<uint8_t> arc_types(h_dmp.num_arcs);
     vector<int> arc_id2test_id(h_dmp.num_arcs);
     if (!level_list.empty()) {
         gpuErrchk(cudaMemcpy(level_list.data(), h_dmp.level_list,
@@ -439,7 +440,7 @@ void dmp_debug_print_parallel_stats(DmpModel* dmp_db,
                          cudaMemcpyDeviceToHost));
     if (h_dmp.num_arcs > 0) {
         gpuErrchk(cudaMemcpy(arc_types.data(), h_dmp.arc_types,
-                             sizeof(int) * arc_types.size(),
+                             sizeof(uint8_t) * arc_types.size(),
                              cudaMemcpyDeviceToHost));
         gpuErrchk(cudaMemcpy(arc_id2test_id.data(), h_dmp.arc_id2test_id,
                              sizeof(int) * arc_id2test_id.size(),

@@ -15,7 +15,7 @@ struct PathTraceModel {
     index_type* at_prefix_arc = nullptr;
     int* at_prefix_attr = nullptr;
     float* pinAT = nullptr;
-    int* arc_types = nullptr;
+    const uint8_t* arc_types = nullptr;
     float* arcDelay = nullptr;
     PathIndexAccessor indices;
     PathIndexAccessor ep_i_indices;
@@ -101,7 +101,7 @@ std::tuple<torch::Tensor, torch::Tensor> explore_path(index_type* at_prefix_pin,
                                                       index_type* at_prefix_arc,
                                                       int* at_prefix_attr,
                                                       float* pinAT,
-                                                      int* arc_types,
+                                                      const uint8_t* arc_types,
                                                       float* arcDelay,
                                                       torch::Tensor indices,
                                                       torch::Tensor ep_i_indices,

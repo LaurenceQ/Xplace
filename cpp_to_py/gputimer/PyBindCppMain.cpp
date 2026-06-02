@@ -45,6 +45,12 @@ std::shared_ptr<gt::GPUTimer> create_gputimer(const py::dict& kwargs,
     if (!rawdb->liberty_read) {
         throw std::invalid_argument("Liberty file not found. Please check!");
     }
+    if (kwargs.contains("num_threads")) {
+        const int requested_threads = kwargs["num_threads"].cast<int>();
+        if (requested_threads > 0) {
+            timing_raw_db->num_threads = requested_threads;
+        }
+    }
     std::shared_ptr<gt::GTDatabase> gtdb = std::make_shared<gt::GTDatabase>(rawdb, gpdb, timing_raw_db);
     const bool direct_rc_mode = kwargs.contains("route_segments") || kwargs.contains("gr_rc");
     gtdb->skip_legacy_rc_tensors = direct_rc_mode;

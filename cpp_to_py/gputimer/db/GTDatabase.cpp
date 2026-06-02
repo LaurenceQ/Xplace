@@ -17,11 +17,18 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdint>
 #include <cstdlib>
 #include <deque>
 #include <iterator>
+#include <limits>
 #include <map>
+#include <stdexcept>
+#include <string>
 #include <unordered_map>
+#include <vector>
+
+#include <omp.h>
 
 namespace gt {
 
@@ -72,6 +79,13 @@ bool is_latch_enable_to_q_arc(const TimingArc* timing_arc) {
     return (from == "G" || from == "GN") && (to == "Q" || to == "QN");
 }
 
+void release_sta_pin_storage(vector<STAPin*>& sta_pins) {
+    for (STAPin* pin : sta_pins) {
+        delete pin;
+    }
+    vector<STAPin*>().swap(sta_pins);
+}
+
 bool extract_profile_enabled()
 {
     const char* value = std::getenv("XPLACE_TIMER_PROFILE");
@@ -110,6 +124,49 @@ private:
     std::chrono::steady_clock::time_point start_;
     std::chrono::steady_clock::time_point last_;
 };
+
+int positive_env_int(const char* name, int fallback)
+{
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return fallback;
+    }
+    char* end = nullptr;
+    long parsed = std::strtol(value, &end, 10);
+    if (end == value || parsed <= 0 || parsed > std::numeric_limits<int>::max()) {
+        return fallback;
+    }
+    return static_cast<int>(parsed);
+}
+
+int graph_thread_count(int fallback)
+{
+    const int env_threads = positive_env_int("XPLACE_TIMER_GRAPH_THREADS", fallback);
+    return std::max(1, env_threads);
+}
+
+int prefix_sum_counts(vector<int>& starts, const char* label)
+{
+    long long total = 0;
+    for (size_t i = 0; i + 1 < starts.size(); ++i) {
+        const int count = starts[i];
+        starts[i] = static_cast<int>(total);
+        total += count;
+        if (total > std::numeric_limits<int>::max()) {
+            throw std::runtime_error(std::string("Timing graph ") + label + " exceeds int index range");
+        }
+    }
+    if (!starts.empty()) {
+        starts.back() = static_cast<int>(total);
+    }
+    return static_cast<int>(total);
+}
+
+template <typename T>
+void release_vector_storage(vector<T>& values)
+{
+    vector<T>().swap(values);
+}
 
 
 }  // namespace
@@ -158,12 +215,15 @@ void Clock::set_waveform(float rise_edge, float fall_edge) {
 
 void Clock::set_latency(float latency) { _latency = latency; }
 
-GTDatabase::GTDatabase(shared_ptr<db::Database> rawdb_, shared_ptr<gp::GPDatabase> gpdb_, shared_ptr<TimingTorchRawDB> timing_raw_db_) : rawdb(*rawdb_), gpdb(*gpdb_), timing_raw_db(*timing_raw_db_) {
+GTDatabase::GTDatabase(shared_ptr<db::Database> rawdb_, shared_ptr<gp::GPDatabase> gpdb_, shared_ptr<TimingTorchRawDB> timing_raw_db_) : rawdb(*rawdb_), gpdb(*gpdb_), timing_raw_db(*timing_raw_db_), pin_names(gpdb.getPinNames()), net_names(gpdb.getNetNames()) {
     cell_libs_[MIN] = rawdb.cell_libs_[MIN];
     cell_libs_[MAX] = rawdb.cell_libs_[MAX];
 }
 
-GTDatabase::~GTDatabase() { logger.info("destruct gtdb"); }
+GTDatabase::~GTDatabase() {
+    release_sta_pin_storage(STA_pins);
+    logger.info("destruct gtdb");
+}
 
 
 void GTDatabase::ExtractTimingGraph() {
@@ -171,8 +231,6 @@ void GTDatabase::ExtractTimingGraph() {
     res_unit = cell_libs_[MIN]->resistance_unit_->value();
     cap_unit = cell_libs_[MIN]->capacitance_unit_->value();
     time_unit = cell_libs_[MIN]->time_unit_->value();
-    pin_names = gpdb.getPinNames();
-    net_names = gpdb.getNetNames();
 
     dmp_input_thresholds.assign(NUM_ATTR, 0.5f);
     dmp_output_thresholds.assign(NUM_ATTR, 0.5f);
@@ -346,8 +404,6 @@ void GTDatabase::ExtractTimingGraph() {
     //  Traverse Circuit Pins
     //
     num_pins = gpdb.getPins().size();
-    pin_names = gpdb.getPinNames();
-    net_names = gpdb.getNetNames();
     pin_name2pin_id.clear();
     if (build_full_pin_name_map) {
         pin_name2pin_id.reserve(pin_names.size() * 2);
@@ -385,13 +441,11 @@ void GTDatabase::ExtractTimingGraph() {
     pin_is_clk.assign(num_pins, 0);
     pin_is_ideal_clk.assign(num_pins, 0);
     pin_case_values.assign(num_pins, -1);
-    STA_pins.resize(num_pins, nullptr);
     pin_capacitance.resize(2 * 3 * num_pins, 0.0f);
     for (auto& gppin : gpdb.getPins()) {
-        int pin_id = gppin.getId();
+        int pin_id = static_cast<int>(gppin.getId());
         string pin_name = gppin.getName();
         string pin_macro_name = gppin.getMacroName();
-        STA_pins[pin_id] = new STAPin();
         auto [ori_node_id, ori_node_pin_id, ori_net_id] = gppin.getOriDBInfo();
         if (ori_node_pin_id == -1) {
             auto dbiopin = rawdb.iopins[ori_node_id];
@@ -433,46 +487,42 @@ void GTDatabase::ExtractTimingGraph() {
     num_POs = primary_outputs.size();
     extract_profile.log("traverse_pins");
 
+    const int graph_threads = graph_thread_count(timing_raw_db.num_threads);
+    logger.info("Timing graph extraction threads: %d", graph_threads);
 
-    //  Map Pin to Liberty Timing
-    //
-    auto connect_from_to_pin = [&](int from_pin_id, int to_pin_id) -> pair<STAPin*, STAPin*> {
-        STAPin* from_pin = STA_pins[from_pin_id];
-        STAPin* to_pin = STA_pins[to_pin_id];
-        from_pin->fanout_pin_ids.push_back(to_pin_id);
-        to_pin->fanin_pin_ids.push_back(from_pin_id);
-        timing_arc_from_pin_id.push_back(from_pin_id);
-        timing_arc_to_pin_id.push_back(to_pin_id);
-        from_pin->timing_arc_out.push_back(num_arcs);
-        to_pin->timing_arc_in.push_back(num_arcs);
-        return {from_pin, to_pin};
-    };
+    const int num_nets = static_cast<int>(gpdb.getNets().size());
+    const int num_cells = static_cast<int>(rawdb.cells.size());
+    vector<uint8_t> primary_input_mask(num_pins, 0);
+    for (int pin_id : primary_inputs) {
+        if (pin_id >= 0 && pin_id < num_pins) primary_input_mask[pin_id] = 1;
+    }
 
-    for (auto& gpnet : gpdb.getNets()) {
-        int driver_pin_id = gpnet.pins()[0];
-        for (index_type i = 1; i < static_cast<index_type>(gpnet.pins().size()); i++) {
-            int sink_pin_id = gpnet.pins()[i];
-            auto [from_pin, to_pin] = connect_from_to_pin(driver_pin_id, sink_pin_id);
-            timing_arc_id_map.push_back(-1);
-            timing_arc_id_map.push_back(-1);
-            arc_types.push_back(0);
-            arc_id2test_id.push_back(-1);
-            num_arcs++;
+    vector<int> net_arc_start(num_nets + 1, 0);
+    vector<int> net_driver_pin(num_nets, -1);
+#pragma omp parallel for num_threads(graph_threads) schedule(static)
+    for (int net_id = 0; net_id < num_nets; ++net_id) {
+        const auto& pins = gpdb.getNets()[net_id].pins();
+        if (!pins.empty()) {
+            net_driver_pin[net_id] = static_cast<int>(pins[0]);
+            net_arc_start[net_id] = static_cast<int>(pins.size()) - 1;
         }
     }
-    extract_profile.log("net_arcs");
+    const int num_net_arcs = prefix_sum_counts(net_arc_start, "net arcs");
 
     auto is_primary_input_pin = [&](int pin_id) -> bool {
-        return std::find(primary_inputs.begin(), primary_inputs.end(), pin_id) != primary_inputs.end();
+        return pin_id >= 0 && pin_id < num_pins && primary_input_mask[pin_id] != 0;
+    };
+    auto pin_has_net_fanin = [&](int pin_id) -> bool {
+        if (pin_id < 0 || pin_id >= num_pins) return false;
+        const int net_id = static_cast<int>(gpdb.getPins()[pin_id].getParNetId());
+        return net_id >= 0 && net_id < num_nets &&
+               net_driver_pin[net_id] >= 0 && net_driver_pin[net_id] != pin_id;
     };
     auto is_undriven_non_pi_pin = [&](int pin_id) -> bool {
-        return pin_id >= 0 &&
-               !is_primary_input_pin(pin_id) &&
-               STA_pins[pin_id] != nullptr &&
-               STA_pins[pin_id]->fanin_pin_ids.empty();
+        return pin_id >= 0 && !is_primary_input_pin(pin_id) && !pin_has_net_fanin(pin_id);
     };
     auto is_constant_driver_pin = [&](int pin_id) -> bool {
-        if (pin_id < 0) return false;
+        if (pin_id < 0 || pin_id >= num_pins) return false;
         auto [ori_node_id, ori_node_pin_id, ori_net_id] = gpdb.getPins()[pin_id].getOriDBInfo();
         (void) ori_net_id;
         if (ori_node_pin_id == -1 || ori_node_id < 0 || ori_node_id >= static_cast<int>(rawdb.cells.size())) {
@@ -495,29 +545,73 @@ void GTDatabase::ExtractTimingGraph() {
         return -1;
     };
     auto constant_driven_pin_value = [&](int pin_id) -> int {
-        if (pin_id < 0 || STA_pins[pin_id] == nullptr || STA_pins[pin_id]->fanin_pin_ids.empty()) {
+        if (!pin_has_net_fanin(pin_id)) {
             return -1;
         }
-        int const_value = -1;
-        for (int src_pin_id : STA_pins[pin_id]->fanin_pin_ids) {
-            int src_value = constant_driver_value(src_pin_id);
-            if (src_value < 0) {
-                return -1;
-            }
-            if (const_value >= 0 && const_value != src_value) {
-                return -1;
-            }
-            const_value = src_value;
+        const int net_id = static_cast<int>(gpdb.getPins()[pin_id].getParNetId());
+        return constant_driver_value(net_driver_pin[net_id]);
+    };
+    auto valid_cell_timing_arc = [&](db::Cell* dbcell,
+                                     int gpdb_id,
+                                     int libcell_id,
+                                     Split el,
+                                     int timing_id,
+                                     int& from_pin_id,
+                                     int& to_pin_id,
+                                     bool& is_test) -> bool {
+        TimingArc* timing_arc = liberty_timing_arcs[timing_id];
+        if (is_redundant_timing(timing_arc, el)) {
+            return false;
         }
-        return const_value;
+        from_pin_id = gpdb.getNodes()[gpdb_id].getPinbyPortName(timing_arc->from_port_->name);
+        to_pin_id = gpdb.getNodes()[gpdb_id].getPinbyPortName(timing_arc->to_port_->name);
+        if (from_pin_id < 0 || to_pin_id < 0) {
+            return false;
+        }
+        if (timing_arc->from_port_->name == "S" &&
+            timing_arc->to_port_->name == "X" &&
+            dbcell->ctype()->liberty_cell->name.find("__mux2_") != std::string::npos) {
+            const int a0_pin_id = gpdb.getNodes()[gpdb_id].getPinbyPortName("A0");
+            const int a1_pin_id = gpdb.getNodes()[gpdb_id].getPinbyPortName("A1");
+            const int a0_const = constant_driven_pin_value(a0_pin_id);
+            const int a1_const = constant_driven_pin_value(a1_pin_id);
+            if (is_undriven_non_pi_pin(a0_pin_id) ||
+                is_undriven_non_pi_pin(a1_pin_id) ||
+                (timing_arc->timing_sense_ == TimingSense::positive_unate &&
+                 (a0_const == 1 || a1_const == 0)) ||
+                (timing_arc->timing_sense_ == TimingSense::negative_unate &&
+                 (a0_const == 0 || a1_const == 1))) {
+                return false;
+            }
+        }
+        is_test = timing_arc->is_constraint() && !is_clock_gating_check(timing_arc);
+        (void) libcell_id;
+        return true;
     };
 
-    cell_node_type_map.resize(gpdb.getNodes().size(), -1);
-    for (auto& dbcell : rawdb.cells) {
-        int gpdb_id = dbcell->gpdb_id;
-        int libcell_id = dbcell->ctype()->libcell();
-        cell_node_type_map[gpdb_id] = libcell_id;
-        if (libcell_id < 0 || !dbcell->ctype()->liberty_cell) continue;
+    cell_node_type_map.assign(gpdb.getNodes().size(), -1);
+    for (int cell_idx = 0; cell_idx < num_cells; ++cell_idx) {
+        db::Cell* dbcell = rawdb.cells[cell_idx];
+        if (dbcell == nullptr || dbcell->ctype() == nullptr) continue;
+        const int gpdb_id = dbcell->gpdb_id;
+        if (gpdb_id >= 0 && gpdb_id < static_cast<int>(cell_node_type_map.size())) {
+            cell_node_type_map[gpdb_id] = dbcell->ctype()->libcell();
+        }
+    }
+    vector<int> cell_arc_start(num_cells + 1, 0);
+    vector<int> cell_test_start(num_cells + 1, 0);
+#pragma omp parallel for num_threads(graph_threads) schedule(dynamic, 256)
+    for (int cell_idx = 0; cell_idx < num_cells; ++cell_idx) {
+        db::Cell* dbcell = rawdb.cells[cell_idx];
+        if (dbcell == nullptr || dbcell->ctype() == nullptr) continue;
+        const int gpdb_id = dbcell->gpdb_id;
+        const int libcell_id = dbcell->ctype()->libcell();
+        if (libcell_id < 0 || !dbcell->ctype()->liberty_cell ||
+            gpdb_id < 0 || gpdb_id >= static_cast<int>(gpdb.getNodes().size())) {
+            continue;
+        }
+        int arc_count = 0;
+        int test_count = 0;
         for_each_el(el) {
             for (int pin_id : gpdb.getNodes()[gpdb_id].pins()) {
                 int pin_id2port_start = liberty_cell_type2port_list_end[libcell_id];
@@ -525,88 +619,161 @@ void GTDatabase::ExtractTimingGraph() {
                 int port_id = pin_id2port_start + pin_id2port_offset;
                 int start = liberty_port2timing_list_end[2 * port_id + el];
                 int end = liberty_port2timing_list_end[2 * port_id + el + 1];
-                for (int i = start; i < end; i++) {
-                    TimingArc* timing_arc = liberty_timing_arcs[i];
-                    if (is_redundant_timing(timing_arc, el)) {
+                for (int timing_id = start; timing_id < end; ++timing_id) {
+                    int from_pin_id = -1;
+                    int to_pin_id = -1;
+                    bool is_test = false;
+                    if (!valid_cell_timing_arc(dbcell, gpdb_id, libcell_id, el, timing_id,
+                                               from_pin_id, to_pin_id, is_test)) {
                         continue;
                     }
-                    array<int, 2> timing_view = {-1, -1};
-                    timing_view[el] = i;
+                    ++arc_count;
+                    if (is_test) ++test_count;
+                }
+            }
+        }
+        cell_arc_start[cell_idx] = arc_count;
+        cell_test_start[cell_idx] = test_count;
+    }
+    const int num_cell_arcs = prefix_sum_counts(cell_arc_start, "cell arcs");
+    num_tests = prefix_sum_counts(cell_test_start, "test arcs");
+    num_arcs = num_net_arcs + num_cell_arcs;
 
-                    int from_pin_id = gpdb.getNodes()[gpdb_id].getPinbyPortName(timing_arc->from_port_->name);;
-                    int to_pin_id = gpdb.getNodes()[gpdb_id].getPinbyPortName(timing_arc->to_port_->name);
-                    if (from_pin_id < 0 || to_pin_id < 0) {
+    timing_arc_from_pin_id.assign(num_arcs, -1);
+    timing_arc_to_pin_id.assign(num_arcs, -1);
+    timing_arc_id_map.assign(static_cast<size_t>(num_arcs) * 2u, -1);
+    arc_types.assign(num_arcs, 0);
+    arc_id2test_id.assign(num_arcs, -1);
+    test_id2_arc_id.assign(num_tests, -1);
+
+#pragma omp parallel for num_threads(graph_threads) schedule(static)
+    for (int net_id = 0; net_id < num_nets; ++net_id) {
+        const auto& pins = gpdb.getNets()[net_id].pins();
+        if (pins.size() <= 1) continue;
+        const int driver_pin_id = static_cast<int>(pins[0]);
+        int arc_id = net_arc_start[net_id];
+        for (index_type i = 1; i < static_cast<index_type>(pins.size()); ++i, ++arc_id) {
+            timing_arc_from_pin_id[arc_id] = driver_pin_id;
+            timing_arc_to_pin_id[arc_id] = static_cast<int>(pins[i]);
+        }
+    }
+    extract_profile.log("net_arcs");
+
+#pragma omp parallel for num_threads(graph_threads) schedule(dynamic, 256)
+    for (int cell_idx = 0; cell_idx < num_cells; ++cell_idx) {
+        db::Cell* dbcell = rawdb.cells[cell_idx];
+        if (dbcell == nullptr || dbcell->ctype() == nullptr) continue;
+        const int gpdb_id = dbcell->gpdb_id;
+        const int libcell_id = dbcell->ctype()->libcell();
+        if (libcell_id < 0 || !dbcell->ctype()->liberty_cell ||
+            gpdb_id < 0 || gpdb_id >= static_cast<int>(gpdb.getNodes().size())) {
+            continue;
+        }
+        int local_arc = 0;
+        int local_test = 0;
+        for_each_el(el) {
+            for (int pin_id : gpdb.getNodes()[gpdb_id].pins()) {
+                int pin_id2port_start = liberty_cell_type2port_list_end[libcell_id];
+                int pin_id2port_offset = pin_id2port_offset_id[pin_id];
+                int port_id = pin_id2port_start + pin_id2port_offset;
+                int start = liberty_port2timing_list_end[2 * port_id + el];
+                int end = liberty_port2timing_list_end[2 * port_id + el + 1];
+                for (int timing_id = start; timing_id < end; ++timing_id) {
+                    int from_pin_id = -1;
+                    int to_pin_id = -1;
+                    bool is_test = false;
+                    if (!valid_cell_timing_arc(dbcell, gpdb_id, libcell_id, el, timing_id,
+                                               from_pin_id, to_pin_id, is_test)) {
                         continue;
                     }
-                    if (timing_arc->from_port_->name == "S" &&
-                        timing_arc->to_port_->name == "X" &&
-                        dbcell->ctype()->liberty_cell->name.find("__mux2_") != std::string::npos) {
-                        const int a0_pin_id = gpdb.getNodes()[gpdb_id].getPinbyPortName("A0");
-                        const int a1_pin_id = gpdb.getNodes()[gpdb_id].getPinbyPortName("A1");
-                        const int a0_const = constant_driven_pin_value(a0_pin_id);
-                        const int a1_const = constant_driven_pin_value(a1_pin_id);
-                        if (is_undriven_non_pi_pin(a0_pin_id) ||
-                            is_undriven_non_pi_pin(a1_pin_id) ||
-                            (timing_arc->timing_sense_ == TimingSense::positive_unate &&
-                             (a0_const == 1 || a1_const == 0)) ||
-                            (timing_arc->timing_sense_ == TimingSense::negative_unate &&
-                             (a0_const == 0 || a1_const == 1))) {
-                            continue;
-                        }
-                    }
-                    auto [from_pin, to_pin] = connect_from_to_pin(from_pin_id, to_pin_id);
-                    timing_arc_id_map.push_back(timing_view[MIN]);
-                    timing_arc_id_map.push_back(timing_view[MAX]);
-                    arc_types.push_back(1);
-                    num_arcs++;
-
-                    if (timing_arc->is_constraint() && !is_clock_gating_check(timing_arc)) {
-                        arc_id2test_id.push_back(num_tests++);
-                        test_id2_arc_id.push_back(num_arcs - 1);
-                        endpoints_id.push_back(to_pin_id);
-                    } else {
-                        arc_id2test_id.push_back(-1);
+                    const int arc_id = num_net_arcs + cell_arc_start[cell_idx] + local_arc++;
+                    timing_arc_from_pin_id[arc_id] = from_pin_id;
+                    timing_arc_to_pin_id[arc_id] = to_pin_id;
+                    timing_arc_id_map[arc_id * 2 + static_cast<int>(el)] = timing_id;
+                    arc_types[arc_id] = 1;
+                    if (is_test) {
+                        const int test_id = cell_test_start[cell_idx] + local_test++;
+                        arc_id2test_id[arc_id] = test_id;
+                        test_id2_arc_id[test_id] = arc_id;
                     }
                 }
             }
         }
     }
+    for (int test_id = 0; test_id < num_tests; ++test_id) {
+        const int arc_id = test_id2_arc_id[test_id];
+        if (arc_id >= 0 && arc_id < num_arcs) {
+            endpoints_id.push_back(timing_arc_to_pin_id[arc_id]);
+        }
+    }
     extract_profile.log("cell_arcs");
+    release_vector_storage(primary_input_mask);
+    release_vector_storage(net_arc_start);
+    release_vector_storage(net_driver_pin);
+    release_vector_storage(cell_arc_start);
+    release_vector_storage(cell_test_start);
+    extract_profile.log("release_arc_build_temps");
 
-    //  Construct Connectivity Graph
-    //
-    for (int i = 0; i < num_pins; i++) total_num_fanouts += STA_pins[i]->fanout_pin_ids.size();
-
+    // Construct connectivity CSR from final arc arrays.  Scatter is serial to
+    // keep each pin's arc order identical to increasing arc_id order.
+    vector<int> pin_fanout_count(num_pins, 0);
+    pin_num_fanin.assign(num_pins, 0);
+#pragma omp parallel for num_threads(graph_threads) schedule(static)
+    for (int arc_id = 0; arc_id < num_arcs; ++arc_id) {
+        const int from_pin = timing_arc_from_pin_id[arc_id];
+        const int to_pin = timing_arc_to_pin_id[arc_id];
+        if (from_pin >= 0 && from_pin < num_pins) {
+#pragma omp atomic update
+            pin_fanout_count[from_pin]++;
+        }
+        if (to_pin >= 0 && to_pin < num_pins) {
+#pragma omp atomic update
+            pin_num_fanin[to_pin]++;
+        }
+    }
     pin_fanout_list_end.resize(num_pins + 1);
-    pin_fanout_list_end[0] = 0;
-    pin_num_fanin.resize(num_pins);
-    pin_fanout_list.resize(total_num_fanouts);
+    pin_forward_arc_list_end.resize(num_pins + 1);
+    pin_backward_arc_list_end.resize(num_pins + 1);
+    int fanout_total = 0;
+    int fanin_total = 0;
+    for (int pin_id = 0; pin_id < num_pins; ++pin_id) {
+        pin_fanout_list_end[pin_id] = fanout_total;
+        pin_forward_arc_list_end[pin_id] = fanout_total;
+        pin_backward_arc_list_end[pin_id] = fanin_total;
+        fanout_total += pin_fanout_count[pin_id];
+        fanin_total += pin_num_fanin[pin_id];
+    }
+    pin_fanout_list_end[num_pins] = fanout_total;
+    pin_forward_arc_list_end[num_pins] = fanout_total;
+    pin_backward_arc_list_end[num_pins] = fanin_total;
+    total_num_fanouts = fanout_total;
+    pin_fanout_list.resize(fanout_total);
+    pin_forward_arc_list.resize(fanout_total);
+    pin_backward_arc_list.resize(fanin_total);
 
-    index_type ptr = 0;
-    index_type last_idx = 0;
-    for (index_type i = 0; i < static_cast<index_type>(num_pins); i++) {
-        for (auto fanout_pin_id : STA_pins[i]->fanout_pin_ids) pin_fanout_list[ptr++] = fanout_pin_id;
-        last_idx += STA_pins[i]->fanout_pin_ids.size();
-        pin_fanout_list_end[i + 1] = last_idx;
-        pin_num_fanin[i] = STA_pins[i]->fanin_pin_ids.size();
+    std::fill(pin_fanout_count.begin(), pin_fanout_count.end(), 0);
+    vector<int> pin_backward_cursor(num_pins, 0);
+    for (int arc_id = 0; arc_id < num_arcs; ++arc_id) {
+        const int from_pin = timing_arc_from_pin_id[arc_id];
+        const int to_pin = timing_arc_to_pin_id[arc_id];
+        if (from_pin >= 0 && from_pin < num_pins) {
+            const int pos = pin_forward_arc_list_end[from_pin] + pin_fanout_count[from_pin]++;
+            pin_forward_arc_list[pos] = arc_id;
+            pin_fanout_list[pos] = to_pin;
+        }
+        if (to_pin >= 0 && to_pin < num_pins) {
+            const int pos = pin_backward_arc_list_end[to_pin] + pin_backward_cursor[to_pin]++;
+            pin_backward_arc_list[pos] = arc_id;
+        }
     }
-    for (int i = 0; i < num_pins; i++) {
-        if (pin_num_fanin[i] == 0) pin_frontiers.push_back(i);
+    pin_frontiers.clear();
+    for (int pin_id = 0; pin_id < num_pins; ++pin_id) {
+        pin_num_fanin[pin_id] = pin_backward_arc_list_end[pin_id + 1] - pin_backward_arc_list_end[pin_id];
+        if (pin_num_fanin[pin_id] == 0) pin_frontiers.push_back(pin_id);
     }
+    release_vector_storage(pin_fanout_count);
+    release_vector_storage(pin_backward_cursor);
     extract_profile.log("pin_fanout_lists");
-
-    pin_forward_arc_list_end.push_back(0);
-    pin_backward_arc_list_end.push_back(0);
-    for (index_type i = 0; i < static_cast<index_type>(num_pins); i++) {
-        for (auto fanout_arc : STA_pins[i]->timing_arc_out) {
-            pin_forward_arc_list.push_back(fanout_arc);
-        }
-        pin_forward_arc_list_end.push_back(pin_forward_arc_list.size());
-        for (auto fanin_arc : STA_pins[i]->timing_arc_in) {
-            pin_backward_arc_list.push_back(fanin_arc);
-        }
-        pin_backward_arc_list_end.push_back(pin_backward_arc_list.size());
-    }
     extract_profile.log("pin_arc_lists");
 
     // Build pin_is_clk: mark register clock pins (from_pin of test/constraint arcs)
@@ -646,6 +813,7 @@ void GTDatabase::ExtractTimingGraph() {
     // gputimer arrays
     auto device = timing_raw_db.node_size_x.device();
     auto options = torch::TensorOptions().dtype(torch::kInt32);
+    auto byte_options = torch::TensorOptions().dtype(torch::kUInt8);
     auto float_options = torch::TensorOptions().dtype(torch::kFloat32);
     gputimer_log_cuda_mem_info("GTDatabase::ExtractTimingGraph before_topology_tensors");
     // Timer graph topology variables
@@ -662,7 +830,7 @@ void GTDatabase::ExtractTimingGraph() {
     extract_profile.log("topology_tensors");
 
     // Timer timing liberty variables
-    timing_raw_db.arc_types = torch::from_blob(arc_types.data(), {static_cast<int>(arc_types.size())}, options).contiguous().to(device);
+    timing_raw_db.arc_types = torch::from_blob(arc_types.data(), {static_cast<int>(arc_types.size())}, byte_options).contiguous().to(device);
     timing_raw_db.timing_arc_id_map = torch::from_blob(timing_arc_id_map.data(), {static_cast<int>(timing_arc_id_map.size())}, options).contiguous().to(device);
     timing_raw_db.arc_id2test_id = torch::from_blob(arc_id2test_id.data(), {static_cast<int>(arc_id2test_id.size())}, options).contiguous().to(device);
     timing_raw_db.test_id2_arc_id = torch::from_blob(test_id2_arc_id.data(), {static_cast<int>(test_id2_arc_id.size())}, options).contiguous().to(device);

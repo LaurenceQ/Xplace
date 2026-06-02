@@ -72,11 +72,8 @@ void GTDatabase::readSdc(sdc::SDC& sdc) {
     propagated_clock_names.clear();
     propagated_clock_pins.clear();
     power_disabled_constraint_arc.assign(timing_arc_from_pin_id.size(), 0);
-    pin_clock_latency_overrides.assign(num_pins, nanf(""));
-    output_delay_clock_by_pin_attr.assign(num_pins, {});
-    for (auto& pin_clocks : output_delay_clock_by_pin_attr) {
-        pin_clocks.fill("");
-    }
+    pin_clock_latency_overrides.clear();
+    output_delay_clock_by_pin_attr.clear();
     for (auto& command : sdc.commands) {
         std::visit(Functors{[this](auto&& cmd) { _read_sdc(cmd); }}, command);
     }
@@ -174,9 +171,8 @@ void GTDatabase::readSdc(sdc::SDC& sdc) {
     int pin_clock_latency_with_clock_context = 0;
     int pin_clock_latency_with_default_context = 0;
     int pin_clock_latency_without_context = 0;
-    for (int pin_id = 0; pin_id < num_pins; ++pin_id) {
-        const float override = pin_clock_latency_overrides[pin_id];
-        if (!std::isfinite(override)) {
+    for (const auto& [pin_id, override] : pin_clock_latency_overrides) {
+        if (pin_id < 0 || pin_id >= num_pins || !std::isfinite(override)) {
             continue;
         }
         ++pin_clock_latency_override_count;

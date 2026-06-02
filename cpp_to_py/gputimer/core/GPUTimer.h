@@ -21,11 +21,17 @@ class GPUPowerLutAllocator;
 class DmpModel;
 
 struct GpuPowerExprOpHost {
+    int arg = -1;     // physical pin id for op=pin
+    int16_t var_key = -1; // Liberty port id for BDD variable identity/order
     uint8_t op = 0;   // 0=pin, 1=const0, 2=const1, 3=not, 4=and, 5=or, 6=xor, 7=missing pin
     uint8_t zero_density = 0;
-    int arg = -1;     // physical pin id for op=pin
-    int var_key = -1; // Liberty port id for BDD variable identity/order
+
+    GpuPowerExprOpHost() = default;
+    GpuPowerExprOpHost(int arg_, int16_t var_key_, uint8_t op_, uint8_t zero_density_ = 0)
+        : arg(arg_), var_key(var_key_), op(op_), zero_density(zero_density_) {}
 };
+
+static_assert(sizeof(GpuPowerExprOpHost) == 8, "GpuPowerExprOpHost should stay compact");
 
 static constexpr int kGpuPowerExprConst0Pin = -1000000001;
 static constexpr int kGpuPowerExprConst1Pin = -1000000002;
@@ -37,6 +43,20 @@ struct GpuPowerSeqHost {
     int q_pin = -1;
     int qn_pin = -1;
     uint8_t is_latch = 0;
+
+    GpuPowerSeqHost() = default;
+    GpuPowerSeqHost(int data_expr_id_,
+                    int clk_expr_id_,
+                    int node_id_,
+                    int q_pin_,
+                    int qn_pin_,
+                    uint8_t is_latch_)
+        : data_expr_id(data_expr_id_),
+          clk_expr_id(clk_expr_id_),
+          node_id(node_id_),
+          q_pin(q_pin_),
+          qn_pin(qn_pin_),
+          is_latch(is_latch_) {}
 };
 
 struct GpuPowerInternalHost {
@@ -44,14 +64,40 @@ struct GpuPowerInternalHost {
     int node_id = -1;
     int to_pin = -1;
     int from_pin = -1;
-    int kind = 0;          // 0=input internal_power, 1=output internal_power
-    int duty_mode = 0;     // 0=const1, 1=expr duty, 2=diff duty, 3=const0.5, 4=const0
     int duty_expr_id = -1;
     int duty_pin = -1;
     int denom_group = -1;
-    int positive_unate = 1;
     float energy_unit = 1.0f;  // Liberty internal_power energy unit in joules.
+    uint8_t kind = 0;          // 0=input internal_power, 1=output internal_power
+    uint8_t duty_mode = 0;     // 0=const1, 1=expr duty, 2=diff duty, 3=const0.5, 4=const0
+    uint8_t positive_unate = 1;
+
+    GpuPowerInternalHost() = default;
+    GpuPowerInternalHost(int internal_power_id_,
+                         int node_id_,
+                         int to_pin_,
+                         int from_pin_,
+                         int duty_expr_id_,
+                         int duty_pin_,
+                         int denom_group_,
+                         float energy_unit_,
+                         uint8_t kind_,
+                         uint8_t duty_mode_,
+                         uint8_t positive_unate_)
+        : internal_power_id(internal_power_id_),
+          node_id(node_id_),
+          to_pin(to_pin_),
+          from_pin(from_pin_),
+          duty_expr_id(duty_expr_id_),
+          duty_pin(duty_pin_),
+          denom_group(denom_group_),
+          energy_unit(energy_unit_),
+          kind(kind_),
+          duty_mode(duty_mode_),
+          positive_unate(positive_unate_) {}
 };
+
+static_assert(sizeof(GpuPowerInternalHost) == 36, "GpuPowerInternalHost should stay compact");
 
 struct GpuPowerLeakageRowHost {
     int node_id = -1;
@@ -59,11 +105,27 @@ struct GpuPowerLeakageRowHost {
     int leakage_power_id = -1;
     int when_expr_id = -1;
     float leakage = 0.0f;  // Watts
+
+    GpuPowerLeakageRowHost() = default;
+    GpuPowerLeakageRowHost(int node_id_,
+                           int group_id_,
+                           int leakage_power_id_,
+                           int when_expr_id_,
+                           float leakage_)
+        : node_id(node_id_),
+          group_id(group_id_),
+          leakage_power_id(leakage_power_id_),
+          when_expr_id(when_expr_id_),
+          leakage(leakage_) {}
 };
 
 struct GpuPowerLeakageGroupHost {
     int node_id = -1;
     float cell_leakage = 0.0f;  // Watts
+
+    GpuPowerLeakageGroupHost() = default;
+    GpuPowerLeakageGroupHost(int node_id_, float cell_leakage_)
+        : node_id(node_id_), cell_leakage(cell_leakage_) {}
 };
 
 struct HostRcGraph {
@@ -101,8 +163,9 @@ public:
     void initialize();
     void levelize();
     void levelize_power(const uint8_t* d_is_seq_output_pin,
-                        const int* d_power_arc_types,
-                        const int* d_power_arc_id2test_id,
+                        const uint8_t* d_power_arc_types,
+                        const uint32_t* d_power_seq_output_arc_keep,
+                        const uint8_t* d_power_arc_skip,
                         const uint8_t* d_is_load_pin,
                         const int* d_pin2net_map,
                         const int* d_net_driver_pin,
@@ -238,7 +301,8 @@ public:
     index_type *pin_forward_arc_list_end, *pin_forward_arc_list;
     index_type *pin_backward_arc_list_end, *pin_backward_arc_list;
     index_type *timing_arc_from_pin_id, *timing_arc_to_pin_id;
-    int *arc_types, *timing_arc_id_map, *arc_id2test_id;
+    uint8_t *arc_types;
+    int *timing_arc_id_map, *arc_id2test_id;
     int* test_id2_arc_id;
     int* test_id2_endpoint_id;
     int* primary_output2_endpoint_id;
@@ -252,9 +316,9 @@ public:
     vector<int> power_level_list_end_cpu;
     vector<int> power_pin_level_cpu;
     vector<int> power_level_root_pins_cpu;
-    int* net_is_clock;
-    int* pin_is_clk;  // GPU array: 1 if register clock pin, 0 otherwise
-    int* pin_is_ideal_clk;  // GPU array: 1 if register clock pin remains ideal
+    uint8_t* net_is_clock;
+    uint8_t* pin_is_clk;  // GPU array: 1 if register clock pin, 0 otherwise
+    uint8_t* pin_is_ideal_clk;  // GPU array: 1 if register clock pin remains ideal
 
     float clock_period;
 

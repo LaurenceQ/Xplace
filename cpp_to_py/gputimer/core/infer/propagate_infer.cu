@@ -103,9 +103,9 @@ __device__ void propagateInferTest(const InferTimingModel* model,
 
         int fel = el ^ 1;
         int timing_id = timing_arc_id_map[arc_id * 2 + el];
-        int frf = d_allocator->d_is_rising_edge_triggered[timing_id] ? 0 : 1;
+        int frf = d_allocator->timing_is_rising_edge_triggered(timing_id) ? 0 : 1;
 
-        if (frf && !d_allocator->d_is_falling_edge_triggered[timing_id]) return;
+        if (frf && !d_allocator->timing_is_falling_edge_triggered(timing_id)) return;
 
         const int fel_rf = (fel << 1) + frf;
         const bool ideal_clock_pin = model->pin_is_ideal_clk != nullptr && model->pin_is_ideal_clk[from_pin_id];
@@ -171,7 +171,7 @@ __device__ void propagateInferRAT(const InferTimingModel* model,
         if (timing_arc_id_map[arc_id * 2 + el] == -1) return;
         int timing_id = timing_arc_id_map[arc_id * 2 + el];
 
-        if (model->d_allocator->d_is_constraint[timing_id]) return;
+        if (model->d_allocator->timing_is_constraint(timing_id)) return;
 
         // Non-constraint cell arc: RAT[from] = RAT[to] - delay
         if (isnan(pinRat[to_pin_id * NUM_ATTR + tel_rf]) || isnan(arcDelay[arc_id * 2 * NUM_ATTR + i])) return;
@@ -185,7 +185,7 @@ __global__ void initIdealClockPins(InferTimingModel* model) {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     float* pinAt = model->pinAT;
     float* pinSlew = model->pinSlew;
-    int* pin_is_ideal_clk = model->pin_is_ideal_clk;
+    const uint8_t* pin_is_ideal_clk = model->pin_is_ideal_clk;
     const int num_pins = model->num_pins;
     const float half_period = model->clock_period / 2.0f;
     if (idx < num_pins && pin_is_ideal_clk[idx]) {
@@ -207,8 +207,8 @@ __global__ void initClockSourceFallAT(InferTimingModel* model, int num_level0_pi
     if (idx < num_level0_pins) {
         index_type pin_id = model->level_list[idx];
         float* pinAt = model->pinAT;
-        int* pin_is_clk = model->pin_is_clk;
-        int* pin_is_ideal_clk = model->pin_is_ideal_clk;
+        const uint8_t* pin_is_clk = model->pin_is_clk;
+        const uint8_t* pin_is_ideal_clk = model->pin_is_ideal_clk;
         if (pin_is_clk[pin_id] && (pin_is_ideal_clk == nullptr || !pin_is_ideal_clk[pin_id])) {
             float fall_edge = model->clock_period / 2.0f;
             if (model->pin_clock_fall_edges != nullptr && isfinite(model->pin_clock_fall_edges[pin_id])) {

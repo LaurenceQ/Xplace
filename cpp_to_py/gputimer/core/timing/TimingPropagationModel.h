@@ -2,6 +2,7 @@
 
 #include "gputimer/base.h"
 
+#include <cstdint>
 #include <vector>
 
 namespace gt {
@@ -17,7 +18,7 @@ struct TimingPropagationModel {
     index_type* pin_backward_arc_list_end = nullptr;
     index_type* pin_backward_arc_list = nullptr;
     index_type* timing_arc_from_pin_id = nullptr;
-    int* arc_types = nullptr;
+    const uint8_t* arc_types = nullptr;
     int* arc_id2test_id = nullptr;
     float* pinSlew = nullptr;
     float* pinLoad = nullptr;
@@ -48,7 +49,7 @@ struct InferTimingModel {
     index_type* pin_backward_arc_list_end = nullptr;
     index_type* pin_backward_arc_list = nullptr;
     index_type* timing_arc_from_pin_id = nullptr;
-    int* arc_types = nullptr;
+    const uint8_t* arc_types = nullptr;
     int* arc_id2test_id = nullptr;
     float* pinSlew = nullptr;
     float* pinAT = nullptr;
@@ -63,8 +64,8 @@ struct InferTimingModel {
     index_type* at_prefix_attr = nullptr;
     float clock_period = 0.0f;
     GPULutAllocator* d_allocator = nullptr;
-    int* pin_is_clk = nullptr;
-    int* pin_is_ideal_clk = nullptr;
+    const uint8_t* pin_is_clk = nullptr;
+    const uint8_t* pin_is_ideal_clk = nullptr;
     const float* pin_clock_fall_edges = nullptr;
     int num_pins = 0;
 };

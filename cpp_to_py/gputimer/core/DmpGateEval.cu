@@ -1023,7 +1023,7 @@ __global__ void dmpGateKernel(DmpModel* dmp_db,
     }
 
     const bool ideal_clock_arc = dmp_db->isIdealClockTimingArc(timing_id, from_pin_id) &&
-                                 !dmp_db->d_allocator->d_is_constraint[timing_id];
+                                 !dmp_db->d_allocator->timing_is_constraint(timing_id);
     const float nominal_input_slew = dmp_db->pinSlew[from_pin_id * NUM_ATTR + from_attr];
     const float input_slew = ideal_clock_arc
                                  ? dmp_db->idealClockSlew(from_pin_id, from_attr)

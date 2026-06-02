@@ -68,7 +68,7 @@ struct DmpModel {
     index_type *at_prefix_pin;
     index_type *at_prefix_arc;
     index_type *at_prefix_attr;
-    int *arc_types;
+    const uint8_t *arc_types;
     int *arc_id2test_id;
     float *pinSlew;
     float *elmore_delay; // elmore delay

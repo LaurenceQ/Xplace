@@ -131,8 +131,8 @@ public:
     std::optional<float> spef_time_unit;
 
 public:
-    vector<string> pin_names;
-    vector<string> net_names;
+    const vector<string>& pin_names;
+    const vector<string>& net_names;
     unordered_map<std::string, Clock> clocks;
     unordered_map<std::string, index_type> pin_name2pin_id;
     std::unordered_set<std::string> pin_name_map_targets;
@@ -184,7 +184,8 @@ public:
 
     vector<int> timing_arc_from_pin_id, timing_arc_to_pin_id;
     vector<int> timing_arc_id_map;
-    vector<int> arc_types, arc_id2test_id;
+    vector<uint8_t> arc_types;
+    vector<int> arc_id2test_id;
     vector<int> test_id2_arc_id;
     vector<float> clock_periods;
     vector<uint8_t> pin_clock_ids;
@@ -196,7 +197,7 @@ public:
     vector<float> pin_clock_rise_edges;
     vector<float> pin_clock_fall_edges;
     vector<float> pin_clock_slews;
-    vector<float> pin_clock_latency_overrides;
+    unordered_map<int, float> pin_clock_latency_overrides;
     unordered_map<std::string, std::array<float, NUM_ATTR>> clock_transitions;
     unordered_map<std::string, float> clock_setup_uncertainty;
     unordered_map<std::string, float> clock_hold_uncertainty;
@@ -205,11 +206,11 @@ public:
     std::unordered_set<int> propagated_clock_pins;
     // Debug-only optional mask for false-path power-activity experiments.
     vector<uint8_t> power_disabled_constraint_arc;
-    vector<array<string, NUM_ATTR>> output_delay_clock_by_pin_attr;
-    vector<int> net_is_clock;
-    vector<int> pin_is_clk;  // 1 if pin is a register clock pin (from_pin of test arc)
-    vector<int> pin_is_ideal_clk;  // 1 if a register clock pin is ideal, 0 if propagated.
-    vector<int> pin_case_values;  // -1 unset, 0/1 from set_case_analysis.
+    unordered_map<int, array<string, NUM_ATTR>> output_delay_clock_by_pin_attr;
+    vector<uint8_t> net_is_clock;
+    vector<uint8_t> pin_is_clk;  // 1 if pin is a register clock pin (from_pin of test arc)
+    vector<uint8_t> pin_is_ideal_clk;  // 1 if a register clock pin is ideal, 0 if propagated.
+    vector<int8_t> pin_case_values;  // -1 unset, 0/1 from set_case_analysis.
 
     // Timing Graph
     /// @param primary_inputs                 primary input pins

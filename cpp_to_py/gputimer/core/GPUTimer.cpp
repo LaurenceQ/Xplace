@@ -46,7 +46,7 @@ GPUTimer::GPUTimer(std::shared_ptr<GTDatabase> gtdb_, shared_ptr<TimingTorchRawD
       pin_fanout_list_end(timing_raw_db.pin_fanout_list_end.data_ptr<index_type>()),
       // Timer timing liberty variables
       timing_arc_id_map(timing_raw_db.timing_arc_id_map.data_ptr<int>()),
-      arc_types(timing_raw_db.arc_types.data_ptr<int>()),
+      arc_types(timing_raw_db.arc_types.data_ptr<uint8_t>()),
       arc_id2test_id(timing_raw_db.arc_id2test_id.data_ptr<int>()),
       test_id2_arc_id(timing_raw_db.test_id2_arc_id.data_ptr<int>()),
       test_id2_endpoint_id(timing_raw_db.test_id2_endpoint_id.data_ptr<int>()),

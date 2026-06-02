@@ -22,7 +22,7 @@ struct RcStarModel {
     int num_nets = 0;
     int num_pins = 0;
     float unit_to_micron = 1.0f;
-    int* net_is_clock = nullptr;
+    const uint8_t* net_is_clock = nullptr;
     float cf = 0.0f;
     float rf = 0.0f;
 };
@@ -67,7 +67,7 @@ struct RcExplicitTreeModel {
     float* pinWireCap = nullptr;
     float* pinRootDelay = nullptr;
     float* pinRootRes = nullptr;
-    int* net_is_clock = nullptr;
+    const uint8_t* net_is_clock = nullptr;
     int num_nets = 0;
     int num_pins = 0;
     int num_nodes = 0;
@@ -142,7 +142,7 @@ struct RcExplicitDeviceModel {
     float* pinWireCap = nullptr;
     float* pinRootDelay = nullptr;
     float* pinRootRes = nullptr;
-    int* net_is_clock = nullptr;
+    const uint8_t* net_is_clock = nullptr;
     float unit_to_micron = 1.0f;
     float rf = 0.0f;
     float cf = 0.0f;
