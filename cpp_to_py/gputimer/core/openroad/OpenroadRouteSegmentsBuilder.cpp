@@ -163,13 +163,19 @@ HostRcGraph GPUTimer::build_openroad_route_segments_rc(const std::string& file) 
         std::fflush(stderr);
         cache_last = now;
     };
-    const RouteSegmentCacheMeta cache_meta = route_segment_cache_meta(file);
-    cache_profile_log("cache_meta");
-    const std::string cache_path = cache_enabled ? route_segment_cache_path(file) : std::string();
-    cache_profile_log("cache_path");
-    const std::uint64_t cache_design_signature =
-        route_segment_design_signature(gtdb, num_nets, num_pins);
-    cache_profile_log("design_signature");
+    RouteSegmentCacheMeta cache_meta;
+    std::string cache_path;
+    std::uint64_t cache_design_signature = 0;
+    if (cache_enabled) {
+        cache_meta = route_segment_cache_meta(file);
+        cache_profile_log("cache_meta");
+        cache_path = route_segment_cache_path(file);
+        cache_profile_log("cache_path");
+        cache_design_signature = route_segment_design_signature(gtdb, num_nets, num_pins);
+        cache_profile_log("design_signature");
+    } else {
+        cache_profile_log("cache_disabled");
+    }
     if (cache_enabled && cache_meta.source_size > 0) {
         HostRcGraph cached_graph;
         if (load_route_segment_cache(cache_path, cache_meta, num_nets, num_pins,
