@@ -72,13 +72,16 @@ PowerCudaRunBuffers::PowerCudaRunBuffers(torch::Tensor out_gpu_,
                                          torch::Tensor precomputed_activity_cpu_,
                                          torch::Tensor precomputed_activity_gpu_,
                                          float* out_gpu_ptr_,
+                                         float* activity_density_ptr_,
+                                         float* activity_duty_ptr_,
                                          float* inst_switching_ptr_,
                                          float* pin_switching_ptr_,
                                          float* inst_internal_ptr_,
                                          float* internal_row_power_ptr_,
                                          float* inst_leakage_ptr_,
                                          float* leakage_row_power_ptr_,
-                                         const float* precomputed_activity_ptr_)
+                                         const float* precomputed_activity_ptr_,
+                                         int out_activity_fields_)
     : out_gpu(std::move(out_gpu_)),
       inst_switching_gpu(std::move(inst_switching_gpu_)),
       pin_switching_gpu(std::move(pin_switching_gpu_)),
@@ -89,13 +92,16 @@ PowerCudaRunBuffers::PowerCudaRunBuffers(torch::Tensor out_gpu_,
       precomputed_activity_cpu(std::move(precomputed_activity_cpu_)),
       precomputed_activity_gpu(std::move(precomputed_activity_gpu_)),
       out_gpu_ptr(out_gpu_ptr_),
+      activity_density_ptr(activity_density_ptr_),
+      activity_duty_ptr(activity_duty_ptr_),
       inst_switching_ptr(inst_switching_ptr_),
       pin_switching_ptr(pin_switching_ptr_),
       inst_internal_ptr(inst_internal_ptr_),
       internal_row_power_ptr(internal_row_power_ptr_),
       inst_leakage_ptr(inst_leakage_ptr_),
       leakage_row_power_ptr(leakage_row_power_ptr_),
-      precomputed_activity_ptr(precomputed_activity_ptr_) {}
+      precomputed_activity_ptr(precomputed_activity_ptr_),
+      out_activity_fields(out_activity_fields_) {}
 
 PowerDmpLoadPointers::PowerDmpLoadPointers() = default;
 
@@ -204,9 +210,15 @@ PowerCudaRunBuffers preparePowerCudaRunBuffers(GPUTimer& timer,
                                                PowerStageProfiler& profile) {
     torch::Tensor out_gpu;
     float* out_gpu_ptr = nullptr;
+    float* activity_density_ptr = nullptr;
+    float* activity_duty_ptr = nullptr;
+    int out_activity_fields = 0;
     if (need_switching_power || want_activity_cpu || chunk_internal_rows || chunk_leakage_rows) {
-        out_gpu = torch::empty({n, 3}, fopt_cuda);
+        out_activity_fields = want_activity_cpu ? 3 : 2;
+        out_gpu = torch::empty({out_activity_fields, n}, fopt_cuda);
         out_gpu_ptr = out_gpu.data_ptr<float>();
+        activity_density_ptr = out_gpu_ptr;
+        activity_duty_ptr = out_gpu_ptr + n;
     }
 
     constexpr int64_t default_cpu_activity_pin_limit = 0;
@@ -277,13 +289,16 @@ PowerCudaRunBuffers preparePowerCudaRunBuffers(GPUTimer& timer,
                                std::move(precomputed_activity_cpu),
                                std::move(precomputed_activity_gpu),
                                out_gpu_ptr,
+                               activity_density_ptr,
+                               activity_duty_ptr,
                                inst_switching_ptr,
                                pin_switching_ptr,
                                inst_internal_ptr,
                                internal_row_power_ptr,
                                inst_leakage_ptr,
                                leakage_row_power_ptr,
-                               precomputed_activity_ptr);
+                               precomputed_activity_ptr,
+                               out_activity_fields);
 }
 
 PowerDmpLoadPointers choosePowerDmpLoadPointers(const DmpModel* h_dmp_db) {
@@ -328,20 +343,22 @@ void runPowerChunkedComponents(int n,
                                const torch::TensorOptions& fopt_cuda,
                                const torch::TensorOptions& iopt_cuda) {
     const bool needs_chunk_activity = chunk_internal_rows || chunk_leakage_rows;
-    const float* chunk_activity_ptr = buffers.precomputed_activity_ptr
-        ? buffers.precomputed_activity_ptr
-        : buffers.out_gpu_ptr;
-    if (needs_chunk_activity && !chunk_activity_ptr) {
-        throw std::runtime_error("chunked CUDA power requires a precomputed activity tensor");
+    const float* chunk_activity_ptr = buffers.precomputed_activity_ptr;
+    const float* chunk_activity_density = buffers.activity_density_ptr;
+    const float* chunk_activity_duty = buffers.activity_duty_ptr;
+    if (needs_chunk_activity && (!chunk_activity_density || !chunk_activity_duty) && !chunk_activity_ptr) {
+        throw std::runtime_error("chunked CUDA power requires activity density/duty or a precomputed activity tensor");
     }
 
     PowerChunkActivityStorage chunk_activity_storage;
-    if (needs_chunk_activity) {
+    if (needs_chunk_activity && (!chunk_activity_density || !chunk_activity_duty)) {
         init_power_chunk_activity_storage(n, chunk_activity_ptr, &chunk_activity_storage);
         if (!chunk_activity_storage.density || !chunk_activity_storage.duty) {
             free_power_chunk_activity_storage(&chunk_activity_storage);
             throw std::runtime_error("chunked CUDA power failed to prepare activity density/duty");
         }
+        chunk_activity_density = chunk_activity_storage.density;
+        chunk_activity_duty = chunk_activity_storage.duty;
     }
 
     if (chunk_internal_rows && buffers.inst_internal_ptr) {
@@ -358,8 +375,8 @@ void runPowerChunkedComponents(int n,
             PowerInternalDenomModel denom_model(
                 n,
                 chunk_activity_ptr,
-                chunk_activity_storage.density,
-                chunk_activity_storage.duty,
+                chunk_activity_density,
+                chunk_activity_duty,
                 reinterpret_cast<GpuPowerInternalHost*>(d_rows_chunk.data_ptr<uint8_t>()),
                 static_cast<int>(count),
                 reinterpret_cast<GpuPowerExprOpHost*>(d_expr_ops.data_ptr<uint8_t>()),
@@ -384,8 +401,8 @@ void runPowerChunkedComponents(int n,
                 n,
                 num_nodes,
                 chunk_activity_ptr,
-                chunk_activity_storage.density,
-                chunk_activity_storage.duty,
+                chunk_activity_density,
+                chunk_activity_duty,
                 reinterpret_cast<GpuPowerInternalHost*>(d_rows_chunk.data_ptr<uint8_t>()),
                 static_cast<int>(count),
                 reinterpret_cast<GpuPowerExprOpHost*>(d_expr_ops.data_ptr<uint8_t>()),
@@ -431,8 +448,8 @@ void runPowerChunkedComponents(int n,
             PowerLeakageRowsModel rows_model(
                 n,
                 chunk_activity_ptr,
-                chunk_activity_storage.density,
-                chunk_activity_storage.duty,
+                chunk_activity_density,
+                chunk_activity_duty,
                 reinterpret_cast<GpuPowerLeakageRowHost*>(d_rows_chunk.data_ptr<uint8_t>()),
                 static_cast<int>(count),
                 reinterpret_cast<GpuPowerExprOpHost*>(d_expr_ops.data_ptr<uint8_t>()),
@@ -482,7 +499,10 @@ torch::Tensor finishPowerActivityOutputs(torch::Tensor* inst_switching_cpu,
     if (leakage_row_power_cpu)
         *leakage_row_power_cpu = outputPowerTensorForRequest(buffers.leakage_row_power_gpu, output_power_tensors_cuda);
     profile.mark("downloads");
-    if (want_activity_cpu) return buffers.out_gpu.to(torch::kCPU);
+    if (want_activity_cpu) {
+        auto activity_cpu = buffers.out_gpu.to(torch::kCPU);
+        return activity_cpu.transpose(0, 1).contiguous();
+    }
     return torch::empty({0, 3}, torch::dtype(torch::kFloat32).device(torch::kCPU));
 }
 
@@ -854,7 +874,8 @@ torch::Tensor GPUTimer::compute_power_activity_cuda(torch::Tensor* inst_switchin
                                           activity_state,
                                           activity_config,
                                           component_view,
-                                          run_buffers.out_gpu_ptr);
+                                          run_buffers.out_gpu_ptr,
+                                          run_buffers.out_activity_fields);
     profile.mark("launcher_prepare");
     run_power_activity_cuda_launcher(activity_model);
     profile.mark("launcher");

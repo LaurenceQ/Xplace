@@ -7,10 +7,24 @@ namespace gt {
 __global__ void power_pack_output_kernel(const PowerActivityCudaModel* model,
                                          const PowerActivityScratchView* scratch) {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= model->n) return;
-    model->out[idx * 3 + 0] = scratch->density[idx];
-    model->out[idx * 3 + 1] = scratch->duty[idx];
-    model->out[idx * 3 + 2] = static_cast<float>(scratch->origin[idx]);
+    const int n = model->n;
+    if (idx >= n || !model->out) return;
+    model->out[idx] = scratch->density[idx];
+    if (model->out_activity_fields > 1) model->out[n + idx] = scratch->duty[idx];
+    if (model->out_activity_fields > 2) {
+        model->out[2 * n + idx] = scratch->origin ? static_cast<float>(scratch->origin[idx]) : 0.0f;
+    }
+}
+
+__global__ void power_copy_precomputed_activity_output_kernel(int n,
+                                                              const float* activity,
+                                                              float* out,
+                                                              int out_activity_fields) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n || !activity || !out) return;
+    out[idx] = activity[idx * 3 + 0];
+    if (out_activity_fields > 1) out[n + idx] = activity[idx * 3 + 1];
+    if (out_activity_fields > 2) out[2 * n + idx] = activity[idx * 3 + 2];
 }
 
 __global__ void power_unpack_precomputed_activity_kernel(int n,
@@ -55,7 +69,7 @@ __global__ void power_switching_kernel(const PowerActivityCudaModel* model) {
             }
             if (isfinite(v)) load_internal = fmaxf(load_internal, v);
         }
-        const float density = model->out[pin * 3 + 0];
+        const float density = model->out[pin];
         if (load_internal > 0.0f && density > 0.0f && components.voltage > 0.0f) {
             const float load_f = load_internal * components.cap_unit;
             sw = 0.5f * load_f * components.voltage * components.voltage * density;

@@ -281,6 +281,7 @@ struct PowerActivityCudaModel {
     PowerActivityConfig config;
     PowerComponentDeviceView components;
     float* out = nullptr;
+    int out_activity_fields = 0;
 
     PowerActivityCudaModel() = default;
     PowerActivityCudaModel(int n_,
@@ -290,7 +291,8 @@ struct PowerActivityCudaModel {
                            const PowerActivityState& state_,
                            const PowerActivityConfig& config_,
                            const PowerComponentDeviceView& components_,
-                           float* out_)
+                           float* out_,
+                           int out_activity_fields_)
         : n(n_),
           level_list_end_cpu(level_list_end_cpu_),
           graph(graph_),
@@ -298,7 +300,8 @@ struct PowerActivityCudaModel {
           state(state_),
           config(config_),
           components(components_),
-          out(out_) {}
+          out(out_),
+          out_activity_fields(out_activity_fields_) {}
 };
 
 struct PowerActivityScratchView {

@@ -82,8 +82,13 @@ void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
     const int num_leakage_groups = model.components.num_leakage_groups;
     float* d_inst_leakage = model.components.inst_leakage;
     float* d_leakage_row_power = model.components.leakage_row_power;
+    const int out_activity_fields = model.out_activity_fields;
+    float* d_out_density = (d_out && out_activity_fields > 0) ? d_out : nullptr;
+    float* d_out_duty = (d_out && out_activity_fields > 1) ? d_out + n : nullptr;
     float* d_density = nullptr;
     float* d_duty = nullptr;
+    bool owns_density = false;
+    bool owns_duty = false;
     float* d_prev_density = nullptr;
     float* d_prev_duty = nullptr;
     float* d_seq_pin_density = nullptr;
@@ -120,8 +125,15 @@ void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
             defer_pending_seq = std::atoi(env_defer_pending) != 0;
     }
     if (needs_density_duty) {
-        power_cuda_call(cudaMalloc(&d_density, sizeof(float) * n), "activity malloc density");
-        power_cuda_call(cudaMalloc(&d_duty, sizeof(float) * n), "activity malloc duty");
+        if (d_out_density && d_out_duty) {
+            d_density = d_out_density;
+            d_duty = d_out_duty;
+        } else {
+            power_cuda_call(cudaMalloc(&d_density, sizeof(float) * n), "activity malloc density");
+            power_cuda_call(cudaMalloc(&d_duty, sizeof(float) * n), "activity malloc duty");
+            owns_density = true;
+            owns_duty = true;
+        }
     }
     if (defer_pending_seq) {
         power_cuda_call(cudaMalloc(&d_prev_density, sizeof(float) * n), "activity malloc prev_density");
@@ -381,16 +393,17 @@ void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
     };
 
     if (d_precomputed_activity) {
-        if (d_out && n > 0 && d_out != d_precomputed_activity) {
-            power_cuda_call(cudaMemcpy(d_out, d_precomputed_activity, sizeof(float) * n * 3,
-                                       cudaMemcpyDeviceToDevice),
-                            "activity copy precomputed output");
+        if (d_out && n > 0 && out_activity_fields > 0) {
+            power_copy_precomputed_activity_output_kernel<<<BLOCK_NUMBER(n), BLOCK_SIZE>>>(
+                n, d_precomputed_activity, d_out, out_activity_fields);
+            check_power_cuda_error("activity copy precomputed output");
         }
+        const bool density_duty_alias_output = d_density == d_out_density && d_duty == d_out_duty;
         if (d_density && d_duty && d_origin) {
             power_unpack_precomputed_activity_kernel<<<BLOCK_NUMBER(n), BLOCK_SIZE>>>(
                 n, d_precomputed_activity, d_density, d_duty, d_origin);
             check_power_cuda_error("activity unpack_precomputed");
-        } else if (d_density && d_duty) {
+        } else if (d_density && d_duty && !density_duty_alias_output) {
             power_unpack_activity_density_duty_kernel<<<BLOCK_NUMBER(n), BLOCK_SIZE>>>(
                 n, d_precomputed_activity, d_density, d_duty);
             check_power_cuda_error("activity unpack_precomputed_density_duty");
@@ -779,6 +792,14 @@ void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
         cudaFree(ptr);
         ptr = nullptr;
     };
+    auto free_owned_density_duty = [&]() {
+        if (owns_density && d_density) cudaFree(d_density);
+        if (owns_duty && d_duty) cudaFree(d_duty);
+        d_density = nullptr;
+        d_duty = nullptr;
+        owns_density = false;
+        owns_duty = false;
+    };
     if (needs_activity_propagation) {
         free_device_ptr(d_prev_density);
         free_device_ptr(d_prev_duty);
@@ -837,8 +858,7 @@ void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
     }
     free_device_ptr(d_origin);
     if (!needs_inline_internal && !needs_inline_leakage_activity) {
-        free_device_ptr(d_density);
-        free_device_ptr(d_duty);
+        free_owned_density_duty();
     }
     if ((d_inst_switching || d_pin_switching) && d_out && d_pin2node_map && d_pinLoad) {
         if (d_inst_switching) cudaMemset(d_inst_switching, 0, sizeof(float) * num_nodes);
@@ -964,8 +984,7 @@ void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
 
     cudaFree(d_activity_model);
     cudaFree(d_activity_scratch);
-    cudaFree(d_density);
-    cudaFree(d_duty);
+    free_owned_density_duty();
     if (d_prev_density) cudaFree(d_prev_density);
     if (d_prev_duty) cudaFree(d_prev_duty);
     cudaFree(d_seq_pin_density);

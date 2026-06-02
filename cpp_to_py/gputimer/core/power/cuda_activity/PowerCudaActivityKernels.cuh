@@ -89,6 +89,11 @@ __global__ void power_activity_level_queue_ordered_kernel(PowerActivityCudaModel
 __global__ void power_pack_output_kernel(const PowerActivityCudaModel* model,
                                          const PowerActivityScratchView* scratch);
 
+__global__ void power_copy_precomputed_activity_output_kernel(int n,
+                                                              const float* activity,
+                                                              float* out,
+                                                              int out_activity_fields);
+
 __global__ void power_unpack_precomputed_activity_kernel(int n,
                                                          const float* activity,
                                                          float* density,

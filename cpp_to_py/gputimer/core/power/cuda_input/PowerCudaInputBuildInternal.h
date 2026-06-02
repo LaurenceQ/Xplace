@@ -63,6 +63,8 @@ struct PowerCudaRunBuffers {
     torch::Tensor precomputed_activity_cpu;
     torch::Tensor precomputed_activity_gpu;
     float* out_gpu_ptr = nullptr;
+    float* activity_density_ptr = nullptr;
+    float* activity_duty_ptr = nullptr;
     float* inst_switching_ptr = nullptr;
     float* pin_switching_ptr = nullptr;
     float* inst_internal_ptr = nullptr;
@@ -70,6 +72,7 @@ struct PowerCudaRunBuffers {
     float* inst_leakage_ptr = nullptr;
     float* leakage_row_power_ptr = nullptr;
     const float* precomputed_activity_ptr = nullptr;
+    int out_activity_fields = 0;
 
     PowerCudaRunBuffers();
     PowerCudaRunBuffers(torch::Tensor out_gpu_,
@@ -82,13 +85,16 @@ struct PowerCudaRunBuffers {
                         torch::Tensor precomputed_activity_cpu_,
                         torch::Tensor precomputed_activity_gpu_,
                         float* out_gpu_ptr_,
+                        float* activity_density_ptr_,
+                        float* activity_duty_ptr_,
                         float* inst_switching_ptr_,
                         float* pin_switching_ptr_,
                         float* inst_internal_ptr_,
                         float* internal_row_power_ptr_,
                         float* inst_leakage_ptr_,
                         float* leakage_row_power_ptr_,
-                        const float* precomputed_activity_ptr_);
+                        const float* precomputed_activity_ptr_,
+                        int out_activity_fields_);
 };
 
 struct PowerDmpLoadPointers {
