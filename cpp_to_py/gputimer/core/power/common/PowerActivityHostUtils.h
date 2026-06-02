@@ -50,6 +50,16 @@ struct PowerCpuActivityLevels {
     std::vector<int> level_list;
     std::vector<int> level_list_end;
     int max_level = 0;
+
+    PowerCpuActivityLevels() = default;
+    PowerCpuActivityLevels(std::vector<int> pin_level_,
+                           std::vector<int> level_list_,
+                           std::vector<int> level_list_end_,
+                           int max_level_)
+        : pin_level(std::move(pin_level_)),
+          level_list(std::move(level_list_)),
+          level_list_end(std::move(level_list_end_)),
+          max_level(max_level_) {}
 };
 
 PowerCpuActivityLevels buildPowerCpuActivityLevels(GTDatabase& gtdb, int n);

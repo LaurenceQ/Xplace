@@ -93,7 +93,7 @@ __global__ void power_unpack_precomputed_activity_kernel(int n,
                                                          const float* activity,
                                                          float* density,
                                                          float* duty,
-                                                         int* origin);
+                                                         uint8_t* origin);
 
 __global__ void power_unpack_activity_density_duty_kernel(int n,
                                                           const float* activity,

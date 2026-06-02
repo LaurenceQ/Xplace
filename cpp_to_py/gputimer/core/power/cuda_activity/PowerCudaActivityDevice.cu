@@ -21,12 +21,12 @@ __device__ int g_power_direct_expr_max_vars = 2;
 __device__ float g_power_direct_expr_density_rel_tol = 1.0e-4f;
 __device__ float g_power_direct_expr_duty_abs_tol = 1.0e-5f;
 
-__device__ float power_percent_change(float value, float prev) {
+__device__ float PowerActivityOps::percentChange(float value, float prev) {
     if (prev == 0.0f) return value == 0.0f ? 0.0f : 1.0f;
     return fabsf(value - prev) / fabsf(prev);
 }
 
-__device__ float power_clamp_activity_duty(float duty) {
+__device__ float PowerActivityOps::clampActivityDuty(float duty) {
     float u = fminf(fmaxf(duty, 0.0f), 1.0f);
     const float eps = fmaxf(g_power_min_activity_duty, 0.0f);
     if (eps > 0.0f) {
@@ -36,17 +36,49 @@ __device__ float power_clamp_activity_duty(float duty) {
     return u;
 }
 
-__device__ bool power_should_mark_pending_seq(float density) {
+__device__ bool PowerActivityOps::shouldMarkPendingSeq(float density) {
     return density >= fmaxf(g_power_seq_pending_min_density, 0.0f);
 }
 
-__device__ float power_max_activity_density_from_slew(int pin,
-                                                      const PowerActivityCudaModel* model) {
+namespace {
+
+__device__ __forceinline__ bool power_clock_slew_pin_marked(const PowerGraphDeviceView& graph,
+                                                            int pin) {
+    const int* pins = graph.power_clock_slew_pins;
+    int lo = 0;
+    int hi = graph.num_power_clock_slew_pins;
+    while (lo < hi) {
+        const int mid = lo + ((hi - lo) >> 1);
+        const int value = pins[mid];
+        if (value < pin) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo < graph.num_power_clock_slew_pins && pins[lo] == pin;
+}
+
+__device__ __forceinline__ float power_clock_slew_value(const PowerGraphDeviceView& graph,
+                                                        int pin,
+                                                        int attr) {
+    if (!graph.power_clock_slew_pins || graph.num_power_clock_slew_pins <= 0 ||
+        pin < 0 || attr < 0 || attr >= NUM_ATTR ||
+        !power_clock_slew_pin_marked(graph, pin))
+        return nanf("");
+    if (graph.pin_clock_slews) {
+        const float slew = graph.pin_clock_slews[pin * NUM_ATTR + attr];
+        if (isfinite(slew)) return slew;
+    }
+    return graph.power_clock_slew_fallback[attr];
+}
+
+}  // namespace
+
+__device__ float PowerActivityOps::maxActivityDensityFromSlew(int pin) const {
     if (g_power_disable_activity_slew_cap) return 3.4028234663852886e38f;
     const float* pinSlew = model->graph.pinSlew;
-    const float* powerClockSlews = model->graph.power_clock_slews;
+    const bool has_power_clock_slews =
+        model->graph.power_clock_slew_pins && model->graph.num_power_clock_slew_pins > 0;
     const float time_unit = model->config.time_unit;
-    if ((!pinSlew && !powerClockSlews) || pin < 0 || !(time_unit > 0.0f))
+    if ((!pinSlew && !has_power_clock_slews) || pin < 0 || !(time_unit > 0.0f))
         return 3.4028234663852886e38f;
     float min_rf_slew = 3.4028234663852886e38f;
     #pragma unroll
@@ -55,9 +87,9 @@ __device__ float power_max_activity_density_from_slew(int pin,
         float fall = pinSlew ? pinSlew[pin * NUM_ATTR + base + 1] : nanf("");
         const bool use_clock_slew_override =
             model->graph.is_seq_clock_input_pin && model->graph.is_seq_clock_input_pin[pin];
-        if (use_clock_slew_override && powerClockSlews) {
-            const float clock_rise = powerClockSlews[pin * NUM_ATTR + base];
-            const float clock_fall = powerClockSlews[pin * NUM_ATTR + base + 1];
+        if (use_clock_slew_override && has_power_clock_slews) {
+            const float clock_rise = power_clock_slew_value(model->graph, pin, base);
+            const float clock_fall = power_clock_slew_value(model->graph, pin, base + 1);
             if (isfinite(clock_rise) && isfinite(clock_fall)) {
                 rise = clock_rise;
                 fall = clock_fall;
@@ -72,44 +104,40 @@ __device__ float power_max_activity_density_from_slew(int pin,
                                                   : 3.4028234663852886e38f;
 }
 
-__device__ bool power_seq_density_exceeds_clock_limit(float in_density, float clk_density) {
+__device__ bool PowerActivityOps::seqDensityExceedsClockLimit(float in_density, float clk_density) {
     const float limit = clk_density * 0.5f;
     return in_density > limit * (1.0f + fmaxf(g_power_seq_clock_limit_rel_tol, 0.0f));
 }
 
-__device__ bool power_set_activity(int pin,
-                                   float new_density,
-                                   float new_duty,
-                                   int new_origin,
-                                   bool force,
-                                   const PowerActivityCudaModel* model,
-                                   PowerActivityScratchView* scratch) {
+__device__ bool PowerActivityOps::setActivity(int pin,
+                                              float new_density,
+                                              float new_duty,
+                                              int new_origin,
+                                              bool force) const {
     float* density = scratch->density;
     float* duty = scratch->duty;
-    int* origin = scratch->origin;
+    uint8_t* origin = scratch->origin;
     if (!force && origin[pin] == 2 && !g_power_allow_clock_activity_override) return false;
     const float prev_density = density[pin];
     const float prev_duty = duty[pin];
-    const int prev_origin = origin[pin];
+    const uint8_t prev_origin = origin[pin];
     const float max_density = force
         ? g_power_activity_clock_density_cap
-        : fminf(power_max_activity_density_from_slew(pin, model),
+        : fminf(maxActivityDensityFromSlew(pin),
                 g_power_activity_clock_density_cap);
     float d = fminf(fmaxf(new_density, 0.0f), max_density);
     if (fabsf(d) < g_power_min_activity_density) d = 0.0f;
-    const float u = power_clamp_activity_duty(new_duty);
-    const bool value_changed = power_percent_change(d, prev_density) > 0.01f
-        || power_percent_change(u, prev_duty) > 0.01f;
+    const float u = clampActivityDuty(new_duty);
+    const bool value_changed = percentChange(d, prev_density) > 0.01f
+        || percentChange(u, prev_duty) > 0.01f;
     const bool changed = value_changed || prev_origin != new_origin;
     density[pin] = d;
     duty[pin] = u;
-    origin[pin] = new_origin;
+    origin[pin] = static_cast<uint8_t>(new_origin);
     return changed;
 }
 
-__device__ void power_enqueue_adjacent(int pin,
-                                       const PowerActivityCudaModel* model,
-                                       PowerActivityScratchView* scratch) {
+__device__ void PowerActivityOps::enqueueAdjacent(int pin) const {
     const auto& graph = model->graph;
     const uint8_t* is_load_pin = graph.is_load_pin;
     const int* pin2net_map = graph.pin2net_map;
@@ -119,13 +147,14 @@ __device__ void power_enqueue_adjacent(int pin,
     const index_type* pin_forward_arc_list_end = graph.pin_forward_arc_list_end;
     const index_type* pin_forward_arc_list = graph.pin_forward_arc_list;
     const index_type* timing_arc_to_pin_id = graph.timing_arc_to_pin_id;
-    const int* arc_types = graph.arc_types;
-    const int* arc_id2test_id = graph.arc_id2test_id;
+    const uint8_t* arc_types = graph.arc_types;
+    const uint32_t* seq_output_arc_keep = graph.seq_output_arc_keep;
+    const uint8_t* arc_skip = graph.arc_skip;
     const uint8_t* is_seq_output_pin = graph.is_seq_output_pin;
     const int* pin_power_level = graph.pin_power_level;
     uint8_t* active_level = scratch->active_level;
     const int num_power_levels = scratch->num_power_levels;
-    int* active = scratch->active;
+    uint32_t* active = scratch->active;
     if (is_load_pin && pin2net_map && net_driver_pin && flat_net2pin_start_map && flat_net2pin_map) {
         const int net = pin2net_map[pin];
         if (net >= 0 && net_driver_pin[net] == pin) {
@@ -134,7 +163,7 @@ __device__ void power_enqueue_adjacent(int pin,
             for (int pos = start; pos < end; ++pos) {
                 const int sink = flat_net2pin_map[pos];
                 if (sink < 0 || sink == pin || !is_load_pin[sink]) continue;
-                atomicExch(&active[sink], 1);
+                power_activity_flag_atomic_test_and_set(active, sink);
                 if (pin_power_level && active_level) {
                     const int level = pin_power_level[sink];
                     if (level >= 0 && level < num_power_levels) active_level[level] = 1;
@@ -144,11 +173,13 @@ __device__ void power_enqueue_adjacent(int pin,
     }
     for (index_type i = pin_forward_arc_list_end[pin]; i < pin_forward_arc_list_end[pin + 1]; i++) {
         const int arc = pin_forward_arc_list[i];
-        if (arc_id2test_id && arc_id2test_id[arc] != -1) continue;
+        if (arc_skip && arc_skip[arc]) continue;
         const int to_pin = timing_arc_to_pin_id[arc];
         if (to_pin < 0) continue;
-        if (arc_types && arc_types[arc] == 1 && is_seq_output_pin && is_seq_output_pin[to_pin]) continue;
-        atomicExch(&active[to_pin], 1);
+        if (arc_types && arc_types[arc] == 1 && is_seq_output_pin && is_seq_output_pin[to_pin] &&
+            !power_activity_flag_test(seq_output_arc_keep, arc))
+            continue;
+        power_activity_flag_atomic_test_and_set(active, to_pin);
         if (pin_power_level && active_level) {
             const int level = pin_power_level[to_pin];
             if (level >= 0 && level < num_power_levels) active_level[level] = 1;
@@ -156,29 +187,25 @@ __device__ void power_enqueue_adjacent(int pin,
     }
 }
 
-__device__ void power_activate_pin(int pin,
-                                   const PowerActivityCudaModel* model,
-                                   PowerActivityScratchView* scratch) {
+__device__ void PowerActivityOps::activatePin(int pin) const {
     const int* pin_power_level = model->graph.pin_power_level;
     uint8_t* active_level = scratch->active_level;
     const int num_power_levels = scratch->num_power_levels;
-    int* active = scratch->active;
+    uint32_t* active = scratch->active;
     if (pin < 0 || !active) return;
-    atomicExch(&active[pin], 1);
+    power_activity_flag_atomic_test_and_set(active, pin);
     if (pin_power_level && active_level) {
         const int level = pin_power_level[pin];
         if (level >= 0 && level < num_power_levels) active_level[level] = 1;
     }
 }
 
-__device__ bool power_set_clock_gate_output(int pin,
-                                            const PowerActivityCudaModel* model,
-                                            PowerActivityScratchView* scratch) {
+__device__ bool PowerActivityOps::setClockGateOutput(int pin) const {
     const int* clock_gate_clock_for_out = model->graph.clock_gate_clock_for_out;
     const int* clock_gate_enable_for_out = model->graph.clock_gate_enable_for_out;
     float* density = scratch->density;
     float* duty = scratch->duty;
-    int* origin = scratch->origin;
+    uint8_t* origin = scratch->origin;
     if (!clock_gate_clock_for_out || !clock_gate_enable_for_out) return false;
     const int clk = clock_gate_clock_for_out[pin];
     const int en = clock_gate_enable_for_out[pin];
@@ -186,37 +213,32 @@ __device__ bool power_set_clock_gate_output(int pin,
     if (origin && origin[clk] == 0 && origin[en] == 0) return false;
     const float out_density = density[clk] * duty[en] + density[en] * duty[clk];
     const float out_duty = duty[clk] * duty[en];
-    return power_set_activity(pin, out_density, out_duty, 3, false, model, scratch);
+    return setActivity(pin, out_density, out_duty, 3, false);
 }
 
-__device__ void power_enqueue_clock_gate_output(int pin,
-                                                const PowerActivityCudaModel* model,
-                                                PowerActivityScratchView* scratch) {
+__device__ void PowerActivityOps::enqueueClockGateOutput(int pin) const {
     const int* clock_gate_out_for_input = model->graph.clock_gate_out_for_input;
     const int* pin_power_level = model->graph.pin_power_level;
     uint8_t* active_level = scratch->active_level;
     const int num_power_levels = scratch->num_power_levels;
-    int* active = scratch->active;
+    uint32_t* active = scratch->active;
     if (!clock_gate_out_for_input) return;
     const int out_pin = clock_gate_out_for_input[pin];
     if (out_pin < 0) return;
-    atomicExch(&active[out_pin], 1);
+    power_activity_flag_atomic_test_and_set(active, out_pin);
     if (pin_power_level && active_level) {
         const int level = pin_power_level[out_pin];
         if (level >= 0 && level < num_power_levels) active_level[level] = 1;
     }
 }
 
-__device__ bool power_eval_expr_bool(int expr_id,
-                                     uint64_t bits,
-                                     int force_var,
-                                     int force_val,
-                                     const int* var_pins,
-                                     int var_count,
-                                     const GpuPowerExprOpHost* ops,
-                                     const int* expr_start,
-                                     const int* expr_count,
-                                     int8_t& value) {
+__device__ bool PowerExprView::evalBool(int expr_id,
+                                        uint64_t bits,
+                                        int force_var,
+                                        int force_val,
+                                        const int* var_pins,
+                                        int var_count,
+                                        int8_t& value) const {
     if (expr_id < 0) return false;
     const int start = expr_start[expr_id];
     const int count = expr_count[expr_id];
@@ -303,6 +325,10 @@ struct PowerBddNodeCuda {
     int var = -1;
     int low = 0;
     int high = 0;
+
+    PowerBddNodeCuda() = default;
+    __device__ __forceinline__ PowerBddNodeCuda(int var_, int low_, int high_)
+        : var(var_), low(low_), high(high_) {}
 };
 
 struct PowerBddApplyCacheCuda {
@@ -310,6 +336,10 @@ struct PowerBddApplyCacheCuda {
     int left = 0;
     int right = 0;
     int result = 0;
+
+    PowerBddApplyCacheCuda() = default;
+    __device__ __forceinline__ PowerBddApplyCacheCuda(int op_, int left_, int right_, int result_)
+        : op(op_), left(left_), right(right_), result(result_) {}
 };
 
 struct PowerBddContextCuda {
@@ -324,189 +354,210 @@ struct PowerBddContextCuda {
     float var_densities[POWER_BDD_MAX_VARS];
     int var_count = 0;
     bool ok = true;
+
+    __device__ static int edgeId(int edge);
+    __device__ static bool edgeInv(int edge);
+    __device__ static int notEdge(int edge);
+    __device__ int makeNode(int var, int low, int high);
+    __device__ int topVar(int edge) const;
+    __device__ int cofTop(int edge, int var, bool high_child) const;
+    __device__ int apply(int op, int left, int right);
+    __device__ int restrict(int edge, int target_var, bool high_child);
+    __device__ float evalDuty(int edge) const;
+    __device__ int ensureVar(int var_key,
+                             int pin,
+                             const float* pin_density,
+                             const float* pin_duty,
+                             bool zero_density);
+    __device__ int findVar(int var_key) const;
 };
 
-__device__ int power_bdd_edge_id(int edge) { return edge >> 1; }
-__device__ bool power_bdd_edge_inv(int edge) { return (edge & 1) != 0; }
-__device__ int power_bdd_not(int edge) { return edge ^ 1; }
+__device__ int PowerBddContextCuda::edgeId(int edge) { return edge >> 1; }
+__device__ bool PowerBddContextCuda::edgeInv(int edge) { return (edge & 1) != 0; }
+__device__ int PowerBddContextCuda::notEdge(int edge) { return edge ^ 1; }
 
-__device__ int power_bdd_make_node(PowerBddContextCuda& ctx, int var, int low, int high) {
+__device__ int PowerBddContextCuda::makeNode(int var, int low, int high) {
     if (low == high) return low;
     bool result_inv = false;
     // Mirror CUDD's complemented-edge normalization: the then/high edge is
     // stored regular and a complement is moved onto the returned edge.
-    if (power_bdd_edge_inv(high)) {
-        low = power_bdd_not(low);
-        high = power_bdd_not(high);
+    if (edgeInv(high)) {
+        low = notEdge(low);
+        high = notEdge(high);
         result_inv = true;
     }
-    for (int i = 0; i < ctx.node_count; i++) {
-        const auto& node = ctx.nodes[i];
+    for (int i = 0; i < node_count; i++) {
+        const auto& node = nodes[i];
         if (node.var == var && node.low == low && node.high == high) {
             const int edge = (i + 1) << 1;
-            return result_inv ? power_bdd_not(edge) : edge;
+            return result_inv ? notEdge(edge) : edge;
         }
     }
-    if (ctx.node_count >= POWER_BDD_MAX_NODES) {
-        ctx.ok = false;
+    if (node_count >= POWER_BDD_MAX_NODES) {
+        ok = false;
         return 1;
     }
-    const int id = ++ctx.node_count;
-    ctx.nodes[id - 1] = PowerBddNodeCuda{var, low, high};
+    const int id = ++node_count;
+    nodes[id - 1] = PowerBddNodeCuda{var, low, high};
     const int edge = id << 1;
-    return result_inv ? power_bdd_not(edge) : edge;
+    return result_inv ? notEdge(edge) : edge;
 }
 
-__device__ int power_bdd_top_var(const PowerBddContextCuda& ctx, int edge) {
-    const int id = power_bdd_edge_id(edge);
-    return id == 0 ? 0x3fffffff : ctx.nodes[id - 1].var;
+__device__ int PowerBddContextCuda::topVar(int edge) const {
+    const int id = edgeId(edge);
+    return id == 0 ? 0x3fffffff : nodes[id - 1].var;
 }
 
-__device__ int power_bdd_cof_top(const PowerBddContextCuda& ctx, int edge, int var, bool high_child) {
-    const int id = power_bdd_edge_id(edge);
-    if (id == 0 || ctx.nodes[id - 1].var != var) return edge;
-    const int child = high_child ? ctx.nodes[id - 1].high : ctx.nodes[id - 1].low;
-    return power_bdd_edge_inv(edge) ? power_bdd_not(child) : child;
+__device__ int PowerBddContextCuda::cofTop(int edge, int var, bool high_child) const {
+    const int id = edgeId(edge);
+    if (id == 0 || nodes[id - 1].var != var) return edge;
+    const int child = high_child ? nodes[id - 1].high : nodes[id - 1].low;
+    return edgeInv(edge) ? notEdge(child) : child;
 }
 
-__device__ int power_bdd_apply(PowerBddContextCuda& ctx, int op, int left, int right) {
+__device__ int PowerBddContextCuda::apply(int op, int left, int right) {
     if (op >= 0 && op <= 2 && right < left) {
         const int tmp = left;
         left = right;
         right = tmp;
     }
-    for (int i = 0; i < ctx.apply_count; i++) {
-        const auto& cache = ctx.apply_cache[i];
+    for (int i = 0; i < apply_count; i++) {
+        const auto& cache = apply_cache[i];
         if (cache.op == op && cache.left == left && cache.right == right) return cache.result;
     }
 
     int result = 1;
-    const int left_id = power_bdd_edge_id(left);
-    const int right_id = power_bdd_edge_id(right);
+    const int left_id = edgeId(left);
+    const int right_id = edgeId(right);
     if (left_id == 0 && right_id == 0) {
-        const bool left_value = !power_bdd_edge_inv(left);
-        const bool right_value = !power_bdd_edge_inv(right);
+        const bool left_value = !edgeInv(left);
+        const bool right_value = !edgeInv(right);
         bool value = false;
         if (op == 0) value = left_value && right_value;
         else if (op == 1) value = left_value || right_value;
         else value = left_value != right_value;
         result = value ? 0 : 1;
     } else {
-        const int left_top = power_bdd_top_var(ctx, left);
-        const int right_top = power_bdd_top_var(ctx, right);
+        const int left_top = topVar(left);
+        const int right_top = topVar(right);
         const int var = left_top < right_top ? left_top : right_top;
-        const int low = power_bdd_apply(ctx, op,
-                                        power_bdd_cof_top(ctx, left, var, false),
-                                        power_bdd_cof_top(ctx, right, var, false));
-        const int high = power_bdd_apply(ctx, op,
-                                         power_bdd_cof_top(ctx, left, var, true),
-                                         power_bdd_cof_top(ctx, right, var, true));
-        result = power_bdd_make_node(ctx, var, low, high);
+        const int low = apply(op, cofTop(left, var, false), cofTop(right, var, false));
+        const int high = apply(op, cofTop(left, var, true), cofTop(right, var, true));
+        result = makeNode(var, low, high);
     }
 
-    if (ctx.apply_count < POWER_BDD_MAX_APPLY_CACHE) {
-        ctx.apply_cache[ctx.apply_count++] = PowerBddApplyCacheCuda{op, left, right, result};
+    if (apply_count < POWER_BDD_MAX_APPLY_CACHE) {
+        apply_cache[apply_count++] = PowerBddApplyCacheCuda{op, left, right, result};
     }
     return result;
 }
 
-__device__ int power_bdd_restrict(PowerBddContextCuda& ctx, int edge, int target_var, bool high_child) {
-    const int id = power_bdd_edge_id(edge);
+__device__ int PowerBddContextCuda::restrict(int edge, int target_var, bool high_child) {
+    const int id = edgeId(edge);
     if (id == 0) return edge;
-    const auto node = ctx.nodes[id - 1];
+    const auto node = nodes[id - 1];
     if (node.var > target_var) return edge;
     int result = edge;
     if (node.var == target_var) {
         result = high_child ? node.high : node.low;
     } else {
-        const int low = power_bdd_restrict(ctx, node.low, target_var, high_child);
-        const int high = power_bdd_restrict(ctx, node.high, target_var, high_child);
-        result = power_bdd_make_node(ctx, node.var, low, high);
+        const int low = restrict(node.low, target_var, high_child);
+        const int high = restrict(node.high, target_var, high_child);
+        result = makeNode(node.var, low, high);
     }
-    return power_bdd_edge_inv(edge) ? power_bdd_not(result) : result;
+    return edgeInv(edge) ? notEdge(result) : result;
 }
 
-__device__ float power_bdd_eval_duty(const PowerBddContextCuda& ctx, int edge) {
-    const int id = power_bdd_edge_id(edge);
-    if (id == 0) return power_bdd_edge_inv(edge) ? 0.0f : 1.0f;
-    const auto node = ctx.nodes[id - 1];
-    if (node.var >= 0 && node.var < ctx.var_count && !ctx.var_has_pin[node.var])
+__device__ float PowerBddContextCuda::evalDuty(int edge) const {
+    const int id = edgeId(edge);
+    if (id == 0) return edgeInv(edge) ? 0.0f : 1.0f;
+    const auto node = nodes[id - 1];
+    if (node.var >= 0 && node.var < var_count && !var_has_pin[node.var])
         return 0.0f;
-    const float duty0 = power_bdd_eval_duty(ctx, node.low);
-    const float duty1 = power_bdd_eval_duty(ctx, node.high);
-    const float var_duty = ctx.var_duties[node.var];
+    const float duty0 = evalDuty(node.low);
+    const float duty1 = evalDuty(node.high);
+    const float var_duty = var_duties[node.var];
     const double result_d =
         static_cast<double>(duty0) * (1.0 - static_cast<double>(var_duty)) +
         static_cast<double>(duty1) * static_cast<double>(var_duty);
     float result = static_cast<float>(result_d);
-    if (power_bdd_edge_inv(edge)) result = 1.0f - result;
+    if (edgeInv(edge)) result = 1.0f - result;
     return fminf(fmaxf(result, 0.0f), 1.0f);
 }
 
-__device__ int power_bdd_ensure_var(PowerBddContextCuda& ctx,
-                                    int var_key,
-                                    int pin,
-                                    const float* pin_density,
-                                    const float* pin_duty,
-                                    bool zero_density) {
-    for (int i = 0; i < ctx.var_count; i++) {
-        if (ctx.var_keys[i] == var_key && zero_density)
-            ctx.var_densities[i] = 0.0f;
-        if (ctx.var_keys[i] == var_key) return i;
+__device__ int PowerBddContextCuda::ensureVar(int var_key,
+                                              int pin,
+                                              const float* pin_density,
+                                              const float* pin_duty,
+                                              bool zero_density) {
+    int insert_pos = var_count;
+    for (int i = 0; i < var_count; i++) {
+        if (var_keys[i] == var_key && zero_density)
+            var_densities[i] = 0.0f;
+        if (var_keys[i] == var_key) return i;
+        if (insert_pos == var_count && var_keys[i] > var_key) insert_pos = i;
     }
-    if (ctx.var_count >= POWER_BDD_MAX_VARS) {
-        ctx.ok = false;
+    if (var_count >= POWER_BDD_MAX_VARS) {
+        ok = false;
         return -1;
     }
-    const int var = ctx.var_count++;
-    ctx.var_keys[var] = var_key;
-    ctx.var_pins[var] = pin;
-    ctx.var_has_pin[var] = pin >= 0 ? 1 : 0;
-    ctx.var_duties[var] = pin >= 0 ? power_clamp_activity_duty(pin_duty[pin]) : 0.0f;
-    ctx.var_densities[var] = (pin >= 0 && !zero_density && pin_density) ? pin_density[pin] : 0.0f;
-    return var;
+    for (int i = var_count; i > insert_pos; --i) {
+        var_keys[i] = var_keys[i - 1];
+        var_pins[i] = var_pins[i - 1];
+        var_has_pin[i] = var_has_pin[i - 1];
+        var_duties[i] = var_duties[i - 1];
+        var_densities[i] = var_densities[i - 1];
+    }
+    var_count++;
+    var_keys[insert_pos] = var_key;
+    var_pins[insert_pos] = pin;
+    var_has_pin[insert_pos] = pin >= 0 ? 1 : 0;
+    var_duties[insert_pos] = pin >= 0 ? PowerActivityOps::clampActivityDuty(pin_duty[pin]) : 0.0f;
+    var_densities[insert_pos] = (pin >= 0 && !zero_density && pin_density) ? pin_density[pin] : 0.0f;
+    return insert_pos;
 }
 
-__device__ int power_expr_resolve_pin_arg(int arg,
-                                          const int* node_port_pin_start,
-                                          const int* node_port_pin_list,
-                                          int node_id) {
-    if (arg >= 0) return arg;
-    if (arg == -1 || !node_port_pin_start || !node_port_pin_list || node_id < 0) return -1;
-    const int port_id = -2 - arg;
-    const int start = node_port_pin_start[node_id];
-    const int end = node_port_pin_start[node_id + 1];
-    if (port_id < 0 || start + port_id < start || start + port_id >= end) return -1;
-    return node_port_pin_list[start + port_id];
+__device__ int PowerBddContextCuda::findVar(int var_key) const {
+    for (int i = 0; i < var_count; i++) {
+        if (var_keys[i] == var_key) return i;
+    }
+    return -1;
 }
 
-__device__ bool power_bdd_build_expr(int expr_id,
-                                     const GpuPowerExprOpHost* ops,
-                                     const int* expr_start,
-                                     const int* expr_count,
-                                     const float* pin_density,
-                                     const float* pin_duty,
-                                     PowerBddContextCuda& ctx,
-                                     int& root,
-                                     const int* node_port_pin_start,
-                                     const int* node_port_pin_list,
-                                     int node_id) {
+struct PowerBddExprEval {
+    const PowerExprView* view = nullptr;
+    PowerBddContextCuda ctx;
+    int root = 1;
+
+    __device__ explicit PowerBddExprEval(const PowerExprView& view_) : view(&view_) {}
+    __device__ bool buildExpr(int expr_id);
+    __device__ __noinline__ bool activity(int expr_id,
+                                          float& out_density,
+                                          float& out_duty,
+                                          int& out_var_count);
+    __device__ __noinline__ float diffDuty(int expr_id, int diff_pin);
+    static __device__ __noinline__ bool activityFallback(const PowerExprView& view,
+                                                         int expr_id,
+                                                         float& out_density,
+                                                         float& out_duty,
+                                                         int& out_var_count);
+    static __device__ __noinline__ float diffDutyFallback(const PowerExprView& view,
+                                                          int expr_id,
+                                                          int diff_pin);
+};
+
+__device__ bool PowerBddExprEval::buildExpr(int expr_id) {
     if (expr_id < 0) return false;
-    const int start = expr_start[expr_id];
-    const int count = expr_count[expr_id];
+    const int start = view->expr_start[expr_id];
+    const int count = view->expr_count[expr_id];
     if (count <= 0 || count > 128) return false;
-    int pre_keys[POWER_BDD_MAX_VARS];
-    int pre_pins[POWER_BDD_MAX_VARS];
-    uint8_t pre_zero_density[POWER_BDD_MAX_VARS];
-    int pre_count = 0;
     for (int k = 0; k < count; k++) {
-        const auto op = ops[start + k];
+        const auto op = view->ops[start + k];
         int pin = -1;
         int var_key = -1;
         bool zero_density = op.zero_density != 0;
         if (op.op == 0) {
-            pin = power_expr_resolve_pin_arg(op.arg, node_port_pin_start,
-                                             node_port_pin_list, node_id);
+            pin = view->resolvePinArg(op.arg);
             if (pin < 0 && op.arg > -2) return false;
             if (pin < 0) continue;
             var_key = op.var_key >= 0 ? op.var_key : pin;
@@ -517,51 +568,17 @@ __device__ bool power_bdd_build_expr(int expr_id,
             continue;
         }
         if (var_key < 0) return false;
-        int pos = -1;
-        for (int i = 0; i < pre_count; i++) {
-            if (pre_keys[i] == var_key) {
-                pos = i;
-                break;
-            }
-        }
-        if (pos < 0) {
-            if (pre_count >= POWER_BDD_MAX_VARS) return false;
-            pos = pre_count++;
-            pre_keys[pos] = var_key;
-            pre_pins[pos] = pin;
-            pre_zero_density[pos] = zero_density ? 1 : 0;
-        } else if (zero_density) {
-            pre_zero_density[pos] = 1;
-        }
-    }
-    for (int i = 1; i < pre_count; i++) {
-        const int key = pre_keys[i];
-        const int pin = pre_pins[i];
-        const uint8_t zero_density = pre_zero_density[i];
-        int j = i - 1;
-        while (j >= 0 && pre_keys[j] > key) {
-            pre_keys[j + 1] = pre_keys[j];
-            pre_pins[j + 1] = pre_pins[j];
-            pre_zero_density[j + 1] = pre_zero_density[j];
-            j--;
-        }
-        pre_keys[j + 1] = key;
-        pre_pins[j + 1] = pin;
-        pre_zero_density[j + 1] = zero_density;
-    }
-    for (int i = 0; i < pre_count; i++) {
-        if (power_bdd_ensure_var(ctx, pre_keys[i], pre_pins[i], pin_density, pin_duty,
-                                 pre_zero_density[i] != 0) < 0 || !ctx.ok)
+        if (ctx.ensureVar(var_key, pin, view->pin_density, view->pin_duty,
+                          zero_density) < 0 || !ctx.ok)
             return false;
     }
     int stack[128];
     int sp = 0;
     for (int k = 0; k < count; k++) {
-        const auto op = ops[start + k];
+        const auto op = view->ops[start + k];
         switch (op.op) {
             case 0: {
-                const int pin = power_expr_resolve_pin_arg(op.arg, node_port_pin_start,
-                                                           node_port_pin_list, node_id);
+                const int pin = view->resolvePinArg(op.arg);
                 if (sp >= 128) return false;
                 if (pin < 0 && op.arg > -2) return false;
                 if (pin < 0) {
@@ -569,19 +586,17 @@ __device__ bool power_bdd_build_expr(int expr_id,
                     break;
                 }
                 const int var_key = op.var_key >= 0 ? op.var_key : pin;
-                const int var = power_bdd_ensure_var(ctx, var_key, pin, pin_density, pin_duty,
-                                                     op.zero_density != 0);
-                if (var < 0 || !ctx.ok) return false;
-                stack[sp++] = power_bdd_make_node(ctx, var, 1, 0);
+                const int var = ctx.findVar(var_key);
+                if (var < 0) return false;
+                stack[sp++] = ctx.makeNode(var, 1, 0);
                 break;
             }
             case 7: {
                 if (sp >= 128) return false;
                 const int var_key = op.var_key >= 0 ? op.var_key : -1;
-                const int var = power_bdd_ensure_var(ctx, var_key, -1, pin_density, pin_duty,
-                                                     true);
-                if (var < 0 || !ctx.ok) return false;
-                stack[sp++] = power_bdd_make_node(ctx, var, 1, 0);
+                const int var = ctx.findVar(var_key);
+                if (var < 0) return false;
+                stack[sp++] = ctx.makeNode(var, 1, 0);
                 break;
             }
             case 1:
@@ -594,28 +609,28 @@ __device__ bool power_bdd_build_expr(int expr_id,
                 break;
             case 3: {
                 if (sp < 1) return false;
-                stack[sp - 1] = power_bdd_not(stack[sp - 1]);
+                stack[sp - 1] = PowerBddContextCuda::notEdge(stack[sp - 1]);
                 break;
             }
             case 4: {
                 if (sp < 2) return false;
                 const int right = stack[--sp];
                 const int left = stack[--sp];
-                stack[sp++] = power_bdd_apply(ctx, 0, left, right);
+                stack[sp++] = ctx.apply(0, left, right);
                 break;
             }
             case 5: {
                 if (sp < 2) return false;
                 const int right = stack[--sp];
                 const int left = stack[--sp];
-                stack[sp++] = power_bdd_apply(ctx, 1, left, right);
+                stack[sp++] = ctx.apply(1, left, right);
                 break;
             }
             case 6: {
                 if (sp < 2) return false;
                 const int right = stack[--sp];
                 const int left = stack[--sp];
-                stack[sp++] = power_bdd_apply(ctx, 2, left, right);
+                stack[sp++] = ctx.apply(2, left, right);
                 break;
             }
             default:
@@ -634,32 +649,57 @@ struct PowerDirectProbValue {
     float duty = 0.0f;
     float diff = 0.0f;
     uint8_t has_diff = 0;
+
+    PowerDirectProbValue() = default;
+    __device__ __forceinline__ PowerDirectProbValue(float duty_,
+                                                    float diff_,
+                                                    uint8_t has_diff_)
+        : duty(duty_), diff(diff_), has_diff(has_diff_) {}
 };
 
 struct PowerDirectActivityValue {
     float density = 0.0f;
     float duty = 0.0f;
+
+    PowerDirectActivityValue() = default;
+    __device__ __forceinline__ PowerDirectActivityValue(float density_, float duty_)
+        : density(density_), duty(duty_) {}
 };
 
-__device__ int power_direct_expr_unique_var_count(int expr_id,
-                                                  const GpuPowerExprOpHost* ops,
-                                                  const int* expr_start,
-                                                  const int* expr_count,
-                                                  const int* node_port_pin_start,
-                                                  const int* node_port_pin_list,
-                                                  int node_id) {
+struct PowerDirectExprEval {
+    const PowerExprView* view = nullptr;
+
+    __device__ explicit PowerDirectExprEval(const PowerExprView& view_) : view(&view_) {}
+    __device__ int uniqueVarCount(int expr_id) const;
+    __device__ bool isSafe(int expr_id) const;
+    __device__ bool dutyPoly(int expr_id, float& out_duty) const;
+    __device__ bool duty(int expr_id, float& out_duty) const;
+    __device__ bool activityPoly(int expr_id,
+                                 float& out_density,
+                                 float& out_duty) const;
+    __device__ bool activity(int expr_id,
+                             float& out_density,
+                             float& out_duty) const;
+    __device__ bool diffDutyPoly(int expr_id,
+                                 int diff_pin,
+                                 float& out_duty) const;
+    __device__ bool diffDuty(int expr_id,
+                             int diff_pin,
+                             float& out_duty) const;
+};
+
+__device__ int PowerDirectExprEval::uniqueVarCount(int expr_id) const {
     if (expr_id < 0) return -1;
-    const int start = expr_start[expr_id];
-    const int count = expr_count[expr_id];
+    const int start = view->expr_start[expr_id];
+    const int count = view->expr_count[expr_id];
     if (count <= 0 || count > 128) return -1;
     int keys[POWER_DIRECT_PROB_STACK];
     int key_count = 0;
     for (int k = 0; k < count; k++) {
-        const auto op = ops[start + k];
+        const auto op = view->ops[start + k];
         int key = -1;
         if (op.op == 0) {
-            const int pin = power_expr_resolve_pin_arg(op.arg, node_port_pin_start,
-                                                       node_port_pin_list, node_id);
+            const int pin = view->resolvePinArg(op.arg);
             if (pin < 0 && op.arg > -2) return -1;
             if (pin < 0) continue;
             key = op.var_key >= 0 ? op.var_key : pin;
@@ -678,16 +718,8 @@ __device__ int power_direct_expr_unique_var_count(int expr_id,
     return key_count;
 }
 
-__device__ bool power_direct_expr_is_safe(int expr_id,
-                                          const GpuPowerExprOpHost* ops,
-                                          const int* expr_start,
-                                          const int* expr_count,
-                                          const int* node_port_pin_start,
-                                          const int* node_port_pin_list,
-                                          int node_id) {
-    const int var_count = power_direct_expr_unique_var_count(expr_id, ops, expr_start,
-                                                            expr_count, node_port_pin_start,
-                                                            node_port_pin_list, node_id);
+__device__ bool PowerDirectExprEval::isSafe(int expr_id) const {
+    const int var_count = uniqueVarCount(expr_id);
     const int requested_max_vars = g_power_direct_expr_max_vars < 0 ? 0 : g_power_direct_expr_max_vars;
     const int max_vars = requested_max_vars > POWER_DIRECT_PROB_STACK
         ? POWER_DIRECT_PROB_STACK
@@ -695,472 +727,26 @@ __device__ bool power_direct_expr_is_safe(int expr_id,
     return var_count >= 0 && var_count <= max_vars;
 }
 
-struct PowerDirectVarValue {
-    int key = -1;
-    int pin = -1;
-    float duty = 0.0f;
-    float density = 0.0f;
-};
-
-__device__ bool power_direct_expr_collect_vars(int expr_id,
-                                               const GpuPowerExprOpHost* ops,
-                                               const int* expr_start,
-                                               const int* expr_count,
-                                               const float* pin_density,
-                                               const float* pin_duty,
-                                               const int* node_port_pin_start,
-                                               const int* node_port_pin_list,
-                                               int node_id,
-                                               PowerDirectVarValue* vars,
-                                               int& var_count) {
-    if (expr_id < 0 || !pin_duty) return false;
-    const int start = expr_start[expr_id];
-    const int count = expr_count[expr_id];
-    if (count <= 0 || count > 128) return false;
-    var_count = 0;
-    const int max_vars = g_power_direct_expr_max_vars < 0 ? 0 : g_power_direct_expr_max_vars;
-    for (int k = 0; k < count; k++) {
-        const auto op = ops[start + k];
-        if (op.op == 7) return false;
-        if (op.op != 0) continue;
-        const int pin = power_expr_resolve_pin_arg(op.arg, node_port_pin_start,
-                                                   node_port_pin_list, node_id);
-        if (pin < 0 && op.arg > -2) return false;
-        if (pin < 0) continue;
-        const int key = op.var_key >= 0 ? op.var_key : pin;
-        if (key < 0) return false;
-        int pos = -1;
-        for (int i = 0; i < var_count; i++) {
-            if (vars[i].key == key) {
-                pos = i;
-                break;
-            }
-        }
-        if (pos < 0) {
-            if (var_count >= max_vars || var_count >= POWER_DIRECT_PROB_STACK)
-                return false;
-            pos = var_count;
-            while (pos > 0 && vars[pos - 1].key > key) {
-                vars[pos] = vars[pos - 1];
-                pos--;
-            }
-            var_count++;
-            vars[pos].key = key;
-            vars[pos].pin = pin;
-            vars[pos].duty = power_clamp_activity_duty(pin_duty[pin]);
-            vars[pos].density = (pin_density && op.zero_density == 0) ? pin_density[pin] : 0.0f;
-        } else if (op.zero_density != 0) {
-            vars[pos].density = 0.0f;
-        }
-    }
-    return true;
+__device__ bool PowerDirectExprEval::duty(int expr_id, float& out_duty) const {
+    return dutyPoly(expr_id, out_duty);
 }
 
-__device__ int power_direct_expr_find_var_key(const PowerDirectVarValue* vars,
-                                              int var_count,
-                                              int key) {
-    for (int i = 0; i < var_count; i++) {
-        if (vars[i].key == key) return i;
-    }
-    return -1;
-}
-
-__device__ bool power_direct_expr_truth_table(int expr_id,
-                                              const PowerDirectVarValue* vars,
-                                              int var_count,
-                                              const GpuPowerExprOpHost* ops,
-                                              const int* expr_start,
-                                              const int* expr_count,
-                                              const int* node_port_pin_start,
-                                              const int* node_port_pin_list,
-                                              int node_id,
-                                              uint8_t& truth) {
-    if (expr_id < 0 || var_count < 0 || var_count > 2) return false;
-    const int start = expr_start[expr_id];
-    const int count = expr_count[expr_id];
-    if (count <= 0 || count > 128) return false;
-    const int states = 1 << var_count;
-    const uint8_t all_bits = static_cast<uint8_t>((1 << states) - 1);
-    uint8_t stack[POWER_DIRECT_PROB_STACK];
-    int sp = 0;
-    for (int k = 0; k < count; k++) {
-        const auto op = ops[start + k];
-        switch (op.op) {
-            case 0: {
-                const int pin = power_expr_resolve_pin_arg(op.arg, node_port_pin_start,
-                                                           node_port_pin_list, node_id);
-                if (sp >= POWER_DIRECT_PROB_STACK) return false;
-                if (pin < 0 && op.arg > -2) return false;
-                if (pin < 0) {
-                    stack[sp++] = 0;
-                    break;
-                }
-                const int key = op.var_key >= 0 ? op.var_key : pin;
-                const int var = power_direct_expr_find_var_key(vars, var_count, key);
-                if (var < 0) return false;
-                uint8_t bits = 0;
-                for (int mask = 0; mask < states; mask++) {
-                    if ((mask >> var) & 1) bits |= static_cast<uint8_t>(1 << mask);
-                }
-                stack[sp++] = bits;
-                break;
-            }
-            case 1:
-                if (sp >= POWER_DIRECT_PROB_STACK) return false;
-                stack[sp++] = 0;
-                break;
-            case 2:
-                if (sp >= POWER_DIRECT_PROB_STACK) return false;
-                stack[sp++] = all_bits;
-                break;
-            case 3:
-                if (sp < 1) return false;
-                stack[sp - 1] = static_cast<uint8_t>((~stack[sp - 1]) & all_bits);
-                break;
-            case 4: {
-                if (sp < 2) return false;
-                const uint8_t b = stack[--sp];
-                const uint8_t a = stack[--sp];
-                stack[sp++] = static_cast<uint8_t>(a & b);
-                break;
-            }
-            case 5: {
-                if (sp < 2) return false;
-                const uint8_t b = stack[--sp];
-                const uint8_t a = stack[--sp];
-                stack[sp++] = static_cast<uint8_t>(a | b);
-                break;
-            }
-            case 6: {
-                if (sp < 2) return false;
-                const uint8_t b = stack[--sp];
-                const uint8_t a = stack[--sp];
-                stack[sp++] = static_cast<uint8_t>((a ^ b) & all_bits);
-                break;
-            }
-            default:
-                return false;
-        }
-    }
-    if (sp != 1) return false;
-    truth = static_cast<uint8_t>(stack[0] & all_bits);
-    return true;
-}
-
-__device__ bool power_direct_expr_eval_mask(int expr_id,
-                                            uint64_t bits,
-                                            const PowerDirectVarValue* vars,
-                                            int var_count,
-                                            const GpuPowerExprOpHost* ops,
-                                            const int* expr_start,
-                                            const int* expr_count,
-                                            const int* node_port_pin_start,
-                                            const int* node_port_pin_list,
-                                            int node_id,
-                                            int8_t& value) {
-    if (expr_id < 0) return false;
-    const int start = expr_start[expr_id];
-    const int count = expr_count[expr_id];
-    if (count <= 0 || count > 128) return false;
-    int8_t stack[128];
-    int sp = 0;
-    for (int k = 0; k < count; k++) {
-        const auto op = ops[start + k];
-        switch (op.op) {
-            case 0: {
-                const int pin = power_expr_resolve_pin_arg(op.arg, node_port_pin_start,
-                                                           node_port_pin_list, node_id);
-                if (sp >= 128) return false;
-                if (pin < 0 && op.arg > -2) return false;
-                if (pin < 0) {
-                    stack[sp++] = 0;
-                    break;
-                }
-                const int key = op.var_key >= 0 ? op.var_key : pin;
-                const int var = power_direct_expr_find_var_key(vars, var_count, key);
-                if (var < 0) return false;
-                stack[sp++] = static_cast<int8_t>((bits >> var) & 1ULL);
-                break;
-            }
-            case 1:
-                if (sp >= 128) return false;
-                stack[sp++] = 0;
-                break;
-            case 2:
-                if (sp >= 128) return false;
-                stack[sp++] = 1;
-                break;
-            case 3:
-                if (sp < 1) return false;
-                stack[sp - 1] = static_cast<int8_t>(!stack[sp - 1]);
-                break;
-            case 4: {
-                if (sp < 2) return false;
-                const int8_t b = stack[--sp];
-                const int8_t a = stack[--sp];
-                stack[sp++] = static_cast<int8_t>((a != 0) && (b != 0));
-                break;
-            }
-            case 5: {
-                if (sp < 2) return false;
-                const int8_t b = stack[--sp];
-                const int8_t a = stack[--sp];
-                stack[sp++] = static_cast<int8_t>((a != 0) || (b != 0));
-                break;
-            }
-            case 6: {
-                if (sp < 2) return false;
-                const int8_t b = stack[--sp];
-                const int8_t a = stack[--sp];
-                stack[sp++] = static_cast<int8_t>((a != 0) ^ (b != 0));
-                break;
-            }
-            default:
-                return false;
-        }
-    }
-    if (sp != 1) return false;
-    value = stack[0] ? 1 : 0;
-    return true;
-}
-
-__device__ bool power_direct_expr_small_duty(int expr_id,
-                                             const GpuPowerExprOpHost* ops,
-                                             const int* expr_start,
-                                             const int* expr_count,
-                                             const float* pin_duty,
-                                             const int* node_port_pin_start,
-                                             const int* node_port_pin_list,
-                                             int node_id,
-                                             float& out_duty) {
-    PowerDirectVarValue vars[2];
-    int var_count = 0;
-    if (!power_direct_expr_collect_vars(expr_id, ops, expr_start, expr_count,
-                                        nullptr, pin_duty, node_port_pin_start,
-                                        node_port_pin_list, node_id, vars, var_count)) {
+__device__ bool PowerDirectExprEval::dutyPoly(int expr_id, float& out_duty) const {
+    if (!view->pin_duty || !isSafe(expr_id)) {
         return false;
     }
-    uint8_t truth = 0;
-    if (!power_direct_expr_truth_table(expr_id, vars, var_count, ops, expr_start,
-                                       expr_count, node_port_pin_start,
-                                       node_port_pin_list, node_id, truth)) {
-        return false;
-    }
-    const int states = 1 << var_count;
-    double duty = 0.0;
-    for (int mask = 0; mask < states; mask++) {
-        double prob = 1.0;
-        for (int var = 0; var < var_count; var++) {
-            const double p = static_cast<double>(vars[var].duty);
-            prob *= ((mask >> var) & 1) ? p : (1.0 - p);
-        }
-        if ((truth >> mask) & 1) duty += prob;
-    }
-    out_duty = fminf(fmaxf(static_cast<float>(duty), 0.0f), 1.0f);
-    return true;
-}
-
-__device__ bool power_direct_expr_small_diff_duty(int expr_id,
-                                                  int diff_var,
-                                                  const PowerDirectVarValue* vars,
-                                                  int var_count,
-                                                  const GpuPowerExprOpHost* ops,
-                                                  const int* expr_start,
-                                                  const int* expr_count,
-                                                  const int* node_port_pin_start,
-                                                  const int* node_port_pin_list,
-                                                  int node_id,
-                                                  float& out_duty) {
-    if (diff_var < 0 || diff_var >= var_count) return false;
-    uint8_t truth = 0;
-    if (!power_direct_expr_truth_table(expr_id, vars, var_count, ops, expr_start,
-                                       expr_count, node_port_pin_start,
-                                       node_port_pin_list, node_id, truth)) {
-        return false;
-    }
-    const int other_states = 1 << (var_count - 1);
-    double duty = 0.0;
-    for (int mask = 0; mask < other_states; mask++) {
-        int low_mask = 0;
-        int high_mask = 0;
-        int src_bit = 0;
-        double prob = 1.0;
-        for (int var = 0; var < var_count; var++) {
-            if (var == diff_var) {
-                high_mask |= (1 << var);
-                continue;
-            }
-            const int bit = (mask >> src_bit) & 1;
-            src_bit++;
-            if (bit) {
-                low_mask |= (1 << var);
-                high_mask |= (1 << var);
-            }
-            const double p = static_cast<double>(vars[var].duty);
-            prob *= bit ? p : (1.0 - p);
-        }
-        const int low_value = (truth >> low_mask) & 1;
-        const int high_value = (truth >> high_mask) & 1;
-        if (low_value != high_value) duty += prob;
-    }
-    out_duty = fminf(fmaxf(static_cast<float>(duty), 0.0f), 1.0f);
-    return true;
-}
-
-__device__ bool power_direct_expr_small_activity(int expr_id,
-                                                 const GpuPowerExprOpHost* ops,
-                                                 const int* expr_start,
-                                                 const int* expr_count,
-                                                 const float* pin_density,
-                                                 const float* pin_duty,
-                                                 const int* node_port_pin_start,
-                                                 const int* node_port_pin_list,
-                                                 int node_id,
-                                                 float& out_density,
-                                                 float& out_duty) {
-    PowerDirectVarValue vars[2];
-    int var_count = 0;
-    if (!power_direct_expr_collect_vars(expr_id, ops, expr_start, expr_count,
-                                        pin_density, pin_duty, node_port_pin_start,
-                                        node_port_pin_list, node_id, vars, var_count)) {
-        return false;
-    }
-    if (!power_direct_expr_small_duty(expr_id, ops, expr_start, expr_count, pin_duty,
-                                      node_port_pin_start, node_port_pin_list,
-                                      node_id, out_duty)) {
-        return false;
-    }
-    double density = 0.0;
-    for (int var = 0; var < var_count; var++) {
-        if (vars[var].density == 0.0f) continue;
-        float diff_duty = 0.0f;
-        if (!power_direct_expr_small_diff_duty(expr_id, var, vars, var_count, ops,
-                                               expr_start, expr_count,
-                                               node_port_pin_start, node_port_pin_list,
-                                               node_id, diff_duty)) {
-            return false;
-        }
-        density += static_cast<double>(vars[var].density) * static_cast<double>(diff_duty);
-    }
-    out_density = fmaxf(static_cast<float>(density), 0.0f);
-    return isfinite(out_density) && isfinite(out_duty);
-}
-
-__device__ float power_direct_expr_lerp01(float low, float high, float p) {
-    return fmaf(p, high - low, low);
-}
-
-__device__ bool power_direct_expr_small_activity_floatbdd(int expr_id,
-                                                          const GpuPowerExprOpHost* ops,
-                                                          const int* expr_start,
-                                                          const int* expr_count,
-                                                          const float* pin_density,
-                                                          const float* pin_duty,
-                                                          const int* node_port_pin_start,
-                                                          const int* node_port_pin_list,
-                                                          int node_id,
-                                                          float& out_density,
-                                                          float& out_duty) {
-    PowerDirectVarValue vars[2];
-    int var_count = 0;
-    if (!power_direct_expr_collect_vars(expr_id, ops, expr_start, expr_count,
-                                        pin_density, pin_duty, node_port_pin_start,
-                                        node_port_pin_list, node_id, vars, var_count)) {
-        return false;
-    }
-    uint8_t truth = 0;
-    if (!power_direct_expr_truth_table(expr_id, vars, var_count, ops, expr_start,
-                                       expr_count, node_port_pin_start,
-                                       node_port_pin_list, node_id, truth)) {
-        return false;
-    }
-    if (var_count == 0) {
-        out_density = 0.0f;
-        out_duty = (truth & 1) ? 1.0f : 0.0f;
-        return true;
-    }
-    if (var_count == 1) {
-        const float p0 = vars[0].duty;
-        const float f0 = (truth & 1) ? 1.0f : 0.0f;
-        const float f1 = (truth & 2) ? 1.0f : 0.0f;
-        const float diff0 = f0 != f1 ? 1.0f : 0.0f;
-        out_duty = power_clamp_activity_duty(power_direct_expr_lerp01(f0, f1, p0));
-        out_density = fmaxf(vars[0].density * diff0, 0.0f);
-        return isfinite(out_density) && isfinite(out_duty);
-    }
-    if (var_count != 2) return false;
-    const float p0 = vars[0].duty;
-    const float p1 = vars[1].duty;
-    const float f00 = (truth & 1) ? 1.0f : 0.0f;
-    const float f10 = (truth & 2) ? 1.0f : 0.0f;
-    const float f01 = (truth & 4) ? 1.0f : 0.0f;
-    const float f11 = (truth & 8) ? 1.0f : 0.0f;
-    const float low0 = power_direct_expr_lerp01(f00, f01, p1);
-    const float high0 = power_direct_expr_lerp01(f10, f11, p1);
-    out_duty = power_clamp_activity_duty(power_direct_expr_lerp01(low0, high0, p0));
-
-    const float d0_low = f00 != f10 ? 1.0f : 0.0f;
-    const float d0_high = f01 != f11 ? 1.0f : 0.0f;
-    const float diff0 = power_direct_expr_lerp01(d0_low, d0_high, p1);
-    const float d1_low = f00 != f01 ? 1.0f : 0.0f;
-    const float d1_high = f10 != f11 ? 1.0f : 0.0f;
-    const float diff1 = power_direct_expr_lerp01(d1_low, d1_high, p0);
-    out_density = fmaxf(fmaf(vars[1].density, diff1, vars[0].density * diff0), 0.0f);
-    return isfinite(out_density) && isfinite(out_duty);
-}
-
-__device__ bool power_eval_expr_duty_direct_poly(int expr_id,
-                                                 const GpuPowerExprOpHost* ops,
-                                                 const int* expr_start,
-                                                 const int* expr_count,
-                                                 const float* pin_duty,
-                                                 const int* node_port_pin_start,
-                                                 const int* node_port_pin_list,
-                                                 int node_id,
-                                                 float& out_duty);
-
-__device__ bool power_eval_expr_duty_direct(int expr_id,
-                                            const GpuPowerExprOpHost* ops,
-                                            const int* expr_start,
-                                            const int* expr_count,
-                                            const float* pin_duty,
-                                            const int* node_port_pin_start,
-                                            const int* node_port_pin_list,
-                                            int node_id,
-                                            float& out_duty) {
-    return power_eval_expr_duty_direct_poly(expr_id, ops, expr_start, expr_count,
-                                            pin_duty, node_port_pin_start,
-                                            node_port_pin_list, node_id, out_duty);
-}
-
-__device__ bool power_eval_expr_duty_direct_poly(int expr_id,
-                                                 const GpuPowerExprOpHost* ops,
-                                                 const int* expr_start,
-                                                 const int* expr_count,
-                                                 const float* pin_duty,
-                                                 const int* node_port_pin_start,
-                                                 const int* node_port_pin_list,
-                                                 int node_id,
-                                                 float& out_duty) {
-    if (!pin_duty ||
-        !power_direct_expr_is_safe(expr_id, ops, expr_start, expr_count,
-                                   node_port_pin_start, node_port_pin_list,
-                                   node_id)) {
-        return false;
-    }
-    const int start = expr_start[expr_id];
-    const int count = expr_count[expr_id];
+    const int start = view->expr_start[expr_id];
+    const int count = view->expr_count[expr_id];
     float stack[POWER_DIRECT_PROB_STACK];
     int sp = 0;
     for (int k = 0; k < count; k++) {
-        const auto op = ops[start + k];
+        const auto op = view->ops[start + k];
         switch (op.op) {
             case 0: {
-                const int pin = power_expr_resolve_pin_arg(op.arg, node_port_pin_start,
-                                                           node_port_pin_list, node_id);
+                const int pin = view->resolvePinArg(op.arg);
                 if (sp >= POWER_DIRECT_PROB_STACK) return false;
                 if (pin < 0 && op.arg > -2) return false;
-                stack[sp++] = pin < 0 ? 0.0f : power_clamp_activity_duty(pin_duty[pin]);
+                stack[sp++] = pin < 0 ? 0.0f : PowerActivityOps::clampActivityDuty(view->pin_duty[pin]);
                 break;
             }
             case 1:
@@ -1209,68 +795,34 @@ __device__ bool power_eval_expr_duty_direct_poly(int expr_id,
     return true;
 }
 
-__device__ bool power_eval_expr_activity_direct_poly(int expr_id,
-                                                     const GpuPowerExprOpHost* ops,
-                                                     const int* expr_start,
-                                                     const int* expr_count,
-                                                     const float* pin_density,
-                                                     const float* pin_duty,
-                                                     const int* node_port_pin_start,
-                                                     const int* node_port_pin_list,
-                                                     int node_id,
-                                                     float& out_density,
-                                                     float& out_duty);
-
-__device__ bool power_eval_expr_activity_direct(int expr_id,
-                                                const GpuPowerExprOpHost* ops,
-                                                const int* expr_start,
-                                                const int* expr_count,
-                                                const float* pin_density,
-                                                const float* pin_duty,
-                                                const int* node_port_pin_start,
-                                                 const int* node_port_pin_list,
-                                                 int node_id,
-                                                 float& out_density,
-                                                 float& out_duty) {
-    return power_eval_expr_activity_direct_poly(expr_id, ops, expr_start, expr_count,
-                                                pin_density, pin_duty,
-                                                node_port_pin_start, node_port_pin_list,
-                                                node_id, out_density, out_duty);
+__device__ bool PowerDirectExprEval::activity(int expr_id,
+                                              float& out_density,
+                                              float& out_duty) const {
+    return activityPoly(expr_id, out_density, out_duty);
 }
 
-__device__ bool power_eval_expr_activity_direct_poly(int expr_id,
-                                                     const GpuPowerExprOpHost* ops,
-                                                     const int* expr_start,
-                                                     const int* expr_count,
-                                                     const float* pin_density,
-                                                     const float* pin_duty,
-                                                     const int* node_port_pin_start,
-                                                     const int* node_port_pin_list,
-                                                     int node_id,
-                                                     float& out_density,
-                                                     float& out_duty) {
-    if (!pin_density || !pin_duty ||
-        !power_direct_expr_is_safe(expr_id, ops, expr_start, expr_count,
-                                   node_port_pin_start, node_port_pin_list,
-                                   node_id)) {
+__device__ bool PowerDirectExprEval::activityPoly(int expr_id,
+                                                  float& out_density,
+                                                  float& out_duty) const {
+    if (!view->pin_density || !view->pin_duty || !isSafe(expr_id)) {
         return false;
     }
-    const int start = expr_start[expr_id];
-    const int count = expr_count[expr_id];
+    const int start = view->expr_start[expr_id];
+    const int count = view->expr_count[expr_id];
     PowerDirectActivityValue stack[POWER_DIRECT_PROB_STACK];
     int sp = 0;
     for (int k = 0; k < count; k++) {
-        const auto op = ops[start + k];
+        const auto op = view->ops[start + k];
         switch (op.op) {
             case 0: {
-                const int pin = power_expr_resolve_pin_arg(op.arg, node_port_pin_start,
-                                                           node_port_pin_list, node_id);
+                const int pin = view->resolvePinArg(op.arg);
                 if (sp >= POWER_DIRECT_PROB_STACK) return false;
                 if (pin < 0 && op.arg > -2) return false;
-                PowerDirectActivityValue value;
-                value.duty = pin < 0 ? 0.0f : power_clamp_activity_duty(pin_duty[pin]);
-                value.density = (pin >= 0 && op.zero_density == 0) ? pin_density[pin] : 0.0f;
-                stack[sp++] = value;
+                const float value_duty =
+                    pin < 0 ? 0.0f : PowerActivityOps::clampActivityDuty(view->pin_duty[pin]);
+                const float value_density =
+                    (pin >= 0 && op.zero_density == 0) ? view->pin_density[pin] : 0.0f;
+                stack[sp++] = PowerDirectActivityValue(value_density, value_duty);
                 break;
             }
             case 1:
@@ -1283,37 +835,34 @@ __device__ bool power_eval_expr_activity_direct_poly(int expr_id,
                 break;
             case 3:
                 if (sp < 1) return false;
-                stack[sp - 1].duty = 1.0f - stack[sp - 1].duty;
+                stack[sp - 1] = PowerDirectActivityValue(stack[sp - 1].density,
+                                                          1.0f - stack[sp - 1].duty);
                 break;
             case 4: {
                 if (sp < 2) return false;
                 const PowerDirectActivityValue b = stack[--sp];
                 const PowerDirectActivityValue a = stack[--sp];
-                PowerDirectActivityValue value;
-                value.duty = a.duty * b.duty;
-                value.density = fmaf(a.density, b.duty, b.density * a.duty);
-                stack[sp++] = value;
+                stack[sp++] = PowerDirectActivityValue(
+                    fmaf(a.density, b.duty, b.density * a.duty),
+                    a.duty * b.duty);
                 break;
             }
             case 5: {
                 if (sp < 2) return false;
                 const PowerDirectActivityValue b = stack[--sp];
                 const PowerDirectActivityValue a = stack[--sp];
-                PowerDirectActivityValue value;
-                value.duty = fmaf(b.duty, 1.0f - a.duty, a.duty);
-                value.density = fmaf(b.density, 1.0f - a.duty,
-                                     a.density * (1.0f - b.duty));
-                stack[sp++] = value;
+                stack[sp++] = PowerDirectActivityValue(
+                    fmaf(b.density, 1.0f - a.duty, a.density * (1.0f - b.duty)),
+                    fmaf(b.duty, 1.0f - a.duty, a.duty));
                 break;
             }
             case 6: {
                 if (sp < 2) return false;
                 const PowerDirectActivityValue b = stack[--sp];
                 const PowerDirectActivityValue a = stack[--sp];
-                PowerDirectActivityValue value;
-                value.duty = fmaf(a.duty, 1.0f - 2.0f * b.duty, b.duty);
-                value.density = a.density + b.density;
-                stack[sp++] = value;
+                stack[sp++] = PowerDirectActivityValue(
+                    a.density + b.density,
+                    fmaf(a.duty, 1.0f - 2.0f * b.duty, b.duty));
                 break;
             }
             case 7:
@@ -1330,66 +879,32 @@ __device__ bool power_eval_expr_activity_direct_poly(int expr_id,
     return true;
 }
 
-__device__ bool power_eval_expr_diff_duty_direct_poly(int expr_id,
-                                                      int diff_pin,
-                                                      const GpuPowerExprOpHost* ops,
-                                                      const int* expr_start,
-                                                      const int* expr_count,
-                                                      const float* pin_duty,
-                                                      const int* node_port_pin_start,
-                                                      const int* node_port_pin_list,
-                                                      int node_id,
-                                                      float& out_duty);
-
-__device__ bool power_eval_expr_diff_duty_direct(int expr_id,
-                                                 int diff_pin,
-                                                 const GpuPowerExprOpHost* ops,
-                                                 const int* expr_start,
-                                                 const int* expr_count,
-                                                 const float* pin_duty,
-                                                 const int* node_port_pin_start,
-                                                 const int* node_port_pin_list,
-                                                 int node_id,
-                                                 float& out_duty) {
-     return power_eval_expr_diff_duty_direct_poly(expr_id, diff_pin, ops, expr_start,
-                                                  expr_count, pin_duty,
-                                                  node_port_pin_start,
-                                                  node_port_pin_list, node_id,
-                                                  out_duty);
+__device__ bool PowerDirectExprEval::diffDuty(int expr_id,
+                                              int diff_pin,
+                                              float& out_duty) const {
+    return diffDutyPoly(expr_id, diff_pin, out_duty);
 }
 
-__device__ bool power_eval_expr_diff_duty_direct_poly(int expr_id,
-                                                      int diff_pin,
-                                                      const GpuPowerExprOpHost* ops,
-                                                      const int* expr_start,
-                                                      const int* expr_count,
-                                                      const float* pin_duty,
-                                                      const int* node_port_pin_start,
-                                                      const int* node_port_pin_list,
-                                                      int node_id,
-                                                      float& out_duty) {
-     if (!pin_duty || diff_pin < 0 ||
-          !power_direct_expr_is_safe(expr_id, ops, expr_start, expr_count,
-                                     node_port_pin_start, node_port_pin_list,
-                                     node_id)) {
-          return false;
-      }
-    const int start = expr_start[expr_id];
-    const int count = expr_count[expr_id];
+__device__ bool PowerDirectExprEval::diffDutyPoly(int expr_id,
+                                                  int diff_pin,
+                                                  float& out_duty) const {
+    if (!view->pin_duty || diff_pin < 0 || !isSafe(expr_id)) {
+        return false;
+    }
+    const int start = view->expr_start[expr_id];
+    const int count = view->expr_count[expr_id];
     PowerDirectProbValue stack[POWER_DIRECT_PROB_STACK];
     int sp = 0;
     for (int k = 0; k < count; k++) {
-        const auto op = ops[start + k];
-          switch (op.op) {
-              case 0: {
-                  const int pin = power_expr_resolve_pin_arg(op.arg, node_port_pin_start,
-                                                             node_port_pin_list, node_id);
-                  if (sp >= POWER_DIRECT_PROB_STACK || pin < 0) return false;
-                  PowerDirectProbValue value;
-                  value.duty = power_clamp_activity_duty(pin_duty[pin]);
-                value.diff = pin == diff_pin ? 1.0f : 0.0f;
-                value.has_diff = pin == diff_pin ? 1 : 0;
-                stack[sp++] = value;
+        const auto op = view->ops[start + k];
+        switch (op.op) {
+            case 0: {
+                const int pin = view->resolvePinArg(op.arg);
+                if (sp >= POWER_DIRECT_PROB_STACK || pin < 0) return false;
+                stack[sp++] = PowerDirectProbValue(
+                    PowerActivityOps::clampActivityDuty(view->pin_duty[pin]),
+                    pin == diff_pin ? 1.0f : 0.0f,
+                    pin == diff_pin ? 1 : 0);
                 break;
             }
             case 1:
@@ -1402,18 +917,18 @@ __device__ bool power_eval_expr_diff_duty_direct_poly(int expr_id,
                 break;
             case 3:
                 if (sp < 1) return false;
-                stack[sp - 1].duty = 1.0f - stack[sp - 1].duty;
+                stack[sp - 1] = PowerDirectProbValue(1.0f - stack[sp - 1].duty,
+                                                      stack[sp - 1].diff,
+                                                      stack[sp - 1].has_diff);
                 break;
             case 4: {
                 if (sp < 2) return false;
                 const PowerDirectProbValue b = stack[--sp];
                 const PowerDirectProbValue a = stack[--sp];
                 if (a.has_diff && b.has_diff) return false;
-                PowerDirectProbValue value;
-                value.duty = a.duty * b.duty;
-                value.diff = a.diff * b.duty + b.diff * a.duty;
-                value.has_diff = a.has_diff || b.has_diff;
-                stack[sp++] = value;
+                stack[sp++] = PowerDirectProbValue(a.duty * b.duty,
+                                                   a.diff * b.duty + b.diff * a.duty,
+                                                   a.has_diff || b.has_diff);
                 break;
             }
             case 5: {
@@ -1421,11 +936,10 @@ __device__ bool power_eval_expr_diff_duty_direct_poly(int expr_id,
                 const PowerDirectProbValue b = stack[--sp];
                 const PowerDirectProbValue a = stack[--sp];
                 if (a.has_diff && b.has_diff) return false;
-                PowerDirectProbValue value;
-                value.duty = a.duty + b.duty - a.duty * b.duty;
-                value.diff = a.diff * (1.0f - b.duty) + b.diff * (1.0f - a.duty);
-                value.has_diff = a.has_diff || b.has_diff;
-                stack[sp++] = value;
+                stack[sp++] = PowerDirectProbValue(
+                    a.duty + b.duty - a.duty * b.duty,
+                    a.diff * (1.0f - b.duty) + b.diff * (1.0f - a.duty),
+                    a.has_diff || b.has_diff);
                 break;
             }
             case 6: {
@@ -1433,11 +947,10 @@ __device__ bool power_eval_expr_diff_duty_direct_poly(int expr_id,
                 const PowerDirectProbValue b = stack[--sp];
                 const PowerDirectProbValue a = stack[--sp];
                 if (a.has_diff && b.has_diff) return false;
-                PowerDirectProbValue value;
-                value.duty = a.duty * (1.0f - b.duty) + (1.0f - a.duty) * b.duty;
-                value.diff = a.diff + b.diff;
-                value.has_diff = a.has_diff || b.has_diff;
-                stack[sp++] = value;
+                stack[sp++] = PowerDirectProbValue(
+                    a.duty * (1.0f - b.duty) + (1.0f - a.duty) * b.duty,
+                    a.diff + b.diff,
+                    a.has_diff || b.has_diff);
                 break;
             }
             case 7:
@@ -1453,28 +966,14 @@ __device__ bool power_eval_expr_diff_duty_direct_poly(int expr_id,
     return true;
 }
 
-}  // namespace
-
-__device__ __noinline__ bool power_eval_expr_activity_bdd(int expr_id,
-                                                          const GpuPowerExprOpHost* ops,
-                                                          const int* expr_start,
-                                                          const int* expr_count,
-                                                          const float* pin_density,
-                                                          const float* pin_duty,
-                                                          float& out_density,
-                                                          float& out_duty,
-                                                          const int* node_port_pin_start,
-                                                          const int* node_port_pin_list,
-                                                          int node_id,
-                                                          int& out_var_count) {
-    PowerBddContextCuda ctx;
-    int root = 1;
-    if (!power_bdd_build_expr(expr_id, ops, expr_start, expr_count,
-                              pin_density, pin_duty, ctx, root,
-                              node_port_pin_start, node_port_pin_list, node_id)) {
+__device__ __noinline__ bool PowerBddExprEval::activity(int expr_id,
+                                                        float& out_density,
+                                                        float& out_duty,
+                                                        int& out_var_count) {
+    if (!buildExpr(expr_id)) {
         return false;
     }
-    out_duty = power_bdd_eval_duty(ctx, root);
+    out_duty = ctx.evalDuty(root);
     out_density = 0.0f;
     out_var_count = ctx.var_count;
 
@@ -1492,34 +991,72 @@ __device__ __noinline__ bool power_eval_expr_activity_bdd(int expr_id,
     for (int idx = 0; idx < ctx.var_count; idx++) {
         const int var = order[idx];
         if (!ctx.var_has_pin[var]) continue;
-        const int low = power_bdd_restrict(ctx, root, var, false);
-        const int high = power_bdd_restrict(ctx, root, var, true);
-        const int diff = power_bdd_apply(ctx, 2, low, high);
-        const float diff_duty = power_bdd_eval_duty(ctx, diff);
+        const int low = ctx.restrict(root, var, false);
+        const int high = ctx.restrict(root, var, true);
+        const int diff = ctx.apply(2, low, high);
+        const float diff_duty = ctx.evalDuty(diff);
         out_density += ctx.var_densities[var] * diff_duty;
     }
     return isfinite(out_density) && isfinite(out_duty);
 }
 
-__device__ bool power_eval_expr_activity(int expr_id,
-                                         const GpuPowerExprOpHost* ops,
-                                         const int* expr_start,
-                                         const int* expr_count,
-                                         const float* pin_density,
-                                         const float* pin_duty,
-                                         float& out_density,
-                                         float& out_duty,
-                                         const int* node_port_pin_start,
-                                         const int* node_port_pin_list,
-                                         int node_id) {
+__device__ __noinline__ float PowerBddExprEval::diffDuty(int expr_id, int diff_pin) {
+    if (!buildExpr(expr_id)) {
+        return 0.0f;
+    }
+    int diff_var = -1;
+    for (int var = 0; var < ctx.var_count; var++) {
+        if (ctx.var_pins[var] == diff_pin) {
+            diff_var = var;
+            break;
+        }
+    }
+    if (diff_var < 0) return 0.0f;
+    const int low = ctx.restrict(root, diff_var, false);
+    const int high = ctx.restrict(root, diff_var, true);
+    const int diff = ctx.apply(2, low, high);
+    return ctx.evalDuty(diff);
+}
+
+__device__ __noinline__ bool PowerBddExprEval::activityFallback(const PowerExprView& view,
+                                                                int expr_id,
+                                                                float& out_density,
+                                                                float& out_duty,
+                                                                int& out_var_count) {
+    PowerBddExprEval eval(view);
+    return eval.activity(expr_id, out_density, out_duty, out_var_count);
+}
+
+__device__ __noinline__ float PowerBddExprEval::diffDutyFallback(const PowerExprView& view,
+                                                                 int expr_id,
+                                                                 int diff_pin) {
+    PowerBddExprEval eval(view);
+    return eval.diffDuty(expr_id, diff_pin);
+}
+
+}  // namespace
+
+__device__ int PowerExprView::resolvePinArg(int arg) const {
+    if (arg >= 0) return arg;
+    if (arg == -1 || !node_port_pin_start || !node_port_pin_list || node_id < 0) return -1;
+    const int port_id = -2 - arg;
+    const int start = node_port_pin_start[node_id];
+    const int end = node_port_pin_start[node_id + 1];
+    if (port_id < 0 || start + port_id < start || start + port_id >= end) return -1;
+    return node_port_pin_list[start + port_id];
+}
+
+__device__ bool PowerExprView::activity(int expr_id,
+                                        float& out_density,
+                                        float& out_duty) const {
     const bool direct_allowed = !g_power_disable_direct_expr;
     float direct_density = 0.0f;
     float direct_duty = 0.0f;
-    const bool direct_ok = direct_allowed &&
-        power_eval_expr_activity_direct(expr_id, ops, expr_start, expr_count,
-                                        pin_density, pin_duty,
-                                        node_port_pin_start, node_port_pin_list,
-                                        node_id, direct_density, direct_duty);
+    bool direct_ok = false;
+    if (direct_allowed) {
+        const PowerDirectExprEval direct_eval(*this);
+        direct_ok = direct_eval.activity(expr_id, direct_density, direct_duty);
+    }
     if (direct_ok && !g_power_check_direct_expr) {
         out_density = direct_density;
         out_duty = direct_duty;
@@ -1528,11 +1065,8 @@ __device__ bool power_eval_expr_activity(int expr_id,
     float bdd_density = 0.0f;
     float bdd_duty = 0.0f;
     int bdd_var_count = 0;
-    if (!power_eval_expr_activity_bdd(expr_id, ops, expr_start, expr_count,
-                                      pin_density, pin_duty, bdd_density,
-                                      bdd_duty, node_port_pin_start,
-                                      node_port_pin_list, node_id,
-                                      bdd_var_count)) {
+    if (!PowerBddExprEval::activityFallback(*this, expr_id, bdd_density,
+                                            bdd_duty, bdd_var_count)) {
         return false;
     }
     if (direct_ok && g_power_check_direct_expr) {
@@ -1558,14 +1092,7 @@ __device__ bool power_eval_expr_activity(int expr_id,
     return isfinite(out_density) && isfinite(out_duty);
 }
 
-__device__ bool power_expr_has_known_activity_input(int expr_id,
-                                                    const GpuPowerExprOpHost* ops,
-                                                    const int* expr_start,
-                                                    const int* expr_count,
-                                                    const int* origin,
-                                                    const int* node_port_pin_start,
-                                                    const int* node_port_pin_list,
-                                                    int node_id) {
+__device__ bool PowerExprView::hasKnownActivityInput(int expr_id, const uint8_t* origin) const {
     if (expr_id < 0) return false;
     const int start = expr_start[expr_id];
     const int count = expr_count[expr_id];
@@ -1574,8 +1101,7 @@ __device__ bool power_expr_has_known_activity_input(int expr_id,
     for (int k = 0; k < count; k++) {
         const auto op = ops[start + k];
         if (op.op != 0) continue;
-        const int pin = power_expr_resolve_pin_arg(op.arg, node_port_pin_start,
-                                                   node_port_pin_list, node_id);
+        const int pin = resolvePinArg(op.arg);
         if (pin < 0) continue;
         has_pin_arg = true;
         if (!origin || origin[pin] != 0 || op.zero_density != 0) return true;
@@ -1583,85 +1109,33 @@ __device__ bool power_expr_has_known_activity_input(int expr_id,
     return !has_pin_arg;
 }
 
-__device__ float power_eval_expr_duty(int expr_id,
-                                      const GpuPowerExprOpHost* ops,
-                                      const int* expr_start,
-                                      const int* expr_count,
-                                      const float* pin_density,
-                                      const float* pin_duty,
-                                      const int* node_port_pin_start,
-                                      const int* node_port_pin_list,
-                                      int node_id) {
+__device__ float PowerExprView::duty(int expr_id) const {
     float direct_duty = 0.0f;
-    if (!g_power_disable_direct_expr &&
-        power_eval_expr_duty_direct(expr_id, ops, expr_start, expr_count,
-                                    pin_duty, node_port_pin_start,
-                                    node_port_pin_list, node_id,
-                                    direct_duty)) {
-        return direct_duty;
-    }
-    float density = 0.0f;
-    float duty = 0.0f;
-    if (!power_eval_expr_activity(expr_id, ops, expr_start, expr_count, pin_density, pin_duty,
-                                  density, duty, node_port_pin_start, node_port_pin_list, node_id)) {
-        return 0.0f;
-    }
-    return fminf(fmaxf(duty, 0.0f), 1.0f);
-}
-
-__device__ __noinline__ float power_eval_expr_diff_duty_bdd(int expr_id,
-                                                            int diff_pin,
-                                                            const GpuPowerExprOpHost* ops,
-                                                            const int* expr_start,
-                                                            const int* expr_count,
-                                                            const float* pin_duty,
-                                                            const int* node_port_pin_start,
-                                                            const int* node_port_pin_list,
-                                                            int node_id) {
-      PowerBddContextCuda ctx;
-      int root = 1;
-      if (!power_bdd_build_expr(expr_id, ops, expr_start, expr_count,
-                                nullptr, pin_duty, ctx, root,
-                                node_port_pin_start, node_port_pin_list,
-                                node_id)) {
-          return 0.0f;
-      }
-    int diff_var = -1;
-    for (int var = 0; var < ctx.var_count; var++) {
-        if (ctx.var_pins[var] == diff_pin) {
-            diff_var = var;
-            break;
+    if (!g_power_disable_direct_expr) {
+        const PowerDirectExprEval direct_eval(*this);
+        if (direct_eval.duty(expr_id, direct_duty)) {
+            return direct_duty;
         }
     }
-    if (diff_var < 0) return 0.0f;
-    const int low = power_bdd_restrict(ctx, root, diff_var, false);
-    const int high = power_bdd_restrict(ctx, root, diff_var, true);
-    const int diff = power_bdd_apply(ctx, 2, low, high);
-    return power_bdd_eval_duty(ctx, diff);
+    float density = 0.0f;
+    float activity_duty = 0.0f;
+    if (!activity(expr_id, density, activity_duty)) {
+        return 0.0f;
+    }
+    return fminf(fmaxf(activity_duty, 0.0f), 1.0f);
 }
 
-__device__ float power_eval_expr_diff_duty(int expr_id,
-                                           int diff_pin,
-                                           const GpuPowerExprOpHost* ops,
-                                           const int* expr_start,
-                                           const int* expr_count,
-                                           const float* pin_duty,
-                                           const int* node_port_pin_start,
-                                           const int* node_port_pin_list,
-                                           int node_id) {
-     if (expr_id < 0 || diff_pin < 0) return 0.0f;
-     float direct_duty = 0.0f;
-     if (!g_power_disable_direct_expr &&
-         power_eval_expr_diff_duty_direct(expr_id, diff_pin, ops, expr_start,
-                                          expr_count, pin_duty,
-                                          node_port_pin_start, node_port_pin_list,
-                                          node_id, direct_duty)) {
-          return direct_duty;
-      }
-      return power_eval_expr_diff_duty_bdd(expr_id, diff_pin, ops, expr_start,
-                                           expr_count, pin_duty,
-                                           node_port_pin_start,
-                                           node_port_pin_list, node_id);
+__device__ float PowerExprView::diffDuty(int expr_id, int diff_pin) const {
+    if (expr_id < 0 || diff_pin < 0) return 0.0f;
+    float direct_duty = 0.0f;
+    if (!g_power_disable_direct_expr) {
+        const PowerDirectExprEval direct_eval(*this);
+        if (direct_eval.diffDuty(expr_id, diff_pin, direct_duty)) {
+            return direct_duty;
+        }
+    }
+    const PowerExprView bdd_view = withDensity(nullptr);
+    return PowerBddExprEval::diffDutyFallback(bdd_view, expr_id, diff_pin);
 }
 
 }  // namespace gt

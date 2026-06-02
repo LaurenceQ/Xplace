@@ -280,8 +280,8 @@ void buildPowerClockGateMaps(GTDatabase& gtdb,
 
 
 PowerCpuActivityLevels buildPowerCpuActivityLevels(GTDatabase& gtdb, int n) {
-    PowerCpuActivityLevels out;
-    out.pin_level.assign(n, 0);
+    std::vector<int> pin_level(n, 0);
+    int max_level = 0;
     if (gtdb.pin_num_fanin.size() == static_cast<size_t>(n)
         && gtdb.pin_fanout_list_end.size() == static_cast<size_t>(n + 1)) {
         std::vector<int> indeg = gtdb.pin_num_fanin;
@@ -295,30 +295,35 @@ PowerCpuActivityLevels buildPowerCpuActivityLevels(GTDatabase& gtdb, int n) {
             frontier.pop_front();
             if (pin_id < 0 || pin_id >= n || seen[pin_id]) continue;
             seen[pin_id] = 1;
-            out.max_level = std::max(out.max_level, out.pin_level[pin_id]);
+            max_level = std::max(max_level, pin_level[pin_id]);
             const int start = gtdb.pin_fanout_list_end[pin_id];
             const int end = gtdb.pin_fanout_list_end[pin_id + 1];
             for (int idx = start; idx < end; ++idx) {
                 const int fanout = gtdb.pin_fanout_list[idx];
                 if (fanout < 0 || fanout >= n) continue;
-                out.pin_level[fanout] = std::max(out.pin_level[fanout], out.pin_level[pin_id] + 1);
+                pin_level[fanout] = std::max(pin_level[fanout], pin_level[pin_id] + 1);
                 if (--indeg[fanout] == 0) frontier.push_back(fanout);
             }
         }
     }
-    std::vector<std::vector<int>> by_level(std::max(1, out.max_level + 1));
+    std::vector<std::vector<int>> by_level(std::max(1, max_level + 1));
     for (int pin_id = 0; pin_id < n; ++pin_id) {
-        const int level = std::clamp(out.pin_level[pin_id], 0, out.max_level);
+        const int level = std::clamp(pin_level[pin_id], 0, max_level);
         by_level[level].push_back(pin_id);
     }
-    out.level_list.reserve(n);
-    out.level_list_end.reserve(by_level.size() + 1);
-    out.level_list_end.push_back(0);
+    std::vector<int> level_list;
+    std::vector<int> level_list_end;
+    level_list.reserve(n);
+    level_list_end.reserve(by_level.size() + 1);
+    level_list_end.push_back(0);
     for (const auto& pins : by_level) {
-        out.level_list.insert(out.level_list.end(), pins.begin(), pins.end());
-        out.level_list_end.push_back(static_cast<int>(out.level_list.size()));
+        level_list.insert(level_list.end(), pins.begin(), pins.end());
+        level_list_end.push_back(static_cast<int>(level_list.size()));
     }
-    return out;
+    return PowerCpuActivityLevels(std::move(pin_level),
+                                  std::move(level_list),
+                                  std::move(level_list_end),
+                                  max_level);
 }
 
 void buildPowerNodePortPinMap(GTDatabase& gtdb,

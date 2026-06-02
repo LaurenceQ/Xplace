@@ -30,8 +30,9 @@ struct PowerLevelizeModel {
     index_type *pin_forward_arc_list_end = nullptr;
     index_type *pin_forward_arc_list = nullptr;
     index_type *timing_arc_to_pin_id = nullptr;
-    const int *arc_types = nullptr;
-    const int *arc_id2test_id = nullptr;
+    const uint8_t *arc_types = nullptr;
+    const uint32_t *seq_output_arc_keep = nullptr;
+    const uint8_t *arc_skip = nullptr;
     const uint8_t* is_seq_output_pin = nullptr;
     const uint8_t* is_load_pin = nullptr;
     const int* pin2net_map = nullptr;
@@ -47,6 +48,11 @@ struct PowerLevelizeModel {
     int num_arcs = 0;
     int num_pins = 0;
 };
+
+__device__ __forceinline__ bool power_levelize_bit_test(const uint32_t* bits, int index) {
+    if (!bits || index < 0) return false;
+    return (bits[index >> 5] & (1u << (index & 31))) != 0;
+}
 
 __global__ void advanceLevel(TimingLevelizeModel *model, int num_frontiers) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -69,12 +75,15 @@ __device__ bool power_levelize_valid_edge(index_type arc,
                                           const PowerLevelizeModel *model,
                                           int& to_pin) {
     if (arc < 0 || arc >= model->num_arcs) return false;
-    if (model->arc_id2test_id && model->arc_id2test_id[arc] != -1) return false;
+    if (model->arc_skip && model->arc_skip[arc]) return false;
     to_pin = model->timing_arc_to_pin_id[arc];
     if (to_pin < 0 || to_pin >= model->num_pins) return false;
     // OpenSTA power activity seeds sequential Q/Q_N separately; do not levelize
     // ordinary D/CLK -> Q timing arcs as activity propagation edges.
-    if (model->arc_types && model->arc_types[arc] == 1 && model->is_seq_output_pin && model->is_seq_output_pin[to_pin]) return false;
+    if (model->arc_types && model->arc_types[arc] == 1 &&
+        model->is_seq_output_pin && model->is_seq_output_pin[to_pin] &&
+        !power_levelize_bit_test(model->seq_output_arc_keep, arc))
+        return false;
     return true;
 }
 
@@ -252,26 +261,30 @@ void GPUTimer::levelize() {
     cudaFree(d_level_model);
     cudaMalloc(&level_list_end, level_list_end_cpu.size() * sizeof(index_type));
     cudaMemcpy(level_list_end, level_list_end_cpu.data(), level_list_end_cpu.size() * sizeof(index_type), cudaMemcpyHostToDevice);
-    index_type *level_list_cpu = new index_type[total_num_frontiers];
-    cudaMemcpy(level_list_cpu, level_list, total_num_frontiers * sizeof(index_type), cudaMemcpyDeviceToHost);
+    std::vector<index_type> level_list_host(total_num_frontiers);
+    if (total_num_frontiers > 0) {
+        cudaMemcpy(level_list_host.data(), level_list,
+                   total_num_frontiers * sizeof(index_type),
+                   cudaMemcpyDeviceToHost);
+    }
     pin_level_cpu.assign(num_pins, -1);
     for (int level = 0; level + 1 < static_cast<int>(level_list_end_cpu.size()); ++level) {
         const int start = level_list_end_cpu[level];
         const int end = level_list_end_cpu[level + 1];
         for (int i = start; i < end && i < total_num_frontiers; ++i) {
-            const int pin = static_cast<int>(level_list_cpu[i]);
+            const int pin = static_cast<int>(level_list_host[i]);
             if (pin >= 0 && pin < num_pins) pin_level_cpu[pin] = level;
         }
     }
-    delete[] level_list_cpu;
     CUDA_CHECK("exit");
-    // checkTimingGraph(level_list_cpu, num_pins, gtdb.pin_names);
+    // checkTimingGraph(level_list_host.data(), num_pins, gtdb.pin_names);
 }
 
 
 void GPUTimer::levelize_power(const uint8_t* d_is_seq_output_pin,
-                              const int* d_power_arc_types,
-                              const int* d_power_arc_id2test_id,
+                              const uint8_t* d_power_arc_types,
+                              const uint32_t* d_power_seq_output_arc_keep,
+                              const uint8_t* d_power_arc_skip,
                               const uint8_t* d_is_load_pin,
                               const int* d_pin2net_map,
                               const int* d_net_driver_pin,
@@ -320,7 +333,8 @@ void GPUTimer::levelize_power(const uint8_t* d_is_seq_output_pin,
     power_model.pin_forward_arc_list = pin_forward_arc_list;
     power_model.timing_arc_to_pin_id = timing_arc_to_pin_id;
     power_model.arc_types = d_power_arc_types ? d_power_arc_types : arc_types;
-    power_model.arc_id2test_id = d_power_arc_id2test_id ? d_power_arc_id2test_id : arc_id2test_id;
+    power_model.seq_output_arc_keep = d_power_seq_output_arc_keep;
+    power_model.arc_skip = d_power_arc_skip;
     power_model.is_seq_output_pin = d_is_seq_output_pin;
     power_model.is_load_pin = d_is_load_pin;
     power_model.pin2net_map = d_pin2net_map;

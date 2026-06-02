@@ -403,192 +403,223 @@ bool evalPowerExprWithPortValues(const PowerExpr& expr,
     return true;
 }
 
-bool evalPowerExprActivity(const PowerExpr& expr,
-                                  const LibertyCell* cell,
-                                  const gp::GPNode& node,
-                                  const std::vector<CpuActivity>& pin_activity,
-                                  float& density,
-                                  float& duty,
-                                  const std::unordered_map<int, int>* const_port_values,
-                                  const std::unordered_set<int>* zero_density_ports) {
-    std::vector<int8_t> fixed_port_values(cell ? cell->ports_.size() : 0, -1);
-    if (const_port_values) {
-        for (const auto& [port_id, value] : *const_port_values) {
-            if (port_id >= 0 && port_id < static_cast<int>(fixed_port_values.size()))
-                fixed_port_values[port_id] = static_cast<int8_t>(value ? 1 : 0);
-        }
+// Small ROBDD evaluator used to mirror OpenROAD/CUDD activity semantics.
+//
+// Encoding:
+//   edge 0 = constant 1
+//   edge 1 = constant 0
+//   nonterminal edge = (node_id << 1) | complemented_bit
+//
+// The complemented edge bit lets us represent NOT without creating another
+// node. This is also why "true" is edge 0 and "false" is edge 1.
+PowerExprBddActivityEvaluator::PowerExprBddActivityEvaluator(
+    const LibertyCell* cell,
+    const gp::GPNode& node,
+    const std::vector<CpuActivity>& pin_activity,
+    const std::unordered_map<int, int>* const_port_values,
+    const std::unordered_set<int>* zero_density_ports)
+    : cell_(cell),
+      node_(node),
+      pin_activity_(pin_activity),
+      zero_density_ports_(zero_density_ports),
+      fixed_port_values_(cell ? cell->ports_.size() : 0, -1) {
+    if (!const_port_values) return;
+    for (const auto& [port_id, value] : *const_port_values) {
+        if (port_id >= 0 && port_id < static_cast<int>(fixed_port_values_.size()))
+            fixed_port_values_[port_id] = static_cast<int8_t>(value ? 1 : 0);
+    }
+}
+
+PowerExprBddActivityEvaluator::~PowerExprBddActivityEvaluator() = default;
+
+bool PowerExprBddActivityEvaluator::evaluate(const PowerExpr& expr,
+                                             float& density,
+                                             float& duty) {
+    if (!cell_) return false;
+
+    // Register variables in Liberty port order before building nodes. The BDD
+    // shape and recursive float rounding depend on a stable order.
+    if (!registerExprVariables(expr)) return false;
+
+    int root = zeroEdge();
+    if (!buildBdd(expr, root)) return false;
+
+    duty = evalDuty(root);
+    density = evalDensity(root);
+    return std::isfinite(density) && std::isfinite(duty);
+}
+
+bool PowerExprBddActivityEvaluator::BddKey::operator==(const BddKey& other) const {
+    return var == other.var && low == other.low && high == other.high;
+}
+
+size_t PowerExprBddActivityEvaluator::BddKeyHash::operator()(const BddKey& key) const {
+    size_t h = std::hash<int>{}(key.var);
+    h ^= std::hash<int>{}(key.low + 0x9e3779b9 + (h << 6) + (h >> 2));
+    h ^= std::hash<int>{}(key.high + 0x9e3779b9 + (h << 6) + (h >> 2));
+    return h;
+}
+
+bool PowerExprBddActivityEvaluator::ApplyKey::operator==(const ApplyKey& other) const {
+    return op == other.op && left == other.left && right == other.right;
+}
+
+size_t PowerExprBddActivityEvaluator::ApplyKeyHash::operator()(const ApplyKey& key) const {
+    size_t h = std::hash<int>{}(key.op);
+    h ^= std::hash<int>{}(key.left + 0x9e3779b9 + (h << 6) + (h >> 2));
+    h ^= std::hash<int>{}(key.right + 0x9e3779b9 + (h << 6) + (h >> 2));
+    return h;
+}
+
+int PowerExprBddActivityEvaluator::oneEdge() { return 0; }
+
+int PowerExprBddActivityEvaluator::zeroEdge() { return 1; }
+
+int PowerExprBddActivityEvaluator::noVar() { return std::numeric_limits<int>::max(); }
+
+int PowerExprBddActivityEvaluator::edgeId(int edge) { return edge >> 1; }
+
+bool PowerExprBddActivityEvaluator::edgeInv(int edge) { return (edge & 1) != 0; }
+
+int PowerExprBddActivityEvaluator::edgeNot(int edge) { return edge ^ 1; }
+
+bool PowerExprBddActivityEvaluator::resolvePortPin(int port_id, int& pin_id) const {
+    if (!cell_ || port_id < 0 || port_id >= static_cast<int>(cell_->ports_.size()))
+        return false;
+    const std::string& port_name = cell_->ports_[port_id]->name;
+    auto pin_itr = node_.portMap.find(port_name);
+    if (pin_itr == node_.portMap.end()) {
+        pin_id = -1;
+        return true;
+    }
+    pin_id = pin_itr->second;
+    return pin_id >= 0 && pin_id < static_cast<int>(pin_activity_.size());
+}
+
+int PowerExprBddActivityEvaluator::makeNode(int var, int low, int high) {
+    if (low == high) return low;
+
+    bool result_inv = false;
+    // CUDD stores the then/high edge regular. If a high child is complemented,
+    // move that complement onto the returned edge instead. This keeps the same
+    // recursive complemented-edge shape as OpenROAD's power code.
+    if (edgeInv(high)) {
+        low = edgeNot(low);
+        high = edgeNot(high);
+        result_inv = true;
     }
 
-    struct BddNode {
-        int var = -1;
-        int low = 0;
-        int high = 0;
-    };
-    struct BddKey {
-        int var = -1;
-        int low = 0;
-        int high = 0;
-        bool operator==(const BddKey& other) const {
-            return var == other.var && low == other.low && high == other.high;
-        }
-    };
-    struct BddKeyHash {
-        size_t operator()(const BddKey& key) const {
-            size_t h = std::hash<int>{}(key.var);
-            h ^= std::hash<int>{}(key.low + 0x9e3779b9 + (h << 6) + (h >> 2));
-            h ^= std::hash<int>{}(key.high + 0x9e3779b9 + (h << 6) + (h >> 2));
-            return h;
-        }
-    };
+    BddKey key{var, low, high};
+    auto itr = unique_nodes_.find(key);
+    int id = 0;
+    if (itr == unique_nodes_.end()) {
+        id = static_cast<int>(nodes_.size()) + 1;
+        nodes_.push_back(BddNode{var, low, high});
+        unique_nodes_.emplace(key, id);
+    } else {
+        id = itr->second;
+    }
 
-    constexpr int one_edge = 0;
-    constexpr int zero_edge = 1;
-    constexpr int no_var = std::numeric_limits<int>::max();
-    std::vector<BddNode> bdd_nodes;
-    std::unordered_map<BddKey, int, BddKeyHash> unique_nodes;
-    std::unordered_map<int, int> port_to_var;
-    std::vector<int> var_ports;
-    std::vector<float> var_duties;
-    std::vector<float> var_densities;
-    std::vector<uint8_t> var_has_pin;
+    const int edge = id << 1;
+    return result_inv ? edgeNot(edge) : edge;
+}
 
-    auto edge_id = [](int edge) { return edge >> 1; };
-    auto edge_inv = [](int edge) { return (edge & 1) != 0; };
-    auto edge_not = [](int edge) { return edge ^ 1; };
+int PowerExprBddActivityEvaluator::topVar(int edge) const {
+    const int id = edgeId(edge);
+    return id == 0 ? noVar() : nodes_[id - 1].var;
+}
 
-    auto make_node = [&](int var, int low, int high) {
-        if (low == high) return low;
-        bool result_inv = false;
-        // CUDD keeps the then/high edge regular and moves that complement to
-        // the returned edge. This preserves OpenROAD's recursive float
-        // rounding for Boolean-diff duties.
-        if (edge_inv(high)) {
-            low = edge_not(low);
-            high = edge_not(high);
-            result_inv = true;
-        }
-        BddKey key{var, low, high};
-        auto itr = unique_nodes.find(key);
-        int id = 0;
-        if (itr == unique_nodes.end()) {
-            id = static_cast<int>(bdd_nodes.size()) + 1;
-            bdd_nodes.push_back(BddNode{var, low, high});
-            unique_nodes.emplace(key, id);
-        } else {
-            id = itr->second;
-        }
-        int edge = id << 1;
-        return result_inv ? edge_not(edge) : edge;
-    };
+int PowerExprBddActivityEvaluator::cofTop(int edge, int var, bool high_child) const {
+    const int id = edgeId(edge);
+    if (id == 0 || nodes_[id - 1].var != var) return edge;
 
-    auto top_var = [&](int edge) {
-        const int id = edge_id(edge);
-        return id == 0 ? no_var : bdd_nodes[id - 1].var;
-    };
+    const int child = high_child ? nodes_[id - 1].high : nodes_[id - 1].low;
+    return edgeInv(edge) ? edgeNot(child) : child;
+}
 
-    auto cof_top = [&](int edge, int var, bool high_child) {
-        const int id = edge_id(edge);
-        if (id == 0 || bdd_nodes[id - 1].var != var) return edge;
-        int child = high_child ? bdd_nodes[id - 1].high : bdd_nodes[id - 1].low;
-        return edge_inv(edge) ? edge_not(child) : child;
-    };
+int PowerExprBddActivityEvaluator::apply(int op, int left, int right) {
+    // AND/OR are commutative; normalizing operand order increases cache hits.
+    if ((op == 0 || op == 1) && right < left) std::swap(left, right);
 
-    struct ApplyKey {
-        int op = 0;
-        int left = 0;
-        int right = 0;
-        bool operator==(const ApplyKey& other) const {
-            return op == other.op && left == other.left && right == other.right;
-        }
-    };
-    struct ApplyKeyHash {
-        size_t operator()(const ApplyKey& key) const {
-            size_t h = std::hash<int>{}(key.op);
-            h ^= std::hash<int>{}(key.left + 0x9e3779b9 + (h << 6) + (h >> 2));
-            h ^= std::hash<int>{}(key.right + 0x9e3779b9 + (h << 6) + (h >> 2));
-            return h;
-        }
-    };
-    std::unordered_map<ApplyKey, int, ApplyKeyHash> apply_cache;
-    std::function<int(int, int, int)> apply_bdd = [&](int op, int left, int right) -> int {
-        if ((op == 0 || op == 1) && right < left) std::swap(left, right);
-        ApplyKey key{op, left, right};
-        auto cache_itr = apply_cache.find(key);
-        if (cache_itr != apply_cache.end()) return cache_itr->second;
-        const int left_id = edge_id(left);
-        const int right_id = edge_id(right);
-        if (left_id == 0 && right_id == 0) {
-            const bool left_value = !edge_inv(left);
-            const bool right_value = !edge_inv(right);
-            bool value = false;
-            if (op == 0) value = left_value && right_value;
-            else if (op == 1) value = left_value || right_value;
-            else value = left_value != right_value;
-            const int result = value ? one_edge : zero_edge;
-            apply_cache.emplace(key, result);
-            return result;
-        }
-        const int var = std::min(top_var(left), top_var(right));
-        const int low = apply_bdd(op, cof_top(left, var, false), cof_top(right, var, false));
-        const int high = apply_bdd(op, cof_top(left, var, true), cof_top(right, var, true));
-        const int result = make_node(var, low, high);
-        apply_cache.emplace(key, result);
-        return result;
-    };
+    ApplyKey key{op, left, right};
+    auto cache_itr = apply_cache_.find(key);
+    if (cache_itr != apply_cache_.end()) return cache_itr->second;
 
-    std::unordered_map<long long, int> restrict_cache;
-    std::function<int(int, int, bool)> restrict_var = [&](int edge, int target_var, bool high_child) -> int {
-        const int id = edge_id(edge);
-        if (id == 0) return edge;
-        const auto& bdd_node = bdd_nodes[id - 1];
-        if (bdd_node.var > target_var) return edge;
-        const long long key = (static_cast<long long>(edge) << 32)
-            ^ (static_cast<long long>(target_var) << 1)
-            ^ static_cast<long long>(high_child ? 1 : 0);
-        auto cache_itr = restrict_cache.find(key);
-        if (cache_itr != restrict_cache.end()) return cache_itr->second;
-        int result = edge;
-        if (bdd_node.var == target_var) {
-            result = high_child ? bdd_node.high : bdd_node.low;
-        } else {
-            const int low = restrict_var(bdd_node.low, target_var, high_child);
-            const int high = restrict_var(bdd_node.high, target_var, high_child);
-            result = make_node(bdd_node.var, low, high);
-        }
-        if (edge_inv(edge)) result = edge_not(result);
-        restrict_cache.emplace(key, result);
-        return result;
-    };
+    int result = zeroEdge();
+    const int left_id = edgeId(left);
+    const int right_id = edgeId(right);
+    if (left_id == 0 && right_id == 0) {
+        const bool left_value = !edgeInv(left);
+        const bool right_value = !edgeInv(right);
+        bool value = false;
+        if (op == 0) value = left_value && right_value;
+        else if (op == 1) value = left_value || right_value;
+        else value = left_value != right_value;
+        result = value ? oneEdge() : zeroEdge();
+    } else {
+        const int var = std::min(topVar(left), topVar(right));
+        const int low = apply(op, cofTop(left, var, false), cofTop(right, var, false));
+        const int high = apply(op, cofTop(left, var, true), cofTop(right, var, true));
+        result = makeNode(var, low, high);
+    }
 
-    auto ensure_var = [&](int port_id, int pin_id) {
-        auto itr = port_to_var.find(port_id);
-        if (itr != port_to_var.end()) return itr->second;
-        const int var = static_cast<int>(var_ports.size());
-        port_to_var[port_id] = var;
-        var_ports.push_back(port_id);
-        const bool has_pin = pin_id >= 0 && pin_id < static_cast<int>(pin_activity.size());
-        var_has_pin.push_back(has_pin ? 1 : 0);
-        var_duties.push_back(has_pin ? std::clamp(pin_activity[pin_id].duty, 0.0f, 1.0f) : 0.0f);
-        const bool zero_density = zero_density_ports && zero_density_ports->count(port_id) != 0;
-        var_densities.push_back((has_pin && !zero_density) ? pin_activity[pin_id].density : 0.0f);
-        return var;
-    };
+    apply_cache_.emplace(key, result);
+    return result;
+}
 
+int PowerExprBddActivityEvaluator::restrictVar(int edge, int target_var, bool high_child) {
+    const int id = edgeId(edge);
+    if (id == 0) return edge;
+
+    const auto& node = nodes_[id - 1];
+    if (node.var > target_var) return edge;
+
+    const long long key = (static_cast<long long>(edge) << 32)
+        ^ (static_cast<long long>(target_var) << 1)
+        ^ static_cast<long long>(high_child ? 1 : 0);
+    auto cache_itr = restrict_cache_.find(key);
+    if (cache_itr != restrict_cache_.end()) return cache_itr->second;
+
+    int result = edge;
+    if (node.var == target_var) {
+        result = high_child ? node.high : node.low;
+    } else {
+        const int low = restrictVar(node.low, target_var, high_child);
+        const int high = restrictVar(node.high, target_var, high_child);
+        result = makeNode(node.var, low, high);
+    }
+    if (edgeInv(edge)) result = edgeNot(result);
+
+    restrict_cache_.emplace(key, result);
+    return result;
+}
+
+int PowerExprBddActivityEvaluator::ensureVar(int port_id, int pin_id) {
+    auto itr = port_to_var_.find(port_id);
+    if (itr != port_to_var_.end()) return itr->second;
+
+    const int var = static_cast<int>(var_ports_.size());
+    port_to_var_[port_id] = var;
+    var_ports_.push_back(port_id);
+
+    const bool has_pin = pin_id >= 0 && pin_id < static_cast<int>(pin_activity_.size());
+    var_has_pin_.push_back(has_pin ? 1 : 0);
+    var_duties_.push_back(has_pin ? std::clamp(pin_activity_[pin_id].duty, 0.0f, 1.0f) : 0.0f);
+
+    const bool zero_density = zero_density_ports_ && zero_density_ports_->count(port_id) != 0;
+    var_densities_.push_back((has_pin && !zero_density) ? pin_activity_[pin_id].density : 0.0f);
+    return var;
+}
+
+bool PowerExprBddActivityEvaluator::registerExprVariables(const PowerExpr& expr) {
     std::vector<std::pair<int, int>> expr_vars;
     for (const auto& op : expr.ops()) {
-        if (op.opcode != PowerExprOpcode::port || op.port_id < 0
-            || op.port_id >= static_cast<int>(cell->ports_.size()))
-            continue;
-        const std::string& port_name = cell->ports_[op.port_id]->name;
-        auto pin_itr = node.portMap.find(port_name);
-        if (pin_itr == node.portMap.end()) {
-            continue;
-        } else {
-            const int pin_id = pin_itr->second;
-            if (pin_id < 0 || pin_id >= static_cast<int>(pin_activity.size())) return false;
-            expr_vars.emplace_back(op.port_id, pin_id);
-        }
+        if (op.opcode != PowerExprOpcode::port) continue;
+        int pin_id = -1;
+        if (!resolvePortPin(op.port_id, pin_id)) return false;
+        if (pin_id >= 0) expr_vars.emplace_back(op.port_id, pin_id);
     }
+
     std::sort(expr_vars.begin(), expr_vars.end(),
               [](const auto& left, const auto& right) { return left.first < right.first; });
     expr_vars.erase(std::unique(expr_vars.begin(), expr_vars.end(),
@@ -596,107 +627,144 @@ bool evalPowerExprActivity(const PowerExpr& expr,
                                     return left.first == right.first;
                                 }),
                     expr_vars.end());
-    for (const auto& [port_id, pin_id] : expr_vars)
-        ensure_var(port_id, pin_id);
 
+    for (const auto& [port_id, pin_id] : expr_vars)
+        ensureVar(port_id, pin_id);
+    return true;
+}
+
+bool PowerExprBddActivityEvaluator::pushPort(std::vector<int>& stack, int port_id) {
+    int pin_id = -1;
+    if (!resolvePortPin(port_id, pin_id)) return false;
+
+    if (pin_id < 0) {
+        // Missing Liberty ports are treated as a fixed value if supplied by the
+        // caller; otherwise OpenROAD-compatible fallback is constant 0.
+        const int8_t fixed_value =
+            port_id >= 0 && port_id < static_cast<int>(fixed_port_values_.size())
+                ? fixed_port_values_[port_id]
+                : static_cast<int8_t>(-1);
+        stack.push_back(fixed_value > 0 ? oneEdge() : zeroEdge());
+        return true;
+    }
+
+    const int var = ensureVar(port_id, pin_id);
+    stack.push_back(makeNode(var, zeroEdge(), oneEdge()));
+    return true;
+}
+
+bool PowerExprBddActivityEvaluator::buildBdd(const PowerExpr& expr, int& root) {
     std::vector<int> stack;
     for (const auto& op : expr.ops()) {
         switch (op.opcode) {
-            case PowerExprOpcode::port: {
-                if (!cell || op.port_id < 0 || op.port_id >= static_cast<int>(cell->ports_.size()))
-                    return false;
-                const std::string& port_name = cell->ports_[op.port_id]->name;
-                auto pin_itr = node.portMap.find(port_name);
-                if (pin_itr == node.portMap.end()) {
-                    if (fixed_port_values[op.port_id] < 0) {
-                        stack.push_back(zero_edge);
-                        break;
-                    }
-                    stack.push_back(fixed_port_values[op.port_id] ? one_edge : zero_edge);
-                    break;
-                }
-                const int pin_id = pin_itr->second;
-                if (pin_id < 0 || pin_id >= static_cast<int>(pin_activity.size())) return false;
-                const int var = ensure_var(op.port_id, pin_id);
-                stack.push_back(make_node(var, zero_edge, one_edge));
+            case PowerExprOpcode::port:
+                if (!pushPort(stack, op.port_id)) return false;
                 break;
-            }
             case PowerExprOpcode::const_zero:
-                stack.push_back(zero_edge);
+                stack.push_back(zeroEdge());
                 break;
             case PowerExprOpcode::const_one:
-                stack.push_back(one_edge);
+                stack.push_back(oneEdge());
                 break;
-            case PowerExprOpcode::logical_not: {
+            case PowerExprOpcode::logical_not:
                 if (stack.empty()) return false;
-                int a = stack.back();
-                stack.back() = edge_not(a);
+                stack.back() = edgeNot(stack.back());
                 break;
-            }
-            case PowerExprOpcode::logical_and: {
-                if (stack.size() < 2) return false;
-                int right = stack.back();
-                stack.pop_back();
-                int left = stack.back();
-                stack.back() = apply_bdd(0, left, right);
+            case PowerExprOpcode::logical_and:
+                if (!applyBinary(stack, 0)) return false;
                 break;
-            }
-            case PowerExprOpcode::logical_or: {
-                if (stack.size() < 2) return false;
-                int right = stack.back();
-                stack.pop_back();
-                int left = stack.back();
-                stack.back() = apply_bdd(1, left, right);
+            case PowerExprOpcode::logical_or:
+                if (!applyBinary(stack, 1)) return false;
                 break;
-            }
-            case PowerExprOpcode::logical_xor: {
-                if (stack.size() < 2) return false;
-                int right = stack.back();
-                stack.pop_back();
-                int left = stack.back();
-                stack.back() = apply_bdd(2, left, right);
+            case PowerExprOpcode::logical_xor:
+                if (!applyBinary(stack, 2)) return false;
                 break;
-            }
         }
     }
+
     if (stack.size() != 1) return false;
-    const int root = stack.back();
+    root = stack.back();
+    return true;
+}
 
-    std::function<float(int)> eval_bdd_duty = [&](int edge) -> float {
-        const int id = edge_id(edge);
-        if (id == 0) return edge_inv(edge) ? 0.0f : 1.0f;
-        const auto& bdd_node = bdd_nodes[id - 1];
-        if (bdd_node.var >= 0 && bdd_node.var < static_cast<int>(var_has_pin.size())
-            && !var_has_pin[bdd_node.var])
-            return 0.0f;
-        const float duty0 = eval_bdd_duty(bdd_node.low);
-        const float duty1 = eval_bdd_duty(bdd_node.high);
-        const float var_duty = var_duties[bdd_node.var];
-        float result = duty0 * (1.0 - var_duty) + duty1 * var_duty;
-        if (edge_inv(edge)) result = 1.0 - result;
-        return std::clamp(result, 0.0f, 1.0f);
-    };
+bool PowerExprBddActivityEvaluator::applyBinary(std::vector<int>& stack, int op) {
+    if (stack.size() < 2) return false;
+    const int right = stack.back();
+    stack.pop_back();
+    const int left = stack.back();
+    stack.back() = apply(op, left, right);
+    return true;
+}
 
-    duty = eval_bdd_duty(root);
-    density = 0.0f;
-    std::vector<int> var_order(var_ports.size());
+float PowerExprBddActivityEvaluator::evalDuty(int edge) const {
+    const int id = edgeId(edge);
+    // Terminal edges encode constants: edge 0 is logic 1, edge 1 is logic 0.
+    if (id == 0) return edgeInv(edge) ? 0.0f : 1.0f;
+
+    const auto& node = nodes_[id - 1];
+    if (node.var >= 0 && node.var < static_cast<int>(var_has_pin_.size())
+        && !var_has_pin_[node.var])
+        return 0.0f;
+
+    // A BDD node means F = var ? high : low.  The input duty is P(var=1),
+    // so the output duty is the weighted probability of the two cofactors:
+    //   P(F=1) = P(F_low=1) * P(var=0) + P(F_high=1) * P(var=1).
+    const float duty0 = evalDuty(node.low);
+    const float duty1 = evalDuty(node.high);
+    const float var_duty = var_duties_[node.var];
+    float result = duty0 * (1.0f - var_duty) + duty1 * var_duty;
+
+    // A complemented edge represents !F without creating another BDD node.
+    if (edgeInv(edge)) result = 1.0f - result;
+    return std::clamp(result, 0.0f, 1.0f);
+}
+
+float PowerExprBddActivityEvaluator::evalDensity(int root) {
+    float density = 0.0f;
+
+    // Output density is the sum of each input toggle density multiplied by the
+    // probability that toggling that input changes the expression output.
+    // Keep a deterministic Liberty-port order so floating point accumulation is
+    // stable and matches the expected OpenROAD-style ordering.
+    std::vector<int> var_order(var_ports_.size());
     std::iota(var_order.begin(), var_order.end(), 0);
     std::sort(var_order.begin(), var_order.end(), [&](int left, int right) {
-        return var_ports[left] < var_ports[right];
+        return var_ports_[left] < var_ports_[right];
     });
+
     for (int var : var_order) {
-        if (var < 0 || var >= static_cast<int>(var_has_pin.size()) || !var_has_pin[var])
+        if (var < 0 || var >= static_cast<int>(var_has_pin_.size()) || !var_has_pin_[var])
             continue;
-        restrict_cache.clear();
-        const int low = restrict_var(root, var, false);
-        restrict_cache.clear();
-        const int high = restrict_var(root, var, true);
-        const int diff = apply_bdd(2, low, high);
-        const float diff_duty = eval_bdd_duty(diff);
-        density += var_densities[var] * diff_duty;
+
+        // Boolean difference for this input:
+        //   diff = F(var=0) XOR F(var=1).
+        // diff is 1 exactly for the other-input combinations where this input
+        // toggle propagates to the output.  Its duty is therefore the
+        // propagation probability for var.
+        restrict_cache_.clear();
+        const int low = restrictVar(root, var, false);
+        restrict_cache_.clear();
+        const int high = restrictVar(root, var, true);
+        const int diff = apply(2, low, high);
+        const float diff_duty = evalDuty(diff);
+
+        density += var_densities_[var] * diff_duty;
     }
 
-    return std::isfinite(density) && std::isfinite(duty);
+    return density;
+}
+
+bool evalPowerExprActivity(const PowerExpr& expr,
+                           const LibertyCell* cell,
+                           const gp::GPNode& node,
+                           const std::vector<CpuActivity>& pin_activity,
+                           float& density,
+                           float& duty,
+                           const std::unordered_map<int, int>* const_port_values,
+                           const std::unordered_set<int>* zero_density_ports) {
+    PowerExprBddActivityEvaluator evaluator(cell, node, pin_activity,
+                                            const_port_values, zero_density_ports);
+    return evaluator.evaluate(expr, density, duty);
 }
 
 const std::string& seqClockExpr(const SequentialPower* seq) {

@@ -5,6 +5,7 @@
 #include "gputimer/core/power/common/PowerActivityHostUtils.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -38,11 +39,8 @@ int addInternalDenomGroup(std::unordered_map<uint64_t, int>& groups,
 int addLeakageGroup(std::vector<GpuPowerLeakageGroupHost>& groups,
                     int node_id,
                     float cell_leakage_w) {
-    GpuPowerLeakageGroupHost group;
-    group.node_id = node_id;
-    group.cell_leakage = cell_leakage_w;
     const int id = static_cast<int>(groups.size());
-    groups.push_back(group);
+    groups.emplace_back(node_id, cell_leakage_w);
     return id;
 }
 
@@ -75,17 +73,78 @@ LibertyCell* libertyCellForLibcell(GTDatabase& gtdb, int libcell_id) {
 }
 }  // namespace
 
+
+size_t readPowerChunkBytes(const char* env_name, size_t default_value) {
+    const char* env = std::getenv(env_name);
+    if (!env || env[0] == '\0') return default_value;
+    char* end = nullptr;
+    const unsigned long long parsed = std::strtoull(env, &end, 10);
+    if (end == env || parsed == 0) return default_value;
+    return static_cast<size_t>(parsed);
+}
+
+size_t powerRowsPerChunk(size_t chunk_bytes, size_t elem_size) {
+    return std::max<size_t>(1, chunk_bytes / std::max<size_t>(1, elem_size));
+}
+
+void printPowerRowStatsIfRequested(const std::vector<GpuPowerInternalHost>& h_internal_rows,
+                                   const std::vector<GpuPowerLeakageRowHost>& h_leakage_rows,
+                                   size_t internal_row_bytes,
+                                   size_t leakage_row_bytes,
+                                   size_t internal_chunk_bytes,
+                                   size_t leakage_chunk_bytes,
+                                   bool chunk_internal_rows,
+                                   bool chunk_leakage_rows,
+                                   size_t denom_group_count,
+                                   size_t leakage_group_count,
+                                   size_t expr_ops_count,
+                                   size_t expr_bytes,
+                                   size_t expr_cache_count) {
+    if (!std::getenv("XPLACE_POWER_PRINT_ROW_STATS")) return;
+    std::array<size_t, 5> internal_duty_modes{};
+    size_t internal_input_rows = 0;
+    size_t internal_output_rows = 0;
+    size_t internal_fast_duty_rows = 0;
+    size_t internal_expr_duty_rows = 0;
+    for (const auto& row : h_internal_rows) {
+        if (row.kind == 0) ++internal_input_rows;
+        if (row.kind == 1) ++internal_output_rows;
+        if (row.duty_mode >= 0 && row.duty_mode < static_cast<int>(internal_duty_modes.size()))
+            ++internal_duty_modes[row.duty_mode];
+        if (row.duty_mode == 1 || row.duty_mode == 2) ++internal_expr_duty_rows;
+        else ++internal_fast_duty_rows;
+    }
+    size_t leakage_when_rows = 0;
+    size_t leakage_no_when_rows = 0;
+    for (const auto& row : h_leakage_rows) {
+        if (row.when_expr_id >= 0) ++leakage_when_rows;
+        else ++leakage_no_when_rows;
+    }
+    std::fprintf(stderr,
+                 "[power_row_stats] internal_rows=%zu internal_bytes=%zu internal_chunk=%zu chunk_internal=%d "
+                 "denom_groups=%zu leakage_rows=%zu leakage_bytes=%zu leakage_chunk=%zu chunk_leakage=%d "
+                 "leakage_groups=%zu expr_ops=%zu expr_bytes=%zu expr_cache=%zu\n",
+                 h_internal_rows.size(), internal_row_bytes, internal_chunk_bytes,
+                 chunk_internal_rows ? 1 : 0, denom_group_count,
+                 h_leakage_rows.size(), leakage_row_bytes, leakage_chunk_bytes,
+                 chunk_leakage_rows ? 1 : 0, leakage_group_count,
+                 expr_ops_count, expr_bytes, expr_cache_count);
+    std::fprintf(stderr,
+                 "[power_row_stats] internal_kind input=%zu output=%zu duty0=%zu duty1_expr=%zu "
+                 "duty2_diff=%zu duty3_half=%zu duty4_zero=%zu fast_duty=%zu expr_duty=%zu "
+                 "leakage_no_when=%zu leakage_when=%zu\n",
+                 internal_input_rows, internal_output_rows,
+                 internal_duty_modes[0], internal_duty_modes[1], internal_duty_modes[2],
+                 internal_duty_modes[3], internal_duty_modes[4], internal_fast_duty_rows,
+                 internal_expr_duty_rows, leakage_no_when_rows, leakage_when_rows);
+}
+
 void buildPowerCudaInternalRows(GTDatabase& gtdb,
                                 int n,
                                 bool need_internal_power,
                                 const std::vector<uint8_t>& is_load_pin,
                                 const std::vector<uint8_t>& is_driver_pin,
-                                const std::vector<int>& pin_func_expr_id,
-                                const std::vector<GpuPowerExprOpHost>& expr_ops,
-                                const std::vector<int>& expr_start,
-                                const std::vector<int>& expr_count,
-                                const PowerTemplateExprAdder& add_template_expr,
-                                const PowerExprPinPredicate& expr_contains_pin,
+                                PowerCudaExprInputs& expr_inputs,
                                 std::vector<GpuPowerInternalHost>& internal_rows,
                                 std::unordered_map<uint64_t, int>& internal_denom_group) {
      internal_rows.clear();
@@ -129,7 +188,7 @@ void buildPowerCudaInternalRows(GTDatabase& gtdb,
         if (ip_id < 0 || ip_id >= num_internal_power_defs || !ip) return -1;
         int& cached = ip_when_expr_id[ip_id];
         if (cached != -2) return cached;
-        cached = ip->when_expr_.empty() ? -1 : add_template_expr(ip->when_expr_, cell);
+        cached = ip->when_expr_.empty() ? -1 : expr_inputs.addTemplateExpr(ip->when_expr_, cell);
         return cached;
     };
     auto cached_related_offset = [&](int ip_id, InternalPower* ip, LibertyCell* cell) {
@@ -189,35 +248,42 @@ void buildPowerCudaInternalRows(GTDatabase& gtdb,
                 for (int ip_id = ip_start; ip_id < ip_end; ++ip_id) {
                     InternalPower* ip = gtdb.liberty_internal_powers[ip_id];
                     if (!ip) continue;
-                    GpuPowerInternalHost row;
-                    row.internal_power_id = ip_id;
-                    row.node_id = node_id;
-                    row.to_pin = pin_id;
-                    row.kind = 0;
-                    row.energy_unit = ip->energy_unit_;
-                    row.duty_mode = 0;
+                    uint8_t duty_mode = 0;
+                    int duty_expr_id = -1;
+                    int duty_pin = -1;
                     const int when_expr_id = cached_when_expr_id(ip_id, ip, cell);
                     if (when_expr_id >= 0) {
-                        row.duty_mode = 1;
-                        row.duty_expr_id = when_expr_id;
-                        for (int op_i = expr_start[when_expr_id]; op_i < expr_start[when_expr_id] + expr_count[when_expr_id]; ++op_i) {
-                            int out_pin = expr_ops[op_i].op == 0 ? expr_ops[op_i].arg : -1;
+                        duty_mode = 1;
+                        duty_expr_id = when_expr_id;
+                        for (int op_i = expr_inputs.start[when_expr_id]; op_i < expr_inputs.start[when_expr_id] + expr_inputs.count[when_expr_id]; ++op_i) {
+                            int out_pin = expr_inputs.ops[op_i].op == 0 ? expr_inputs.ops[op_i].arg : -1;
                             if (out_pin < -1) {
                                 const int port_id = -2 - out_pin;
                                 if (port_id >= 0 && port_id < static_cast<int>(port_pin_by_offset.size()))
                                     out_pin = port_pin_by_offset[port_id];
                             }
                             if (out_pin >= 0 && out_pin < n && is_driver_pin[out_pin]) {
-                                const int func_expr_id = pin_func_expr_id[out_pin];
-                                if (expr_contains_pin(func_expr_id, pin_id)) {
-                                    row.duty_mode = 2;
-                                    row.duty_expr_id = func_expr_id;
-                                    row.duty_pin = pin_id;
+                                const int func_expr_id = expr_inputs.pin_func_expr_id[out_pin];
+                                if (expr_inputs.containsPin(gtdb, func_expr_id, pin_id)) {
+                                    duty_mode = 2;
+                                    duty_expr_id = func_expr_id;
+                                    duty_pin = pin_id;
                                     break;
                                 }
                             }
                         }
                     }
+                    GpuPowerInternalHost row(ip_id,
+                                             node_id,
+                                             pin_id,
+                                             -1,
+                                             duty_expr_id,
+                                             duty_pin,
+                                             -1,
+                                             ip->energy_unit_,
+                                             0,
+                                             duty_mode,
+                                             1);
                     if (debug_power_node_env && node.getName().find(debug_power_node_env) != std::string::npos) {
                         std::fprintf(stderr,
                                      "[XPLACE_POWER_DEBUG_NODE] node=%s port=%s kind=input ip=%d when='%s' duty_mode=%d duty_expr=%d\n",
@@ -229,36 +295,35 @@ void buildPowerCudaInternalRows(GTDatabase& gtdb,
             }
 
             if (is_driver_pin[pin_id]) {
-                const int func_expr_id = pin_func_expr_id[pin_id];
+                const int func_expr_id = expr_inputs.pin_func_expr_id[pin_id];
                 denom_group_by_pg.clear();
                 for (int ip_id = ip_start; ip_id < ip_end; ++ip_id) {
                     InternalPower* ip = gtdb.liberty_internal_powers[ip_id];
                     if (!ip) continue;
-                    GpuPowerInternalHost row;
-                    row.internal_power_id = ip_id;
-                    row.node_id = node_id;
-                    row.to_pin = pin_id;
-                    row.kind = 1;
-                    row.energy_unit = ip->energy_unit_;
-                    row.duty_mode = 4;
+                    int from_pin = -1;
+                    int duty_expr_id = -1;
+                    int duty_pin = -1;
+                    int denom_group = -1;
+                    uint8_t duty_mode = 4;
+                    uint8_t positive_unate = 1;
                     LibertyPort* from_port = ip->related_port_;
                     const int from_offset = cached_related_offset(ip_id, ip, cell);
                     if (!from_port && from_offset >= 0 && from_offset < static_cast<int>(cell->ports_.size()))
                         from_port = cell->ports_[from_offset];
                     if (from_offset >= 0 && from_offset < static_cast<int>(port_pin_by_offset.size()) &&
                         port_pin_by_offset[from_offset] >= 0) {
-                        row.from_pin = port_pin_by_offset[from_offset];
-                        row.positive_unate = cached_positive_unate(ip_id, cell, from_port, port);
+                        from_pin = port_pin_by_offset[from_offset];
+                        positive_unate = cached_positive_unate(ip_id, cell, from_port, port);
                         const int when_expr_id = cached_when_expr_id(ip_id, ip, cell);
-                        if (expr_contains_pin(func_expr_id, row.from_pin)) {
-                            row.duty_mode = 2;
-                            row.duty_expr_id = func_expr_id;
-                            row.duty_pin = row.from_pin;
+                        if (expr_inputs.containsPin(gtdb, func_expr_id, from_pin)) {
+                            duty_mode = 2;
+                            duty_expr_id = func_expr_id;
+                            duty_pin = from_pin;
                         } else if (when_expr_id >= 0) {
-                            row.duty_mode = 1;
-                            row.duty_expr_id = when_expr_id;
+                            duty_mode = 1;
+                            duty_expr_id = when_expr_id;
                         } else {
-                            row.duty_mode = 3;
+                            duty_mode = 3;
                         }
                         const int pg_id = cached_pg_id(ip_id, ip);
                         int denom_group_id = -1;
@@ -272,8 +337,19 @@ void buildPowerCudaInternalRows(GTDatabase& gtdb,
                             denom_group_id = addInternalDenomGroup(internal_denom_group, pin_id, pg_id);
                             denom_group_by_pg.emplace_back(pg_id, denom_group_id);
                         }
-                        row.denom_group = denom_group_id;
+                        denom_group = denom_group_id;
                     }
+                    GpuPowerInternalHost row(ip_id,
+                                             node_id,
+                                             pin_id,
+                                             from_pin,
+                                             duty_expr_id,
+                                             duty_pin,
+                                             denom_group,
+                                             ip->energy_unit_,
+                                             1,
+                                             duty_mode,
+                                             positive_unate);
                     if (debug_power_node_env && node.getName().find(debug_power_node_env) != std::string::npos) {
                         std::fprintf(stderr,
                                      "[XPLACE_POWER_DEBUG_NODE] node=%s port=%s kind=output ip=%d related=%s when='%s' duty_mode=%d duty_expr=%d from_pin=%d\n",
@@ -290,7 +366,7 @@ void buildPowerCudaInternalRows(GTDatabase& gtdb,
 
 void buildPowerCudaLeakageRows(GTDatabase& gtdb,
                                bool need_leakage_power,
-                               const PowerTemplateExprAdder& add_template_expr,
+                               PowerCudaExprInputs& expr_inputs,
                                std::vector<GpuPowerLeakageRowHost>& leakage_rows,
                                std::vector<GpuPowerLeakageGroupHost>& leakage_groups) {
      leakage_rows.clear();
@@ -331,7 +407,7 @@ void buildPowerCudaLeakageRows(GTDatabase& gtdb,
         if (leak_id < 0 || leak_id >= num_leakage_power_defs || !lp) return -1;
         int& cached = leakage_when_expr_id[leak_id];
         if (cached != -2) return cached;
-        cached = lp->when_expr_.empty() ? -1 : add_template_expr(lp->when_expr_, expr_cell);
+        cached = lp->when_expr_.empty() ? -1 : expr_inputs.addTemplateExpr(lp->when_expr_, expr_cell);
         return cached;
     };
     auto cached_leakage_pg_id = [&](int leak_id, LeakagePower* lp) {
@@ -388,13 +464,11 @@ void buildPowerCudaLeakageRows(GTDatabase& gtdb,
                 group_id = addLeakageGroup(leakage_groups, node_id, cell_leakage_w);
                 leakage_group_by_pg.emplace_back(pg_id, group_id);
             }
-            GpuPowerLeakageRowHost row;
-            row.node_id = node_id;
-            row.group_id = group_id;
-            row.leakage_power_id = leak_id;
-            row.when_expr_id = cached_leakage_when_expr_id(leak_id, lp, leak_expr_cell);
-            row.leakage = lp->value_ * max_power_unit;
-            leakage_rows.push_back(row);
+            leakage_rows.emplace_back(node_id,
+                                      group_id,
+                                      leak_id,
+                                      cached_leakage_when_expr_id(leak_id, lp, leak_expr_cell),
+                                      lp->value_ * max_power_unit);
         }
     }
 }

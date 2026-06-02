@@ -85,7 +85,10 @@ tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> GPUTimer::repo
                                 nullptr, nullptr, &inst_leakage_gpu,
                                 nullptr, nullptr, true);
     const auto total_sum_start = std::chrono::steady_clock::now();
-    torch::Tensor inst_total_gpu = inst_internal_gpu + inst_switching_gpu + inst_leakage_gpu;
+    torch::Tensor inst_total_gpu = torch::empty_like(inst_internal_gpu);
+    inst_total_gpu.copy_(inst_internal_gpu);
+    inst_total_gpu.add_(inst_switching_gpu);
+    inst_total_gpu.add_(inst_leakage_gpu);
     if (inst_total_gpu.is_cuda()) {
         torch::cuda::synchronize();
     }

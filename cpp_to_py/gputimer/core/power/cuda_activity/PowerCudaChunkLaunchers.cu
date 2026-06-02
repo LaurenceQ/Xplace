@@ -44,17 +44,19 @@ void init_power_chunk_activity_storage(int n,
                                        const float* packed_activity,
                                        PowerChunkActivityStorage* storage) {
     if (!storage) return;
-    storage->density = nullptr;
-    storage->duty = nullptr;
-    unpack_power_activity_density_duty(n, packed_activity, &storage->density, &storage->duty);
+    float* density = nullptr;
+    float* duty = nullptr;
+    unpack_power_activity_density_duty(n, packed_activity, &density, &duty);
+    *storage = PowerChunkActivityStorage(density, duty);
 }
 
 void free_power_chunk_activity_storage(PowerChunkActivityStorage* storage) {
     if (!storage) return;
-    if (storage->density) cudaFree(storage->density);
-    if (storage->duty) cudaFree(storage->duty);
-    storage->density = nullptr;
-    storage->duty = nullptr;
+    float* density = storage->density;
+    float* duty = storage->duty;
+    *storage = PowerChunkActivityStorage{};
+    if (density) cudaFree(density);
+    if (duty) cudaFree(duty);
 }
 
 static bool prepare_power_component_scratch(int n,
@@ -69,15 +71,14 @@ static bool prepare_power_component_scratch(int n,
     scratch = PowerActivityScratchView{};
     if (n <= 0) return false;
     if (activity_density && activity_duty) {
-        scratch.density = const_cast<float*>(activity_density);
-        scratch.duty = const_cast<float*>(activity_duty);
+        scratch = PowerActivityScratchView(const_cast<float*>(activity_density),
+                                           const_cast<float*>(activity_duty));
         return true;
     }
     if (!packed_activity) return false;
     unpack_power_activity_density_duty(n, packed_activity, owned_density, owned_duty);
     if (!*owned_density || !*owned_duty) return false;
-    scratch.density = *owned_density;
-    scratch.duty = *owned_duty;
+    scratch = PowerActivityScratchView(*owned_density, *owned_duty);
     return true;
 }
 

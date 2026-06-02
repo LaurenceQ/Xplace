@@ -4,52 +4,60 @@
 
 namespace gt {
 
-__device__ bool power_process_pin_frontier(int pin,
-                                           const PowerActivityCudaModel* model,
-                                           PowerActivityScratchView* scratch,
-                                           PowerActivityQueueView* queue) {
-    const auto& graph = model->graph;
-    const auto& expr = model->expr;
-    const auto& state = model->state;
-    float* density = scratch->density;
-    float* duty = scratch->duty;
-    int* origin = scratch->origin;
+__device__ bool PowerLevelQueueOps::processPinFrontier(int pin) const {
     bool changed = false;
-    const bool has_case_value = state.case_values && state.case_values[pin] >= 0;
+    const bool has_case_value = model->state.case_values && model->state.case_values[pin] >= 0;
     if (has_case_value) {
-        changed = power_set_activity(pin, 0.0f, state.case_values[pin] ? 1.0f : 0.0f, 4, true,
-                                     model, scratch);
+        changed = setActivity(pin,
+                              0.0f,
+                              model->state.case_values[pin] ? 1.0f : 0.0f,
+                              4,
+                              true);
     }
-    if (!has_case_value && graph.is_load_pin[pin]) {
-        const int net = graph.pin2net_map[pin];
-        const int driver = (net >= 0 && graph.net_driver_pin) ? graph.net_driver_pin[net] : -1;
-        if (driver >= 0 && driver != pin && (!origin || origin[driver] != 0)) {
-            changed = power_set_activity(pin, density[driver], duty[driver], 3, false,
-                                         model, scratch);
+    if (!has_case_value && model->graph.is_load_pin[pin]) {
+        const int net = model->graph.pin2net_map[pin];
+        const int driver = (net >= 0 && model->graph.net_driver_pin)
+                               ? model->graph.net_driver_pin[net]
+                               : -1;
+        if (driver >= 0 && driver != pin &&
+            (!scratch->origin || scratch->origin[driver] != 0)) {
+            changed = setActivity(pin, scratch->density[driver], scratch->duty[driver], 3, false);
         }
     }
-    if (!has_case_value && graph.is_driver_pin[pin]) {
+    if (!has_case_value && model->graph.is_driver_pin[pin]) {
         if (scratch->seq_pin_valid && scratch->seq_pin_valid[pin]) {
-            changed = power_set_activity(pin, scratch->seq_pin_density[pin],
-                                         scratch->seq_pin_duty[pin], 3, false,
-                                         model, scratch) || changed;
+            changed = setActivity(pin,
+                                  scratch->seq_pin_density[pin],
+                                  scratch->seq_pin_duty[pin],
+                                  3,
+                                  false) || changed;
         } else {
-             const int expr_id = expr.pin_func_expr_id[pin];
-             if (expr_id >= 0) {
-                 float out_density = 0.0f, out_duty = 0.0f;
-                 const int node_id = graph.pin2node_map ? graph.pin2node_map[pin] : -1;
-                 if (power_eval_expr_activity(expr_id, expr.expr_ops, expr.expr_start, expr.expr_count,
-                                              density, duty, out_density, out_duty,
-                                              expr.node_port_pin_start, expr.node_port_pin_list,
-                                              node_id)) {
-                     changed = power_set_activity(pin, out_density, out_duty, 3, false,
-                                                   model, scratch) || changed;
-                 }
+            const auto& expr = model->expr;
+            const int expr_id = expr.pin_func_expr_id[pin];
+            if (expr_id >= 0) {
+                float value_density = 0.0f;
+                float value_duty = 0.0f;
+                const int node_id = model->graph.pin2node_map ? model->graph.pin2node_map[pin] : -1;
+                PowerExprView expr_view(expr.expr_ops,
+                                        expr.expr_start,
+                                        expr.expr_count,
+                                        scratch->density,
+                                        scratch->duty,
+                                        expr.node_port_pin_start,
+                                        expr.node_port_pin_list,
+                                        node_id);
+                if (expr_view.activity(expr_id, value_density, value_duty)) {
+                    changed = setActivity(pin, value_density, value_duty, 3, false) || changed;
+                }
             }
         }
-        changed = power_set_clock_gate_output(pin, model, scratch) || changed;
+        changed = setClockGateOutput(pin) || changed;
     }
-    if (changed && graph.is_load_pin[pin] && power_should_mark_pending_seq(density[pin])) {
+    if (changed && model->graph.is_load_pin[pin] &&
+        PowerActivityOps::shouldMarkPendingSeq(scratch->density[pin]) &&
+        scratch->pending_seq && scratch->pending_seq_count) {
+        const auto& state = model->state;
+        if (!state.pin_seq_list_start || !state.pin_seq_list) return changed;
         for (int i = state.pin_seq_list_start[pin]; i < state.pin_seq_list_start[pin + 1]; i++) {
             const int seq_id = state.pin_seq_list[i];
             if (seq_id >= 0 && atomicExch(&scratch->pending_seq[seq_id], 1) == 0) {
@@ -65,14 +73,11 @@ __device__ bool power_process_pin_frontier(int pin,
     return changed;
 }
 
-__device__ void power_enqueue_pin_level_queue(int pin,
-                                              const PowerActivityCudaModel* model,
-                                              const PowerActivityScratchView* scratch,
-                                              PowerActivityQueueView* queue) {
+__device__ void PowerLevelQueueOps::enqueuePin(int pin) const {
     if (pin < 0 || !model->graph.pin_power_level || !queue || !queue->level_offsets) return;
     const int level = model->graph.pin_power_level[pin];
     if (level < 0 || level >= scratch->num_power_levels) return;
-    if (atomicExch(&queue->queued[pin], 1) == 0) {
+    if (!power_activity_flag_atomic_test_and_set(queue->queued, pin)) {
         const int pos = atomicAdd(&queue->level_counts[level], 1);
         const int cap = queue->level_offsets[level + 1] - queue->level_offsets[level];
         if (pos < cap) queue->level_queue[queue->level_offsets[level] + pos] = pin;
@@ -80,10 +85,7 @@ __device__ void power_enqueue_pin_level_queue(int pin,
     }
 }
 
-__device__ void power_enqueue_adjacent_level_queue(int pin,
-                                                   const PowerActivityCudaModel* model,
-                                                   const PowerActivityScratchView* scratch,
-                                                   PowerActivityQueueView* queue) {
+__device__ void PowerLevelQueueOps::enqueueAdjacent(int pin) const {
     const auto& graph = model->graph;
     if (graph.is_load_pin && graph.pin2net_map && graph.net_driver_pin &&
         graph.flat_net2pin_start_map && graph.flat_net2pin_map) {
@@ -94,54 +96,54 @@ __device__ void power_enqueue_adjacent_level_queue(int pin,
             for (int pos = start; pos < end; ++pos) {
                 const int sink = graph.flat_net2pin_map[pos];
                 if (sink < 0 || sink == pin || !graph.is_load_pin[sink]) continue;
-                power_enqueue_pin_level_queue(sink, model, scratch, queue);
+                enqueuePin(sink);
             }
         }
     }
     for (index_type i = graph.pin_forward_arc_list_end[pin];
          i < graph.pin_forward_arc_list_end[pin + 1]; i++) {
         const int arc = graph.pin_forward_arc_list[i];
-        if (graph.arc_id2test_id && graph.arc_id2test_id[arc] != -1) continue;
+        if (graph.arc_skip && graph.arc_skip[arc]) continue;
         const int to_pin = graph.timing_arc_to_pin_id[arc];
         if (to_pin < 0) continue;
         if (graph.arc_types && graph.arc_types[arc] == 1 &&
-            graph.is_seq_output_pin && graph.is_seq_output_pin[to_pin])
+            graph.is_seq_output_pin && graph.is_seq_output_pin[to_pin] &&
+            !power_activity_flag_test(graph.seq_output_arc_keep, arc))
             continue;
-        power_enqueue_pin_level_queue(to_pin, model, scratch, queue);
+        enqueuePin(to_pin);
     }
 }
 
-__device__ void power_enqueue_clock_gate_output_level_queue(int pin,
-                                                            const PowerActivityCudaModel* model,
-                                                            const PowerActivityScratchView* scratch,
-                                                            PowerActivityQueueView* queue) {
+__device__ void PowerLevelQueueOps::enqueueClockGateOutput(int pin) const {
     if (!model->graph.clock_gate_out_for_input) return;
     const int out_pin = model->graph.clock_gate_out_for_input[pin];
     if (out_pin < 0) return;
-    power_enqueue_pin_level_queue(out_pin, model, scratch, queue);
+    enqueuePin(out_pin);
 }
 
-__device__ void power_enqueue_missing_func_outputs_level_queue(int pin,
-                                                               const PowerActivityCudaModel* model,
-                                                               PowerActivityScratchView* scratch,
-                                                               PowerActivityQueueView* queue) {
+__device__ void PowerLevelQueueOps::enqueueMissingFuncOutputs(int pin) const {
     const auto& expr = model->expr;
     if (!expr.missing_func_out_start || !expr.missing_func_out_list) return;
     for (int i = expr.missing_func_out_start[pin]; i < expr.missing_func_out_start[pin + 1]; ++i) {
         const int out_pin = expr.missing_func_out_list[i];
         if (out_pin < 0) continue;
-         const int expr_id = expr.pin_func_expr_id[out_pin];
-         if (expr_id < 0) continue;
-         float out_density = 0.0f;
-         float out_duty = 0.0f;
-         const int node_id = model->graph.pin2node_map ? model->graph.pin2node_map[out_pin] : -1;
-         if (!power_eval_expr_activity(expr_id, expr.expr_ops, expr.expr_start, expr.expr_count,
-                                       scratch->density, scratch->duty, out_density, out_duty,
-                                       expr.node_port_pin_start, expr.node_port_pin_list,
-                                       node_id))
-             continue;
-         if (power_set_activity(out_pin, out_density, out_duty, 3, false, model, scratch)) {
-             power_enqueue_adjacent_level_queue(out_pin, model, scratch, queue);
+        const int expr_id = expr.pin_func_expr_id[out_pin];
+        if (expr_id < 0) continue;
+        float value_density = 0.0f;
+        float value_duty = 0.0f;
+        const int node_id = model->graph.pin2node_map ? model->graph.pin2node_map[out_pin] : -1;
+        PowerExprView expr_view(expr.expr_ops,
+                                expr.expr_start,
+                                expr.expr_count,
+                                scratch->density,
+                                scratch->duty,
+                                expr.node_port_pin_start,
+                                expr.node_port_pin_list,
+                                node_id);
+        if (!expr_view.activity(expr_id, value_density, value_duty))
+            continue;
+        if (setActivity(out_pin, value_density, value_duty, 3, false)) {
+            enqueueAdjacent(out_pin);
         }
     }
 }
@@ -152,8 +154,9 @@ __global__ void power_seed_case_level_queue_kernel(PowerActivityCudaModel* model
     const int pin = blockIdx.x * blockDim.x + threadIdx.x;
     const int* case_values = model->state.case_values;
     if (pin >= model->n || !case_values || case_values[pin] < 0) return;
-    if (power_set_activity(pin, 0.0f, case_values[pin] ? 1.0f : 0.0f, 4, true, model, scratch)) {
-        power_enqueue_adjacent_level_queue(pin, model, scratch, queue);
+    PowerLevelQueueOps queue_ops(model, scratch, queue);
+    if (queue_ops.setActivity(pin, 0.0f, case_values[pin] ? 1.0f : 0.0f, 4, true)) {
+        queue_ops.enqueueAdjacent(pin);
     }
 }
 
@@ -164,8 +167,9 @@ __global__ void power_seed_pi_level_queue_kernel(PowerActivityCudaModel* model,
     if (idx >= model->state.num_primary_inputs) return;
     const int pin = model->state.primary_inputs[idx];
     if (pin < 0) return;
-    if (power_set_activity(pin, model->config.default_density, 0.5f, 1, false, model, scratch)) {
-        power_enqueue_adjacent_level_queue(pin, model, scratch, queue);
+    PowerLevelQueueOps queue_ops(model, scratch, queue);
+    if (queue_ops.setActivity(pin, model->config.default_density, 0.5f, 1, false)) {
+        queue_ops.enqueueAdjacent(pin);
     }
 }
 
@@ -181,8 +185,9 @@ __global__ void power_seed_clock_level_queue_kernel(PowerActivityCudaModel* mode
         : model->config.clock_density;
     const float pin_duty = model->state.clock_pin_duties ? model->state.clock_pin_duties[idx] : 0.5f;
     const bool enqueue = !model->state.clock_pin_enqueue || model->state.clock_pin_enqueue[idx] != 0;
-    if (power_set_activity(pin, pin_density, pin_duty, 2, true, model, scratch) && enqueue) {
-        power_enqueue_adjacent_level_queue(pin, model, scratch, queue);
+    PowerLevelQueueOps queue_ops(model, scratch, queue);
+    if (queue_ops.setActivity(pin, pin_density, pin_duty, 2, true) && enqueue) {
+        queue_ops.enqueueAdjacent(pin);
     }
 }
 
@@ -191,19 +196,21 @@ __global__ void power_seed_roots_level_queue_ordered_kernel(PowerActivityCudaMod
                                                             PowerActivityQueueView* queue) {
     if (blockIdx.x != 0 || threadIdx.x != 0) return;
     if (model->state.case_values) {
+        PowerLevelQueueOps queue_ops(model, scratch, queue);
         for (int pin = 0; pin < model->n; ++pin) {
             if (model->state.case_values[pin] < 0) continue;
-            if (power_set_activity(pin, 0.0f, model->state.case_values[pin] ? 1.0f : 0.0f,
-                                   4, true, model, scratch)) {
-                power_enqueue_adjacent_level_queue(pin, model, scratch, queue);
+            if (queue_ops.setActivity(pin, 0.0f, model->state.case_values[pin] ? 1.0f : 0.0f,
+                                      4, true)) {
+                queue_ops.enqueueAdjacent(pin);
             }
         }
     }
+    PowerLevelQueueOps queue_ops(model, scratch, queue);
     for (int idx = 0; idx < model->state.num_primary_inputs; ++idx) {
         const int pin = model->state.primary_inputs ? model->state.primary_inputs[idx] : -1;
         if (pin < 0 || pin >= model->n) continue;
-        if (power_set_activity(pin, model->config.default_density, 0.5f, 1, false, model, scratch)) {
-            power_enqueue_adjacent_level_queue(pin, model, scratch, queue);
+        if (queue_ops.setActivity(pin, model->config.default_density, 0.5f, 1, false)) {
+            queue_ops.enqueueAdjacent(pin);
         }
     }
     for (int idx = 0; idx < model->state.num_clock_pins; ++idx) {
@@ -214,57 +221,48 @@ __global__ void power_seed_roots_level_queue_ordered_kernel(PowerActivityCudaMod
             : model->config.clock_density;
         const float pin_duty = model->state.clock_pin_duties ? model->state.clock_pin_duties[idx] : 0.5f;
         const bool enqueue = !model->state.clock_pin_enqueue || model->state.clock_pin_enqueue[idx] != 0;
-        if (power_set_activity(pin, pin_density, pin_duty, 2, true, model, scratch) && enqueue) {
-            power_enqueue_adjacent_level_queue(pin, model, scratch, queue);
+        if (queue_ops.setActivity(pin, pin_density, pin_duty, 2, true) && enqueue) {
+            queue_ops.enqueueAdjacent(pin);
         }
     }
 }
 
-__device__ void power_seed_frontier_seq(int seq_id,
-                                        const PowerActivityCudaModel* model,
-                                        PowerActivityScratchView* scratch,
-                                        PowerActivityQueueView* queue) {
+__device__ void PowerLevelQueueOps::seedFrontierSeq(int seq_id) const {
     const auto seq = model->state.seqs[seq_id];
-    float in_density = 0.0f, in_duty = 0.0f;
-    float clk_density = model->config.clock_density, clk_duty = 0.5f;
-      if ((g_power_require_known_seq_data
-           && !power_expr_has_known_activity_input(seq.data_expr_id, model->expr.expr_ops,
-                                                   model->expr.expr_start, model->expr.expr_count,
-                                                   scratch->origin,
-                                                   model->expr.node_port_pin_start,
-                                                   model->expr.node_port_pin_list,
-                                                   seq.node_id))
-          || !power_eval_expr_activity(seq.data_expr_id, model->expr.expr_ops,
-                                       model->expr.expr_start, model->expr.expr_count,
-                                       scratch->density, scratch->duty, in_density, in_duty,
-                                       model->expr.node_port_pin_start,
-                                       model->expr.node_port_pin_list,
-                                       seq.node_id))
-          return;
-      power_eval_expr_activity(seq.clk_expr_id, model->expr.expr_ops, model->expr.expr_start,
-                               model->expr.expr_count, scratch->density, scratch->duty,
-                               clk_density, clk_duty,
-                               model->expr.node_port_pin_start,
-                               model->expr.node_port_pin_list,
-                               seq.node_id);
-    float out_density = in_density;
-    float out_duty = in_duty;
-    if (power_seq_density_exceeds_clock_limit(in_density, clk_density)) {
-        out_density = seq.is_latch ? in_density * clk_duty
-                                   : 2.0f * in_duty * (1.0f - in_duty) * clk_density;
-    }
+    PowerActivityValue in_value;
+    PowerActivityValue clk_value{model->config.clock_density, 0.5f};
+    const auto& expr = model->expr;
+    PowerExprView expr_view(expr.expr_ops,
+                            expr.expr_start,
+                            expr.expr_count,
+                            scratch->density,
+                            scratch->duty,
+                            expr.node_port_pin_start,
+                            expr.node_port_pin_list,
+                            seq.node_id);
+    if ((g_power_require_known_seq_data &&
+         !expr_view.hasKnownActivityInput(seq.data_expr_id, scratch->origin)) ||
+        !expr_view.activity(seq.data_expr_id, in_value.density, in_value.duty))
+        return;
+    expr_view.activity(seq.clk_expr_id, clk_value.density, clk_value.duty);
+    const float out_density = PowerActivityOps::seqDensityExceedsClockLimit(in_value.density, clk_value.density)
+        ? (seq.is_latch
+               ? in_value.density * clk_value.duty
+               : 2.0f * in_value.duty * (1.0f - in_value.duty) * clk_value.density)
+        : in_value.density;
+    const PowerActivityValue out_value(out_density, in_value.duty);
     if (seq.q_pin >= 0) {
-        scratch->seq_pin_density[seq.q_pin] = out_density;
-        scratch->seq_pin_duty[seq.q_pin] = out_duty;
+        scratch->seq_pin_density[seq.q_pin] = out_value.density;
+        scratch->seq_pin_duty[seq.q_pin] = out_value.duty;
         scratch->seq_pin_valid[seq.q_pin] = 1;
-        power_enqueue_pin_level_queue(seq.q_pin, model, scratch, queue);
+        enqueuePin(seq.q_pin);
     }
     if (seq.qn_pin >= 0) {
-        const float qn_duty = 1.0f - out_duty;
-        scratch->seq_pin_density[seq.qn_pin] = out_density;
+        const float qn_duty = 1.0f - out_value.duty;
+        scratch->seq_pin_density[seq.qn_pin] = out_value.density;
         scratch->seq_pin_duty[seq.qn_pin] = qn_duty;
         scratch->seq_pin_valid[seq.qn_pin] = 1;
-        power_enqueue_pin_level_queue(seq.qn_pin, model, scratch, queue);
+        enqueuePin(seq.qn_pin);
     }
 }
 
@@ -277,6 +275,7 @@ __global__ void power_activity_level_queue_persistent_kernel(PowerActivityCudaMo
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = blockDim.x * gridDim.x;
     const int num_power_levels = scratch->num_power_levels;
+    PowerLevelQueueOps queue_ops(model, scratch, queue);
 
     for (int pass = 0; pass < max_seq_passes; ++pass) {
         for (int level = 0; level < num_power_levels; ++level) {
@@ -286,14 +285,14 @@ __global__ void power_activity_level_queue_persistent_kernel(PowerActivityCudaMo
             for (int idx = tid; idx < count; idx += stride) {
                 const int pin = queue->level_queue[offset + idx];
                 if (pin < 0 || pin >= model->n) continue;
-                atomicExch(&queue->queued[pin], 0);
-                const bool changed = power_process_pin_frontier(pin, model, scratch, nullptr);
+                power_activity_flag_atomic_test_and_clear(queue->queued, pin);
+                const bool changed = PowerLevelQueueOps(model, scratch, nullptr).processPinFrontier(pin);
                 if (changed) {
                     if (model->graph.is_load_pin[pin]) {
-                        power_enqueue_clock_gate_output_level_queue(pin, model, scratch, queue);
-                        power_enqueue_missing_func_outputs_level_queue(pin, model, scratch, queue);
+                        queue_ops.enqueueClockGateOutput(pin);
+                        queue_ops.enqueueMissingFuncOutputs(pin);
                     }
-                    power_enqueue_adjacent_level_queue(pin, model, scratch, queue);
+                    queue_ops.enqueueAdjacent(pin);
                 }
             }
             grid.sync();
@@ -305,7 +304,7 @@ __global__ void power_activity_level_queue_persistent_kernel(PowerActivityCudaMo
         for (int seq_id = tid; seq_id < model->state.num_seqs; seq_id += stride) {
             if (atomicExch(&scratch->pending_seq[seq_id], 0) == 0) continue;
             atomicSub(scratch->pending_seq_count, 1);
-            power_seed_frontier_seq(seq_id, model, scratch, queue);
+            queue_ops.seedFrontierSeq(seq_id);
         }
     }
 }
@@ -315,6 +314,7 @@ __global__ void power_activity_level_queue_ordered_kernel(PowerActivityCudaModel
                                                           PowerActivityQueueView* queue,
                                                           int max_seq_passes) {
     if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    PowerLevelQueueOps queue_ops(model, scratch, queue);
 
     auto drain = [&]() {
         bool any = true;
@@ -327,14 +327,14 @@ __global__ void power_activity_level_queue_ordered_kernel(PowerActivityCudaModel
                     const int idx = --queue->level_counts[level];
                     const int pin = queue->level_queue[offset + idx];
                     if (pin < 0 || pin >= model->n) continue;
-                    queue->queued[pin] = 0;
-                    const bool changed = power_process_pin_frontier(pin, model, scratch, queue);
+                    power_activity_flag_clear(queue->queued, pin);
+                    const bool changed = queue_ops.processPinFrontier(pin);
                     if (!changed) continue;
                     if (model->graph.is_load_pin[pin]) {
-                        power_enqueue_clock_gate_output_level_queue(pin, model, scratch, queue);
-                        power_enqueue_missing_func_outputs_level_queue(pin, model, scratch, queue);
+                        queue_ops.enqueueClockGateOutput(pin);
+                        queue_ops.enqueueMissingFuncOutputs(pin);
                     }
-                    power_enqueue_adjacent_level_queue(pin, model, scratch, queue);
+                    queue_ops.enqueueAdjacent(pin);
                 }
             }
         }
@@ -351,7 +351,7 @@ __global__ void power_activity_level_queue_ordered_kernel(PowerActivityCudaModel
             if (scratch->pending_seq[seq_id] == 0) continue;
             scratch->pending_seq[seq_id] = 0;
             *scratch->pending_seq_count -= 1;
-            power_seed_frontier_seq(seq_id, model, scratch, queue);
+            queue_ops.seedFrontierSeq(seq_id);
         }
         if (queue->pending_seq_list_count) *queue->pending_seq_list_count = 0;
         drain();

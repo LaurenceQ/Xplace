@@ -17,12 +17,12 @@ __global__ void power_unpack_precomputed_activity_kernel(int n,
                                                          const float* activity,
                                                          float* density,
                                                          float* duty,
-                                                         int* origin) {
+                                                         uint8_t* origin) {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= n) return;
     density[idx] = activity[idx * 3 + 0];
     duty[idx] = activity[idx * 3 + 1];
-    origin[idx] = static_cast<int>(activity[idx * 3 + 2]);
+    origin[idx] = static_cast<uint8_t>(activity[idx * 3 + 2]);
 }
 
 __global__ void power_unpack_activity_density_duty_kernel(int n,
@@ -66,43 +66,42 @@ __global__ void power_switching_kernel(const PowerActivityCudaModel* model) {
     if (components.pin_switching) components.pin_switching[pin] = sw;
 }
 
-__device__ float power_internal_row_duty(const GpuPowerInternalHost& row,
-                                         const GpuPowerExprOpHost* expr_ops,
-                                         const int* expr_start,
-                                         const int* expr_count,
-                                         const float* density,
-                                         const float* duty,
-                                         const int* node_port_pin_start,
-                                         const int* node_port_pin_list) {
-    if (row.duty_mode == 0) return 1.0f;
-     if (row.duty_mode == 1) return power_eval_expr_duty(row.duty_expr_id, expr_ops, expr_start, expr_count,
-                                                          density, duty, node_port_pin_start,
-                                                          node_port_pin_list, row.node_id);
-     if (row.duty_mode == 2) return power_eval_expr_diff_duty(row.duty_expr_id, row.duty_pin, expr_ops, expr_start, expr_count, duty,
-                                                              node_port_pin_start, node_port_pin_list, row.node_id);
-    if (row.duty_mode == 3) return 0.5f;
-    return 0.0f;
-}
+namespace {
 
-__device__ bool power_internal_fast_duty(int duty_mode, float& duty) {
-    if (duty_mode == 0) {
-        duty = 1.0f;
-        return true;
-    }
-    if (duty_mode == 3) {
-        duty = 0.5f;
-        return true;
-    }
-    if (duty_mode == 4) {
-        duty = 0.0f;
-        return true;
-    }
-    return false;
-}
+struct PowerComponentExprOps {
+    PowerExprView view;
 
-__device__ bool power_internal_expr_duty_mode(int duty_mode) {
-    return duty_mode == 1 || duty_mode == 2;
-}
+    __device__ float rowDuty(const GpuPowerInternalHost& row) {
+        if (row.duty_mode == 0) return 1.0f;
+        const PowerExprView row_view = view.withNode(row.node_id);
+        if (row.duty_mode == 1) return row_view.duty(row.duty_expr_id);
+        if (row.duty_mode == 2) return row_view.diffDuty(row.duty_expr_id, row.duty_pin);
+        if (row.duty_mode == 3) return 0.5f;
+        return 0.0f;
+    }
+
+    __device__ static bool fastDuty(int duty_mode, float& duty) {
+        if (duty_mode == 0) {
+            duty = 1.0f;
+            return true;
+        }
+        if (duty_mode == 3) {
+            duty = 0.5f;
+            return true;
+        }
+        if (duty_mode == 4) {
+            duty = 0.0f;
+            return true;
+        }
+        return false;
+    }
+
+    __device__ static bool exprDutyMode(int duty_mode) {
+        return duty_mode == 1 || duty_mode == 2;
+    }
+};
+
+}  // namespace
 
 __global__ void power_internal_denom_kernel(PowerInternalDenomModel model,
                                             PowerActivityScratchView scratch) {
@@ -110,10 +109,16 @@ __global__ void power_internal_denom_kernel(PowerInternalDenomModel model,
     if (idx >= model.num_internal_rows) return;
     const auto row = model.internal_rows[idx];
     if (row.kind != 1 || row.denom_group < 0 || row.from_pin < 0) return;
-    if (!power_internal_expr_duty_mode(row.duty_mode)) return;
-    const float d = power_internal_row_duty(row, model.expr_ops, model.expr_start, model.expr_count,
-                                            scratch.density, scratch.duty,
-                                            model.node_port_pin_start, model.node_port_pin_list);
+    if (!PowerComponentExprOps::exprDutyMode(row.duty_mode)) return;
+    PowerComponentExprOps expr_ops{PowerExprView{model.expr_ops,
+                                                 model.expr_start,
+                                                 model.expr_count,
+                                                 scratch.density,
+                                                 scratch.duty,
+                                                 model.node_port_pin_start,
+                                                 model.node_port_pin_list,
+                                                 -1}};
+    const float d = expr_ops.rowDuty(row);
     const float numer = scratch.density[row.from_pin] * d;
     if (isfinite(numer) && numer != 0.0f) atomicAdd(&model.denom[row.denom_group], numer);
 }
@@ -125,16 +130,57 @@ __global__ void power_internal_denom_fast_kernel(PowerInternalDenomModel model,
     const auto row = model.internal_rows[idx];
     if (row.kind != 1 || row.denom_group < 0 || row.from_pin < 0) return;
     float row_duty = 0.0f;
-    if (!power_internal_fast_duty(row.duty_mode, row_duty) || row_duty == 0.0f) return;
+    if (!PowerComponentExprOps::fastDuty(row.duty_mode, row_duty) || row_duty == 0.0f) return;
     const float numer = scratch.density[row.from_pin] * row_duty;
     if (isfinite(numer) && numer != 0.0f) atomicAdd(&model.denom[row.denom_group], numer);
 }
 
-__device__ void power_internal_contrib_accumulate(const GpuPowerInternalHost& row,
-                                                  float weight,
-                                                  int row_idx,
-                                                  const PowerInternalContribModel& model,
-                                                  const PowerActivityScratchView& scratch) {
+namespace {
+
+__device__ __forceinline__ bool power_internal_clock_slew_pin_marked(
+    const PowerInternalContribModel& model,
+    int pin) {
+    const int* pins = model.power_clock_slew_pins;
+    int lo = 0;
+    int hi = model.num_power_clock_slew_pins;
+    while (lo < hi) {
+        const int mid = lo + ((hi - lo) >> 1);
+        const int value = pins[mid];
+        if (value < pin) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo < model.num_power_clock_slew_pins && pins[lo] == pin;
+}
+
+__device__ __forceinline__ float power_internal_clock_slew_value(
+    const PowerInternalContribModel& model,
+    int pin,
+    int attr) {
+    if (!model.power_clock_slew_pins || model.num_power_clock_slew_pins <= 0 ||
+        pin < 0 || attr < 0 || attr >= NUM_ATTR ||
+        !power_internal_clock_slew_pin_marked(model, pin))
+        return nanf("");
+    if (model.pin_clock_slews) {
+        const float slew = model.pin_clock_slews[pin * NUM_ATTR + attr];
+        if (isfinite(slew)) return slew;
+    }
+    return model.power_clock_slew_fallback[attr];
+}
+
+}  // namespace
+
+struct PowerInternalContribOps {
+    const PowerInternalContribModel& model;
+    const PowerActivityScratchView& scratch;
+
+    __device__ void accumulate(const GpuPowerInternalHost& row,
+                               float weight,
+                               int row_idx) const;
+};
+
+__device__ void PowerInternalContribOps::accumulate(const GpuPowerInternalHost& row,
+                                                    float weight,
+                                                    int row_idx) const {
     if (row.node_id < 0 || row.node_id >= model.num_nodes || row.to_pin < 0 || !model.power_allocator) return;
     float load_internal = 0.0f;
     if (row.kind == 1 && model.dmp_C1 && model.dmp_C2) {
@@ -148,10 +194,8 @@ __device__ void power_internal_contrib_accumulate(const GpuPowerInternalHost& ro
     if (slew_pin >= 0 && model.pinSlew) {
         auto slew_value = [&](int attr) {
             float value = model.pinSlew[slew_pin * NUM_ATTR + attr];
-            if (model.power_clock_slews) {
-                const float clock_slew = model.power_clock_slews[slew_pin * NUM_ATTR + attr];
-                if (isfinite(clock_slew)) value = clock_slew;
-            }
+            const float clock_slew = power_internal_clock_slew_value(model, slew_pin, attr);
+            if (isfinite(clock_slew)) value = clock_slew;
             return value;
         };
         if (row.kind == 0 || row.positive_unate) {
@@ -189,10 +233,16 @@ __global__ void power_internal_contrib_kernel(PowerInternalContribModel model,
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= model.num_internal_rows) return;
     const auto row = model.internal_rows[idx];
-    if (!power_internal_expr_duty_mode(row.duty_mode)) return;
-    const float row_duty = power_internal_row_duty(row, model.expr_ops, model.expr_start, model.expr_count,
-                                                   scratch.density, scratch.duty,
-                                                   model.node_port_pin_start, model.node_port_pin_list);
+    if (!PowerComponentExprOps::exprDutyMode(row.duty_mode)) return;
+    PowerComponentExprOps expr_ops{PowerExprView{model.expr_ops,
+                                                 model.expr_start,
+                                                 model.expr_count,
+                                                 scratch.density,
+                                                 scratch.duty,
+                                                 model.node_port_pin_start,
+                                                 model.node_port_pin_list,
+                                                 -1}};
+    const float row_duty = expr_ops.rowDuty(row);
     float weight = (row.kind == 0) ? row_duty : 1.0f;
     if (row.kind == 1) {
         if (row.from_pin < 0 || row.denom_group < 0) return;
@@ -201,7 +251,7 @@ __global__ void power_internal_contrib_kernel(PowerInternalContribModel model,
         if (!(den != 0.0f) || !isfinite(den) || !isfinite(numer)) return;
         weight = numer / den;
     }
-    power_internal_contrib_accumulate(row, weight, idx, model, scratch);
+    PowerInternalContribOps{model, scratch}.accumulate(row, weight, idx);
 }
 
 __global__ void power_internal_contrib_fast_kernel(PowerInternalContribModel model,
@@ -210,7 +260,7 @@ __global__ void power_internal_contrib_fast_kernel(PowerInternalContribModel mod
     if (idx >= model.num_internal_rows) return;
     const auto row = model.internal_rows[idx];
     float row_duty = 0.0f;
-    if (!power_internal_fast_duty(row.duty_mode, row_duty)) return;
+    if (!PowerComponentExprOps::fastDuty(row.duty_mode, row_duty)) return;
     float weight = (row.kind == 0) ? row_duty : 1.0f;
     if (row.kind == 1) {
         if (row.from_pin < 0 || row.denom_group < 0 || row_duty == 0.0f) return;
@@ -220,7 +270,7 @@ __global__ void power_internal_contrib_fast_kernel(PowerInternalContribModel mod
         weight = numer / den;
     }
     if (weight == 0.0f) return;
-    power_internal_contrib_accumulate(row, weight, idx, model, scratch);
+    PowerInternalContribOps{model, scratch}.accumulate(row, weight, idx);
 }
 
 __global__ void power_leakage_row_kernel(PowerLeakageRowsModel model,
@@ -229,10 +279,15 @@ __global__ void power_leakage_row_kernel(PowerLeakageRowsModel model,
     if (idx >= model.num_leakage_rows) return;
     const auto row = model.leakage_rows[idx];
     if (row.group_id < 0 || row.when_expr_id < 0) return;
-    const float cond_duty = power_eval_expr_duty(row.when_expr_id, model.expr_ops, model.expr_start,
-                                                 model.expr_count, scratch.density, scratch.duty,
-                                                 model.node_port_pin_start, model.node_port_pin_list,
-                                                 row.node_id);
+    PowerExprView expr_view{model.expr_ops,
+                            model.expr_start,
+                            model.expr_count,
+                            scratch.density,
+                            scratch.duty,
+                            model.node_port_pin_start,
+                            model.node_port_pin_list,
+                            row.node_id};
+    const float cond_duty = expr_view.duty(row.when_expr_id);
     const float weighted = row.leakage * cond_duty;
     if (isfinite(weighted)) {
         atomicAdd(&model.group_cond_leakage[row.group_id], weighted);

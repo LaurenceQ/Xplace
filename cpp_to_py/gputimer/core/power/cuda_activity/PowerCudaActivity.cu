@@ -28,6 +28,10 @@ static void power_cuda_call(cudaError_t err, const char* label) {
                              cudaGetErrorString(err));
 }
 
+static int power_activity_flag_word_count(int n) {
+    return std::max(1, (std::max(0, n) + 31) / 32);
+}
+
 void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
 
     int n = model.n;
@@ -58,7 +62,9 @@ void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
     const float* d_dmp_C1 = model.graph.dmp_C1;
     const float* d_dmp_C2 = model.graph.dmp_C2;
     const float* d_pinSlew = model.graph.pinSlew;
-    const float* d_power_clock_slews = model.graph.power_clock_slews;
+    const float* d_pin_clock_slews = model.graph.pin_clock_slews;
+    const int* d_power_clock_slew_pins = model.graph.power_clock_slew_pins;
+    const int num_power_clock_slew_pins = model.graph.num_power_clock_slew_pins;
     const bool allow_clock_activity_override = model.config.allow_clock_activity_override;
     const float min_activity_density = model.config.min_activity_density;
     GpuPowerInternalHost* d_internal_rows = model.components.internal_rows;
@@ -82,59 +88,104 @@ void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
     float* d_prev_duty = nullptr;
     float* d_seq_pin_density = nullptr;
     float* d_seq_pin_duty = nullptr;
-    int* d_origin = nullptr;
-    int* d_prev_origin = nullptr;
-    int* d_active = nullptr;
+    uint8_t* d_origin = nullptr;
+    uint8_t* d_prev_origin = nullptr;
+    uint32_t* d_active = nullptr;
     uint8_t* d_active_level = nullptr;
     uint8_t* d_visit_active = nullptr;
     uint8_t* d_seq_pin_valid = nullptr;
     int* d_pending_seq = nullptr;
     int* d_pending_seq_count = nullptr;
     const int num_power_levels = std::max(0, static_cast<int>(level_list_end_cpu.size()) - 1);
-    power_cuda_call(cudaMalloc(&d_density, sizeof(float) * n), "activity malloc density");
-    power_cuda_call(cudaMalloc(&d_duty, sizeof(float) * n), "activity malloc duty");
-    power_cuda_call(cudaMalloc(&d_prev_density, sizeof(float) * n), "activity malloc prev_density");
-    power_cuda_call(cudaMalloc(&d_prev_duty, sizeof(float) * n), "activity malloc prev_duty");
-    power_cuda_call(cudaMalloc(&d_seq_pin_density, sizeof(float) * n), "activity malloc seq_pin_density");
-    power_cuda_call(cudaMalloc(&d_seq_pin_duty, sizeof(float) * n), "activity malloc seq_pin_duty");
-    power_cuda_call(cudaMalloc(&d_origin, sizeof(int) * n), "activity malloc origin");
-    power_cuda_call(cudaMalloc(&d_prev_origin, sizeof(int) * n), "activity malloc prev_origin");
-    power_cuda_call(cudaMalloc(&d_active, sizeof(int) * n), "activity malloc active");
-    power_cuda_call(cudaMalloc(&d_active_level, sizeof(uint8_t) * std::max(1, num_power_levels)), "activity malloc active_level");
-    power_cuda_call(cudaMalloc(&d_visit_active, sizeof(uint8_t) * n), "activity malloc visit_active");
-    power_cuda_call(cudaMalloc(&d_seq_pin_valid, sizeof(uint8_t) * n), "activity malloc seq_pin_valid");
-    power_cuda_call(cudaMalloc(&d_pending_seq, sizeof(int) * std::max(1, num_seqs)), "activity malloc pending_seq");
-    power_cuda_call(cudaMalloc(&d_pending_seq_count, sizeof(int)), "activity malloc pending_seq_count");
-    power_cuda_call(cudaMemset(d_density, 0, sizeof(float) * n), "activity memset density");
-    power_cuda_call(cudaMemset(d_duty, 0, sizeof(float) * n), "activity memset duty");
-    power_cuda_call(cudaMemset(d_prev_density, 0, sizeof(float) * n), "activity memset prev_density");
-    power_cuda_call(cudaMemset(d_prev_duty, 0, sizeof(float) * n), "activity memset prev_duty");
-    power_cuda_call(cudaMemset(d_seq_pin_density, 0, sizeof(float) * n), "activity memset seq_pin_density");
-    power_cuda_call(cudaMemset(d_seq_pin_duty, 0, sizeof(float) * n), "activity memset seq_pin_duty");
-    power_cuda_call(cudaMemset(d_origin, 0, sizeof(int) * n), "activity memset origin");
-    power_cuda_call(cudaMemset(d_prev_origin, 0, sizeof(int) * n), "activity memset prev_origin");
-    power_cuda_call(cudaMemset(d_active, 0, sizeof(int) * n), "activity memset active");
-    power_cuda_call(cudaMemset(d_active_level, 0, sizeof(uint8_t) * std::max(1, num_power_levels)), "activity memset active_level");
-    power_cuda_call(cudaMemset(d_visit_active, 0, sizeof(uint8_t) * n), "activity memset visit_active");
-    power_cuda_call(cudaMemset(d_seq_pin_valid, 0, sizeof(uint8_t) * n), "activity memset seq_pin_valid");
-    power_cuda_call(cudaMemset(d_pending_seq, 0, sizeof(int) * std::max(1, num_seqs)), "activity memset pending_seq");
-    power_cuda_call(cudaMemset(d_pending_seq_count, 0, sizeof(int)), "activity memset pending_seq_count");
-    PowerActivityScratchView activity_scratch;
-    activity_scratch.density = d_density;
-    activity_scratch.duty = d_duty;
-    activity_scratch.prev_density = d_prev_density;
-    activity_scratch.prev_duty = d_prev_duty;
-    activity_scratch.seq_pin_density = d_seq_pin_density;
-    activity_scratch.seq_pin_duty = d_seq_pin_duty;
-    activity_scratch.origin = d_origin;
-    activity_scratch.prev_origin = d_prev_origin;
-    activity_scratch.active = d_active;
-    activity_scratch.active_level = d_active_level;
-    activity_scratch.visit_active = d_visit_active;
-    activity_scratch.seq_pin_valid = d_seq_pin_valid;
-    activity_scratch.pending_seq = d_pending_seq;
-    activity_scratch.pending_seq_count = d_pending_seq_count;
-    activity_scratch.num_power_levels = num_power_levels;
+    const int activity_flag_words = power_activity_flag_word_count(n);
+    const char* final_dump_env = std::getenv("XPLACE_POWER_ACTIVITY_FINAL_DUMP");
+    const bool needs_final_activity_dump = final_dump_env && final_dump_env[0] != '\0';
+    const bool needs_trace_activity = num_trace_pins > 0 && d_trace_pins;
+    const bool needs_activity_propagation = !d_precomputed_activity;
+    const bool needs_inline_internal =
+        (d_inst_internal || d_internal_row_power) && d_internal_rows &&
+        num_internal_rows > 0 && d_power_allocator;
+    const bool needs_inline_leakage_activity =
+        (d_inst_leakage || d_leakage_row_power) && d_leakage_rows &&
+        num_leakage_rows > 0 && d_leakage_groups && num_leakage_groups > 0;
+    const bool needs_density_duty =
+        needs_activity_propagation || needs_inline_internal ||
+        needs_inline_leakage_activity || needs_final_activity_dump || needs_trace_activity;
+    const bool needs_origin =
+        needs_activity_propagation || needs_final_activity_dump || needs_trace_activity;
+    const bool needs_seq_activity_state = needs_activity_propagation && num_seqs > 0;
+    bool defer_pending_seq = false;
+    if (needs_activity_propagation) {
+        if (const char* env_defer_pending = std::getenv("XPLACE_POWER_DEFER_PENDING_SEQ"))
+            defer_pending_seq = std::atoi(env_defer_pending) != 0;
+    }
+    if (needs_density_duty) {
+        power_cuda_call(cudaMalloc(&d_density, sizeof(float) * n), "activity malloc density");
+        power_cuda_call(cudaMalloc(&d_duty, sizeof(float) * n), "activity malloc duty");
+    }
+    if (defer_pending_seq) {
+        power_cuda_call(cudaMalloc(&d_prev_density, sizeof(float) * n), "activity malloc prev_density");
+        power_cuda_call(cudaMalloc(&d_prev_duty, sizeof(float) * n), "activity malloc prev_duty");
+    }
+    if (needs_seq_activity_state) {
+        power_cuda_call(cudaMalloc(&d_seq_pin_density, sizeof(float) * n), "activity malloc seq_pin_density");
+        power_cuda_call(cudaMalloc(&d_seq_pin_duty, sizeof(float) * n), "activity malloc seq_pin_duty");
+        power_cuda_call(cudaMalloc(&d_seq_pin_valid, sizeof(uint8_t) * n), "activity malloc seq_pin_valid");
+        power_cuda_call(cudaMalloc(&d_pending_seq, sizeof(int) * num_seqs), "activity malloc pending_seq");
+    }
+    if (needs_activity_propagation) {
+        power_cuda_call(cudaMalloc(&d_active, sizeof(uint32_t) * activity_flag_words), "activity malloc active");
+        power_cuda_call(cudaMalloc(&d_active_level, sizeof(uint8_t) * std::max(1, num_power_levels)), "activity malloc active_level");
+        power_cuda_call(cudaMalloc(&d_visit_active, sizeof(uint8_t) * n), "activity malloc visit_active");
+        power_cuda_call(cudaMalloc(&d_pending_seq_count, sizeof(int)), "activity malloc pending_seq_count");
+    }
+    if (needs_origin) {
+        power_cuda_call(cudaMalloc(&d_origin, sizeof(uint8_t) * n), "activity malloc origin");
+    }
+    if (defer_pending_seq) {
+        power_cuda_call(cudaMalloc(&d_prev_origin, sizeof(uint8_t) * n), "activity malloc prev_origin");
+    }
+    if (needs_density_duty) {
+        power_cuda_call(cudaMemset(d_density, 0, sizeof(float) * n), "activity memset density");
+        power_cuda_call(cudaMemset(d_duty, 0, sizeof(float) * n), "activity memset duty");
+    }
+    if (defer_pending_seq) {
+        power_cuda_call(cudaMemset(d_prev_density, 0, sizeof(float) * n), "activity memset prev_density");
+        power_cuda_call(cudaMemset(d_prev_duty, 0, sizeof(float) * n), "activity memset prev_duty");
+    }
+    if (needs_seq_activity_state) {
+        power_cuda_call(cudaMemset(d_seq_pin_density, 0, sizeof(float) * n), "activity memset seq_pin_density");
+        power_cuda_call(cudaMemset(d_seq_pin_duty, 0, sizeof(float) * n), "activity memset seq_pin_duty");
+        power_cuda_call(cudaMemset(d_seq_pin_valid, 0, sizeof(uint8_t) * n), "activity memset seq_pin_valid");
+        power_cuda_call(cudaMemset(d_pending_seq, 0, sizeof(int) * num_seqs), "activity memset pending_seq");
+    }
+    if (needs_activity_propagation) {
+        power_cuda_call(cudaMemset(d_active, 0, sizeof(uint32_t) * activity_flag_words), "activity memset active");
+        power_cuda_call(cudaMemset(d_active_level, 0, sizeof(uint8_t) * std::max(1, num_power_levels)), "activity memset active_level");
+        power_cuda_call(cudaMemset(d_visit_active, 0, sizeof(uint8_t) * n), "activity memset visit_active");
+        power_cuda_call(cudaMemset(d_pending_seq_count, 0, sizeof(int)), "activity memset pending_seq_count");
+    }
+    if (needs_origin) {
+        power_cuda_call(cudaMemset(d_origin, 0, sizeof(uint8_t) * n), "activity memset origin");
+    }
+    if (defer_pending_seq) {
+        power_cuda_call(cudaMemset(d_prev_origin, 0, sizeof(uint8_t) * n), "activity memset prev_origin");
+    }
+    PowerActivityScratchView activity_scratch(d_density,
+                                               d_duty,
+                                               d_prev_density,
+                                               d_prev_duty,
+                                               d_seq_pin_density,
+                                               d_seq_pin_duty,
+                                               d_origin,
+                                               d_prev_origin,
+                                               d_active,
+                                               d_active_level,
+                                               d_visit_active,
+                                               d_seq_pin_valid,
+                                               d_pending_seq,
+                                               d_pending_seq_count,
+                                               num_power_levels);
     PowerActivityCudaModel* d_activity_model = nullptr;
     PowerActivityScratchView* d_activity_scratch = nullptr;
     power_cuda_call(cudaMalloc(&d_activity_model, sizeof(PowerActivityCudaModel)), "activity malloc model");
@@ -268,10 +319,10 @@ void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
             if (pin < 0 || pin >= n) continue;
             float pin_density = 0.0f;
             float pin_duty = 0.0f;
-            int pin_origin = 0;
+            uint8_t pin_origin = 0;
             cudaMemcpy(&pin_density, d_density + pin, sizeof(float), cudaMemcpyDeviceToHost);
             cudaMemcpy(&pin_duty, d_duty + pin, sizeof(float), cudaMemcpyDeviceToHost);
-            cudaMemcpy(&pin_origin, d_origin + pin, sizeof(int), cudaMemcpyDeviceToHost);
+            cudaMemcpy(&pin_origin, d_origin + pin, sizeof(uint8_t), cudaMemcpyDeviceToHost);
             int seq_count = 0;
             int seq_pending = 0;
             if (d_pin_seq_list_start && d_pin_seq_list && d_pending_seq) {
@@ -294,7 +345,8 @@ void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
             if (first_nonzero) h_trace_first_seen[idx] = 1;
             fprintf(stderr,
                     "[power_activity_trace_cuda] tag=%s pass=%d pending=%d pin_id=%d density=%.10e duty=%.10g origin=%d first_nonzero=%d seq_count=%d seq_pending=%d\n",
-                    tag, pass, pending_count, pin, pin_density, pin_duty, pin_origin,
+                    tag, pass, pending_count, pin, pin_density, pin_duty,
+                    static_cast<int>(pin_origin),
                     first_nonzero ? 1 : 0, seq_count, seq_pending);
         }
     };
@@ -329,9 +381,20 @@ void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
     };
 
     if (d_precomputed_activity) {
-        power_unpack_precomputed_activity_kernel<<<BLOCK_NUMBER(n), BLOCK_SIZE>>>(
-            n, d_precomputed_activity, d_density, d_duty, d_origin);
-        check_power_cuda_error("activity unpack_precomputed");
+        if (d_out && n > 0 && d_out != d_precomputed_activity) {
+            power_cuda_call(cudaMemcpy(d_out, d_precomputed_activity, sizeof(float) * n * 3,
+                                       cudaMemcpyDeviceToDevice),
+                            "activity copy precomputed output");
+        }
+        if (d_density && d_duty && d_origin) {
+            power_unpack_precomputed_activity_kernel<<<BLOCK_NUMBER(n), BLOCK_SIZE>>>(
+                n, d_precomputed_activity, d_density, d_duty, d_origin);
+            check_power_cuda_error("activity unpack_precomputed");
+        } else if (d_density && d_duty) {
+            power_unpack_activity_density_duty_kernel<<<BLOCK_NUMBER(n), BLOCK_SIZE>>>(
+                n, d_precomputed_activity, d_density, d_duty);
+            check_power_cuda_error("activity unpack_precomputed_density_duty");
+        }
         trace_cuda("precomputed", 0, 0);
     } else {
     bool use_frontier = false;
@@ -362,7 +425,8 @@ void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
 
     if (use_frontier) {
         int *d_level_offsets = nullptr, *d_level_queue = nullptr, *d_level_counts = nullptr;
-        int *d_queued = nullptr, *d_overflow = nullptr;
+        uint32_t *d_queued = nullptr;
+        int *d_overflow = nullptr;
         int *d_frontier_pending_seq_list = nullptr, *d_frontier_pending_seq_list_count = nullptr;
         std::vector<int> frontier_level_offsets = level_list_end_cpu;
         int frontier_queue_size = std::max(1, n);
@@ -384,23 +448,22 @@ void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
         cudaMalloc(&d_level_offsets, sizeof(int) * std::max(1, num_power_levels + 1));
         cudaMalloc(&d_level_queue, sizeof(int) * frontier_queue_size);
         cudaMalloc(&d_level_counts, sizeof(int) * std::max(1, num_power_levels));
-        cudaMalloc(&d_queued, sizeof(int) * std::max(1, n));
+        cudaMalloc(&d_queued, sizeof(uint32_t) * activity_flag_words);
         cudaMalloc(&d_overflow, sizeof(int));
         if (num_power_levels + 1 > 0) {
             cudaMemcpy(d_level_offsets, frontier_level_offsets.data(), sizeof(int) * (num_power_levels + 1), cudaMemcpyHostToDevice);
         }
         cudaMemset(d_level_queue, 0, sizeof(int) * frontier_queue_size);
         cudaMemset(d_level_counts, 0, sizeof(int) * std::max(1, num_power_levels));
-        cudaMemset(d_queued, 0, sizeof(int) * std::max(1, n));
+        cudaMemset(d_queued, 0, sizeof(uint32_t) * activity_flag_words);
         cudaMemset(d_overflow, 0, sizeof(int));
-        PowerActivityQueueView activity_queue;
-        activity_queue.level_offsets = d_level_offsets;
-        activity_queue.level_queue = d_level_queue;
-        activity_queue.level_counts = d_level_counts;
-        activity_queue.queued = d_queued;
-        activity_queue.overflow = d_overflow;
-        activity_queue.pending_seq_list = d_frontier_pending_seq_list;
-        activity_queue.pending_seq_list_count = d_frontier_pending_seq_list_count;
+        PowerActivityQueueView activity_queue(d_level_offsets,
+                                              d_level_queue,
+                                              d_level_counts,
+                                              d_queued,
+                                              d_overflow,
+                                              d_frontier_pending_seq_list,
+                                              d_frontier_pending_seq_list_count);
         PowerActivityQueueView* d_activity_queue = nullptr;
         cudaMalloc(&d_activity_queue, sizeof(PowerActivityQueueView));
         cudaMemcpy(d_activity_queue, &activity_queue, sizeof(PowerActivityQueueView), cudaMemcpyHostToDevice);
@@ -481,9 +544,6 @@ void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
         trace_cuda("after_seed", 0, pending_count);
         dump_cuda_pending_seq("after_seed", 0);
 
-        bool defer_pending_seq = false;
-        if (const char* env_defer_pending = std::getenv("XPLACE_POWER_DEFER_PENDING_SEQ"))
-            defer_pending_seq = std::atoi(env_defer_pending) != 0;
         const bool trace_level_progress =
             std::getenv("XPLACE_POWER_TRACE_LEVEL_PROGRESS") != nullptr;
         int trace_level_progress_start_pass = 0;
@@ -572,7 +632,7 @@ void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
             if (defer_pending_seq) {
                 cudaMemcpy(d_prev_density, d_density, sizeof(float) * n, cudaMemcpyDeviceToDevice);
                 cudaMemcpy(d_prev_duty, d_duty, sizeof(float) * n, cudaMemcpyDeviceToDevice);
-                cudaMemcpy(d_prev_origin, d_origin, sizeof(int) * n, cudaMemcpyDeviceToDevice);
+                cudaMemcpy(d_prev_origin, d_origin, sizeof(uint8_t) * n, cudaMemcpyDeviceToDevice);
             }
             int level_visits = 0;
             const int max_level_visits = max_comb_sweeps;
@@ -714,48 +774,71 @@ void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
 
     }
 
-    if (d_out) {
+    auto free_device_ptr = [](auto*& ptr) {
+        if (!ptr) return;
+        cudaFree(ptr);
+        ptr = nullptr;
+    };
+    if (needs_activity_propagation) {
+        free_device_ptr(d_prev_density);
+        free_device_ptr(d_prev_duty);
+        free_device_ptr(d_seq_pin_density);
+        free_device_ptr(d_seq_pin_duty);
+        free_device_ptr(d_prev_origin);
+        free_device_ptr(d_active);
+        free_device_ptr(d_active_level);
+        free_device_ptr(d_visit_active);
+        free_device_ptr(d_seq_pin_valid);
+        free_device_ptr(d_pending_seq);
+        free_device_ptr(d_pending_seq_count);
+    }
+
+    if (d_out && !d_precomputed_activity) {
         power_pack_output_kernel<<<BLOCK_NUMBER(n), BLOCK_SIZE>>>(d_activity_model, d_activity_scratch);
         check_power_cuda_error("activity pack output");
     }
-    if (const char* final_dump = std::getenv("XPLACE_POWER_ACTIVITY_FINAL_DUMP")) {
-        if (final_dump[0] != '\0') {
-            std::vector<float> h_density(std::max(0, n));
-            std::vector<float> h_duty(std::max(0, n));
-            std::vector<int> h_origin(std::max(0, n));
-            std::vector<float> h_slew(std::max(0, n * NUM_ATTR), nanf(""));
-            if (n > 0) {
-                cudaMemcpy(h_density.data(), d_density, sizeof(float) * n, cudaMemcpyDeviceToHost);
-                cudaMemcpy(h_duty.data(), d_duty, sizeof(float) * n, cudaMemcpyDeviceToHost);
-                cudaMemcpy(h_origin.data(), d_origin, sizeof(int) * n, cudaMemcpyDeviceToHost);
-                if (d_pinSlew)
-                    cudaMemcpy(h_slew.data(), d_pinSlew, sizeof(float) * n * NUM_ATTR, cudaMemcpyDeviceToHost);
-            }
-            std::ofstream dump(final_dump);
-            if (dump) {
-                dump << "pin_id,density,duty,origin,slew0,slew1,slew2,slew3,slew_cap\n";
-                for (int pin = 0; pin < n; ++pin) {
-                    float min_rf_slew = 3.4028234663852886e38f;
-                    for (int attr = 0; attr + 1 < NUM_ATTR; attr += 2) {
-                        const float rise = h_slew[pin * NUM_ATTR + attr];
-                        const float fall = h_slew[pin * NUM_ATTR + attr + 1];
-                        if (!std::isfinite(rise) || !std::isfinite(fall)) continue;
-                        const float avg = 0.5f * (rise + fall) * model.config.time_unit;
-                        if (avg > 0.0f && avg < min_rf_slew) min_rf_slew = avg;
-                    }
-                    const float slew_cap = min_rf_slew < 3.4028234663852886e38f
-                        ? 1.0f / min_rf_slew
-                        : 3.4028234663852886e38f;
-                    dump << pin << ',' << h_density[pin] << ',' << h_duty[pin]
-                         << ',' << h_origin[pin]
-                         << ',' << h_slew[pin * NUM_ATTR + 0]
-                         << ',' << h_slew[pin * NUM_ATTR + 1]
-                         << ',' << h_slew[pin * NUM_ATTR + 2]
-                         << ',' << h_slew[pin * NUM_ATTR + 3]
-                         << ',' << slew_cap << '\n';
+    if (needs_final_activity_dump) {
+        const char* final_dump = final_dump_env;
+        std::vector<float> h_density(std::max(0, n));
+        std::vector<float> h_duty(std::max(0, n));
+        std::vector<uint8_t> h_origin(std::max(0, n));
+        std::vector<float> h_slew(std::max(0, n * NUM_ATTR), nanf(""));
+        if (n > 0) {
+            cudaMemcpy(h_density.data(), d_density, sizeof(float) * n, cudaMemcpyDeviceToHost);
+            cudaMemcpy(h_duty.data(), d_duty, sizeof(float) * n, cudaMemcpyDeviceToHost);
+            cudaMemcpy(h_origin.data(), d_origin, sizeof(uint8_t) * n, cudaMemcpyDeviceToHost);
+            if (d_pinSlew)
+                cudaMemcpy(h_slew.data(), d_pinSlew, sizeof(float) * n * NUM_ATTR, cudaMemcpyDeviceToHost);
+        }
+        std::ofstream dump(final_dump);
+        if (dump) {
+            dump << "pin_id,density,duty,origin,slew0,slew1,slew2,slew3,slew_cap\n";
+            for (int pin = 0; pin < n; ++pin) {
+                float min_rf_slew = 3.4028234663852886e38f;
+                for (int attr = 0; attr + 1 < NUM_ATTR; attr += 2) {
+                    const float rise = h_slew[pin * NUM_ATTR + attr];
+                    const float fall = h_slew[pin * NUM_ATTR + attr + 1];
+                    if (!std::isfinite(rise) || !std::isfinite(fall)) continue;
+                    const float avg = 0.5f * (rise + fall) * model.config.time_unit;
+                    if (avg > 0.0f && avg < min_rf_slew) min_rf_slew = avg;
                 }
+                const float slew_cap = min_rf_slew < 3.4028234663852886e38f
+                    ? 1.0f / min_rf_slew
+                    : 3.4028234663852886e38f;
+                dump << pin << ',' << h_density[pin] << ',' << h_duty[pin]
+                     << ',' << static_cast<int>(h_origin[pin])
+                     << ',' << h_slew[pin * NUM_ATTR + 0]
+                     << ',' << h_slew[pin * NUM_ATTR + 1]
+                     << ',' << h_slew[pin * NUM_ATTR + 2]
+                     << ',' << h_slew[pin * NUM_ATTR + 3]
+                     << ',' << slew_cap << '\n';
             }
         }
+    }
+    free_device_ptr(d_origin);
+    if (!needs_inline_internal && !needs_inline_leakage_activity) {
+        free_device_ptr(d_density);
+        free_device_ptr(d_duty);
     }
     if ((d_inst_switching || d_pin_switching) && d_out && d_pin2node_map && d_pinLoad) {
         if (d_inst_switching) cudaMemset(d_inst_switching, 0, sizeof(float) * num_nodes);
@@ -769,50 +852,56 @@ void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
         float* d_denom = nullptr;
         cudaMalloc(&d_denom, sizeof(float) * std::max(1, num_internal_denom_groups));
         cudaMemset(d_denom, 0, sizeof(float) * std::max(1, num_internal_denom_groups));
-        PowerInternalDenomModel denom_model;
-        denom_model.n = n;
-        denom_model.internal_rows = d_internal_rows;
-        denom_model.num_internal_rows = num_internal_rows;
-        denom_model.expr_ops = d_expr_ops;
-        denom_model.expr_start = d_expr_start;
-        denom_model.expr_count = d_expr_count;
-        denom_model.node_port_pin_start = d_node_port_pin_start;
-        denom_model.node_port_pin_list = d_node_port_pin_list;
-        denom_model.denom = d_denom;
+        PowerInternalDenomModel denom_model(n,
+                                            nullptr,
+                                            nullptr,
+                                            nullptr,
+                                            d_internal_rows,
+                                            num_internal_rows,
+                                            d_expr_ops,
+                                            d_expr_start,
+                                            d_expr_count,
+                                            d_node_port_pin_start,
+                                            d_node_port_pin_list,
+                                            d_denom);
         power_internal_denom_fast_kernel<<<BLOCK_NUMBER(num_internal_rows), BLOCK_SIZE>>>(
             denom_model, activity_scratch);
         check_power_cuda_error("activity internal denom fast");
         constexpr int POWER_COMPONENT_EXPR_BLOCK_SIZE = 128;
-        auto power_component_expr_blocks = [](int work_items) {
-            return (work_items + POWER_COMPONENT_EXPR_BLOCK_SIZE - 1) / POWER_COMPONENT_EXPR_BLOCK_SIZE;
-        };
-        power_internal_denom_kernel<<<power_component_expr_blocks(num_internal_rows),
+        const int component_expr_blocks =
+            (num_internal_rows + POWER_COMPONENT_EXPR_BLOCK_SIZE - 1) / POWER_COMPONENT_EXPR_BLOCK_SIZE;
+        power_internal_denom_kernel<<<component_expr_blocks,
                                       POWER_COMPONENT_EXPR_BLOCK_SIZE>>>(
             denom_model, activity_scratch);
         check_power_cuda_error("activity internal denom");
-        PowerInternalContribModel contrib_model;
-        contrib_model.n = n;
-        contrib_model.num_nodes = num_nodes;
-        contrib_model.internal_rows = d_internal_rows;
-        contrib_model.num_internal_rows = num_internal_rows;
-        contrib_model.expr_ops = d_expr_ops;
-        contrib_model.expr_start = d_expr_start;
-        contrib_model.expr_count = d_expr_count;
-        contrib_model.node_port_pin_start = d_node_port_pin_start;
-        contrib_model.node_port_pin_list = d_node_port_pin_list;
-        contrib_model.pinSlew = d_pinSlew;
-        contrib_model.power_clock_slews = d_power_clock_slews;
-        contrib_model.dmp_C1 = d_dmp_C1;
-        contrib_model.dmp_C2 = d_dmp_C2;
-        contrib_model.denom = d_denom;
-        contrib_model.power_allocator = d_power_allocator;
-        contrib_model.cap_unit = cap_unit;
-        contrib_model.inst_internal = d_inst_internal;
-        contrib_model.internal_row_power = d_internal_row_power;
+        PowerInternalContribModel contrib_model(n,
+                                                num_nodes,
+                                                nullptr,
+                                                nullptr,
+                                                nullptr,
+                                                d_internal_rows,
+                                                num_internal_rows,
+                                                d_expr_ops,
+                                                d_expr_start,
+                                                d_expr_count,
+                                                d_node_port_pin_start,
+                                                d_node_port_pin_list,
+                                                d_pinSlew,
+                                                d_pin_clock_slews,
+                                                d_power_clock_slew_pins,
+                                                num_power_clock_slew_pins,
+                                                model.graph.power_clock_slew_fallback,
+                                                d_dmp_C1,
+                                                d_dmp_C2,
+                                                d_denom,
+                                                d_power_allocator,
+                                                cap_unit,
+                                                d_inst_internal,
+                                                d_internal_row_power);
         power_internal_contrib_fast_kernel<<<BLOCK_NUMBER(num_internal_rows), BLOCK_SIZE>>>(
             contrib_model, activity_scratch);
         check_power_cuda_error("activity internal contrib fast");
-        power_internal_contrib_kernel<<<power_component_expr_blocks(num_internal_rows),
+        power_internal_contrib_kernel<<<component_expr_blocks,
                                         POWER_COMPONENT_EXPR_BLOCK_SIZE>>>(
             contrib_model, activity_scratch);
         check_power_cuda_error("activity internal contrib");
@@ -831,40 +920,40 @@ void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
         cudaMemset(d_group_cond_duty_sum, 0, sizeof(float) * num_leakage_groups);
         cudaMemset(d_group_cond_count, 0, sizeof(int) * num_leakage_groups);
         if (d_leakage_rows && num_leakage_rows > 0) {
-            PowerLeakageRowsModel rows_model;
-            rows_model.n = n;
-            rows_model.leakage_rows = d_leakage_rows;
-            rows_model.num_leakage_rows = num_leakage_rows;
-            rows_model.expr_ops = d_expr_ops;
-            rows_model.expr_start = d_expr_start;
-            rows_model.expr_count = d_expr_count;
-            rows_model.node_port_pin_start = d_node_port_pin_start;
-            rows_model.node_port_pin_list = d_node_port_pin_list;
-            rows_model.group_cond_leakage = d_group_cond_leakage;
-            rows_model.group_cond_duty_sum = d_group_cond_duty_sum;
-            rows_model.group_cond_count = d_group_cond_count;
-            rows_model.leakage_row_power = d_leakage_row_power;
+            PowerLeakageRowsModel rows_model(n,
+                                             nullptr,
+                                             nullptr,
+                                             nullptr,
+                                             d_leakage_rows,
+                                             num_leakage_rows,
+                                             d_expr_ops,
+                                             d_expr_start,
+                                             d_expr_count,
+                                             d_node_port_pin_start,
+                                             d_node_port_pin_list,
+                                             d_group_cond_leakage,
+                                             d_group_cond_duty_sum,
+                                             d_group_cond_count,
+                                             d_leakage_row_power);
             power_leakage_row_fast_kernel<<<BLOCK_NUMBER(num_leakage_rows), BLOCK_SIZE>>>(
                 rows_model);
             check_power_cuda_error("activity leakage rows fast");
             constexpr int POWER_LEAKAGE_EXPR_BLOCK_SIZE = 128;
-            auto power_leakage_expr_blocks = [](int work_items) {
-                return (work_items + POWER_LEAKAGE_EXPR_BLOCK_SIZE - 1) / POWER_LEAKAGE_EXPR_BLOCK_SIZE;
-            };
-            power_leakage_row_kernel<<<power_leakage_expr_blocks(num_leakage_rows),
+            const int leakage_expr_blocks =
+                (num_leakage_rows + POWER_LEAKAGE_EXPR_BLOCK_SIZE - 1) / POWER_LEAKAGE_EXPR_BLOCK_SIZE;
+            power_leakage_row_kernel<<<leakage_expr_blocks,
                                        POWER_LEAKAGE_EXPR_BLOCK_SIZE>>>(
                 rows_model, activity_scratch);
             check_power_cuda_error("activity leakage rows");
         }
         if (d_inst_leakage) {
-            PowerLeakageSummaryModel summary_model;
-            summary_model.leakage_groups = d_leakage_groups;
-            summary_model.num_leakage_groups = num_leakage_groups;
-            summary_model.group_cond_leakage = d_group_cond_leakage;
-            summary_model.group_cond_duty_sum = d_group_cond_duty_sum;
-            summary_model.group_cond_count = d_group_cond_count;
-            summary_model.num_nodes = num_nodes;
-            summary_model.inst_leakage = d_inst_leakage;
+            PowerLeakageSummaryModel summary_model(d_leakage_groups,
+                                                   num_leakage_groups,
+                                                   d_group_cond_leakage,
+                                                   d_group_cond_duty_sum,
+                                                   d_group_cond_count,
+                                                   num_nodes,
+                                                   d_inst_leakage);
             power_leakage_summary_kernel<<<BLOCK_NUMBER(num_leakage_groups), BLOCK_SIZE>>>(summary_model);
             check_power_cuda_error("activity leakage summary");
         }
@@ -877,12 +966,12 @@ void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
     cudaFree(d_activity_scratch);
     cudaFree(d_density);
     cudaFree(d_duty);
-    cudaFree(d_prev_density);
-    cudaFree(d_prev_duty);
+    if (d_prev_density) cudaFree(d_prev_density);
+    if (d_prev_duty) cudaFree(d_prev_duty);
     cudaFree(d_seq_pin_density);
     cudaFree(d_seq_pin_duty);
     cudaFree(d_origin);
-    cudaFree(d_prev_origin);
+    if (d_prev_origin) cudaFree(d_prev_origin);
     cudaFree(d_active);
     cudaFree(d_active_level);
     cudaFree(d_visit_active);
