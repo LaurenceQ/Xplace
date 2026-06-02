@@ -6,9 +6,20 @@
 #include "common/db/Net.h"
 #include "common/db/Pin.h"
 #include "common/db/Region.h"
+#include "common/db/Setting.h"
 #include "common/db/Row.h"
 #include "common/db/SNet.h"
 #include "common/db/Via.h"
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 
 namespace gp {
 
@@ -485,14 +496,30 @@ void GPDatabase::transferOrient() {
         };
 
     // create a vector to restore statistics
-    int numOrientTypes = 9;  // 0:N, 1:W, 2:S, 3:E, 4:FN, 5:FW, 6:FS, 7:FE, -1:NONE
-    std::vector<int> orient2cnt(numOrientTypes, 0);
+    constexpr int numOrientTypes = 9;  // 0:N, 1:W, 2:S, 3:E, 4:FN, 5:FW, 6:FS, 7:FE, -1:NONE
+    int orient_threads = std::max(1, db::setting.numThreads);
+    if (const char* thread_env = std::getenv("XPLACE_GPDB_ORIENT_THREADS")) {
+        const int env_threads = std::atoi(thread_env);
+        if (env_threads > 0) {
+            orient_threads = env_threads;
+        }
+    }
+    std::vector<std::array<int, numOrientTypes>> thread_orient_counts(orient_threads);
+    for (auto& counts : thread_orient_counts) {
+        counts.fill(0);
+    }
 
-    for (auto& node : nodes) {
+#pragma omp parallel for num_threads(orient_threads) schedule(static)
+    for (int node_idx = 0; node_idx < static_cast<int>(nodes.size()); ++node_idx) {
+        int tid = 0;
+#ifdef _OPENMP
+        tid = omp_get_thread_num();
+#endif
+        auto& node = nodes[node_idx];
         orient_type srcOrient = node.getOrient();
         if (srcOrient != 0 && srcOrient != -1) {
             // srcOrient is not "N" or "NONE"
-            orient2cnt[srcOrient]++;
+            thread_orient_counts[tid][srcOrient]++;
             auto [srcDegree, srcFlip] = getOrientDegreeFlip(srcOrient);
             auto [dstDegree, dstFlip] = getOrientDegreeFlip(0);  // dst: N
 
@@ -532,6 +559,13 @@ void GPDatabase::transferOrient() {
         }
     }
 
+    std::vector<int> orient2cnt(numOrientTypes, 0);
+    for (const auto& counts : thread_orient_counts) {
+        for (int orient_idx = 0; orient_idx < numOrientTypes; ++orient_idx) {
+            orient2cnt[orient_idx] += counts[orient_idx];
+        }
+    }
+
     logger.info("=== Transfer Node Orient Statistics ===");
     for (int i = 0; i < orient2cnt.size(); i++) {
         int count = orient2cnt[i];
@@ -550,17 +584,45 @@ void GPDatabase::transferOrient() {
 }
 
 bool GPDatabase::setup() {
+    const char* profile_env = std::getenv("XPLACE_IO_PROFILE");
+    const bool profile = profile_env != nullptr && profile_env[0] != '\0' &&
+                         profile_env[0] != '0' &&
+                         profile_env[0] != 'f' && profile_env[0] != 'F' &&
+                         profile_env[0] != 'n' && profile_env[0] != 'N';
+    auto profile_start = std::chrono::steady_clock::now();
+    auto profile_last = profile_start;
+    auto profile_log = [&](const char* phase) {
+        if (!profile) {
+            return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        const double elapsed = std::chrono::duration<double>(now - profile_last).count();
+        const double total = std::chrono::duration<double>(now - profile_start).count();
+        std::fprintf(stdout, "[XPLACE_GPDB_PROFILE] phase=%s elapsed=%.3f total=%.3f\n",
+                     phase, elapsed, total);
+        std::fflush(stdout);
+        profile_last = now;
+    };
+
     if (db::setting.random_place) {
         setup_random_place();
         logger.info("random place db done");
+        profile_log("setup_random_place");
     }
     setupNum();
+    profile_log("setup_num");
     setupRegions();
+    profile_log("setup_regions");
     setupNodes();
+    profile_log("setup_nodes");
     setupNets();
+    profile_log("setup_nets");
     setupIndexMap();
+    profile_log("setup_index_map");
     setupCheckVar();
+    profile_log("setup_check_var");
     transferOrient();
+    profile_log("transfer_orient");
     logger.info("Finish initializing global placement database");
     return true;
 }
