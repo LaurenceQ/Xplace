@@ -282,6 +282,9 @@ bool Database::readDEF(const std::string& file) {
     int res = defrRead(fp, file.c_str(), (void*)this, 1);
     if (res) {
         logger.error("Error in reading DEF");
+        defrReleaseNResetMemory();
+        defrUnsetCallbacks();
+        fclose(fp);
         return false;
     }
     defrReleaseNResetMemory();
