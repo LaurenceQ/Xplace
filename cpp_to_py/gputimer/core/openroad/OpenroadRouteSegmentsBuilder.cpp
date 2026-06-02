@@ -1,5 +1,9 @@
 #include "gputimer/core/openroad/OpenroadRcInternal.h"
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 namespace gt {
 
 using namespace openroad_rc;
@@ -280,102 +284,74 @@ HostRcGraph GPUTimer::build_openroad_route_segments_rc(const std::string& file) 
 
     HostRcGraph graph;
     graph.includes_pin_caps.assign(num_nets, 0);
-    graph.net2node_start.emplace_back(0);
-    graph.net2edge_start.emplace_back(0);
 
-    double final_pinloc_seconds = 0.0;
-    double final_attach_seconds = 0.0;
-    double final_reorder_seconds = 0.0;
-    double final_repair_seconds = 0.0;
-    double final_prune_seconds = 0.0;
-    double final_append_seconds = 0.0;
-    int repair_adjacency_nets = 0;
-    int repair_scan_nets = 0;
-    long long repair_node_edge_product_max = 0;
-    int progress_interval = 0;
-    if (profile) {
-        progress_interval = 10000;
-        if (const char* interval_env = std::getenv("GPUTIMER_ROUTE_SEG_PROFILE_INTERVAL")) {
-            const int parsed_interval = std::atoi(interval_env);
-            if (parsed_interval > 0) {
-                progress_interval = parsed_interval;
-            }
+    struct RouteFinalizeThreadStats {
+        OpenroadRouteSegmentsBuildStats stats;
+        double pinloc_seconds = 0.0;
+        double attach_seconds = 0.0;
+        double reorder_seconds = 0.0;
+        double repair_seconds = 0.0;
+        double prune_seconds = 0.0;
+        int repair_adjacency_nets = 0;
+        int repair_scan_nets = 0;
+        long long repair_node_edge_product_max = 0;
+    };
+
+    int finalize_threads = std::max(1, num_threads);
+    if (const char* thread_env = std::getenv("GPUTIMER_ROUTE_SEG_FINALIZE_THREADS")) {
+        const int env_threads = std::atoi(thread_env);
+        if (env_threads > 0) {
+            finalize_threads = env_threads;
         }
     }
+    if (!debug_pin_net.empty()) {
+        finalize_threads = 1;
+    }
 
-    for (int net_idx = 0; net_idx < num_nets; ++net_idx) {
+    if (profile) {
+        std::fprintf(stderr,
+                     "[ROUTE_SEG_PROFILE] phase=finalize_parallel_start elapsed=%.3f threads=%d\n",
+                     seconds_since(build_start),
+                     finalize_threads);
+        std::fflush(stderr);
+    }
+
+    std::vector<int> net_node_count(num_nets, 0);
+    std::vector<int> net_edge_count(num_nets, 0);
+    std::vector<RouteFinalizeThreadStats> finalize_stats(finalize_threads);
+    const auto finalize_start = std::chrono::steady_clock::now();
+
+    auto finalize_one_net = [&](int net_idx, RouteFinalizeThreadStats& thread_stats) {
         auto phase_start = std::chrono::steady_clock::now();
-        LocalSpefNetRc local;
-        if (local_nets[net_idx]) {
-            local = std::move(*local_nets[net_idx]);
-        }
+        OpenroadRouteSegmentsBuildStats& local_stats = thread_stats.stats;
         const int pin_begin = flat_net2pin_start_map[net_idx];
         const int pin_end = flat_net2pin_start_map[net_idx + 1];
         const int fanout = pin_end - pin_begin;
         const int driver_pin = pin_begin < pin_end ? flat_net2pin_map[pin_begin] : -1;
+        const bool net_parsed = parsed_net[net_idx] != 0;
 
-        if (profile &&
-            (net_idx % progress_interval == 0 ||
-             fanout > 10000 ||
-             local.node2pin.size() > 10000 ||
-             local.edge_from.size() > 10000)) {
-            std::fprintf(stderr,
-                         "[ROUTE_SEG_PROFILE] phase=finalize_net_start elapsed=%.3f net=%d/%d name=%s parsed=%d fanout=%d local_nodes=%zu local_edges=%zu\n",
-                         seconds_since(build_start),
-                         net_idx,
-                         num_nets,
-                         (net_idx >= 0 && net_idx < static_cast<int>(gtdb.net_names.size()))
-                             ? gtdb.net_names[net_idx].c_str()
-
-                             : "<bad>",
-                         parsed_net[net_idx] ? 1 : 0,
-                         fanout,
-                         local.node2pin.size(),
-                         local.edge_from.size());
-            std::fflush(stderr);
+        if (!net_parsed) {
+            local_stats.missing_nets++;
         }
 
-        if (!parsed_net[net_idx]) {
-            stats.missing_nets++;
+        if (!net_parsed && fanout <= 1) {
+            local_stats.skipped_missing_unconnected_nets++;
+            local_stats.skipped_missing_unconnected_pins += std::max(fanout, 0);
+            local_nets[net_idx].reset();
+            return;
         }
 
-        if (!parsed_net[net_idx] && fanout <= 1) {
-            stats.skipped_missing_unconnected_nets++;
-            stats.skipped_missing_unconnected_pins += std::max(fanout, 0);
-            graph.net2node_start.emplace_back(graph.num_nodes);
-            graph.net2edge_start.emplace_back(graph.num_edges);
-            final_append_seconds += seconds_since(phase_start);
-            if (progress_interval > 0 && (net_idx + 1) % progress_interval == 0) {
-                std::fprintf(stderr,
-                             "[ROUTE_SEG_PROFILE] phase=finalize_progress elapsed=%.3f nets=%d/%d nodes=%d edges=%d pinloc=%.3f attach=%.3f reorder=%.3f repair=%.3f prune=%.3f append=%.3f adj_nets=%d scan_nets=%d max_node_edge_product=%lld skipped_missing_high_fanout_nets=%d skipped_missing_high_fanout_pins=%lld skipped_missing_unconnected_nets=%d skipped_missing_unconnected_pins=%lld\n",
-                             seconds_since(build_start),
-                             net_idx + 1,
-                             num_nets,
-                             graph.num_nodes,
-                             graph.num_edges,
-                             final_pinloc_seconds,
-                             final_attach_seconds,
-                             final_reorder_seconds,
-                             final_repair_seconds,
-                             final_prune_seconds,
-                             final_append_seconds,
-                             repair_adjacency_nets,
-                             repair_scan_nets,
-                             repair_node_edge_product_max,
-                             stats.skipped_missing_high_fanout_nets,
-                             stats.skipped_missing_high_fanout_pins,
-                             stats.skipped_missing_unconnected_nets,
-                             stats.skipped_missing_unconnected_pins);
-                std::fflush(stderr);
+        auto ensure_local = [&]() -> LocalSpefNetRc& {
+            if (!local_nets[net_idx]) {
+                local_nets[net_idx] = std::make_unique<LocalSpefNetRc>();
             }
-            continue;
-        }
+            return *local_nets[net_idx];
+        };
+        LocalSpefNetRc& local = ensure_local();
 
-        if (!parsed_net[net_idx] &&
-            missing_high_fanout_skip > 0 &&
-            fanout > missing_high_fanout_skip) {
-            stats.skipped_missing_high_fanout_nets++;
-            stats.skipped_missing_high_fanout_pins += fanout;
+        if (!net_parsed && missing_high_fanout_skip > 0 && fanout > missing_high_fanout_skip) {
+            local_stats.skipped_missing_high_fanout_nets++;
+            local_stats.skipped_missing_high_fanout_pins += fanout;
             if (driver_pin >= 0) {
                 const int driver_node = append_pin_node(local, driver_pin, gtdb.pin_names, keep_route_node_names);
                 for (int pin_pos = pin_begin; pin_pos < pin_end; ++pin_pos) {
@@ -391,47 +367,9 @@ HostRcGraph GPUTimer::build_openroad_route_segments_rc(const std::string& file) 
                     }
                 }
             }
-            for (std::size_t edge = 0; edge < local.edge_from.size(); ++edge) {
-                graph.edge_from.emplace_back(graph.num_nodes + local.edge_from[edge]);
-                graph.edge_to.emplace_back(graph.num_nodes + local.edge_to[edge]);
-                graph.edge_res.emplace_back(local.edge_res[edge]);
-                graph.num_edges++;
-            }
-            for (int node = 0; node < static_cast<int>(local.node2pin.size()); ++node) {
-                graph.node2pin.emplace_back(local.node2pin[node]);
-                if (keep_route_node_names) {
-                    graph.node_names.emplace_back(local.node_names[node]);
-                }
-                for (int attr = 0; attr < NUM_ATTR; ++attr) {
-                    graph.node_cap.emplace_back(local.node_cap[node * NUM_ATTR + attr]);
-                }
-            }
-            graph.num_nodes += static_cast<int>(local.node2pin.size());
-            graph.net2node_start.emplace_back(graph.num_nodes);
-            graph.net2edge_start.emplace_back(graph.num_edges);
-            final_append_seconds += seconds_since(phase_start);
-            if (progress_interval > 0 && (net_idx + 1) % progress_interval == 0) {
-                std::fprintf(stderr,
-                             "[ROUTE_SEG_PROFILE] phase=finalize_progress elapsed=%.3f nets=%d/%d nodes=%d edges=%d pinloc=%.3f attach=%.3f reorder=%.3f repair=%.3f prune=%.3f append=%.3f adj_nets=%d scan_nets=%d max_node_edge_product=%lld skipped_missing_high_fanout_nets=%d skipped_missing_high_fanout_pins=%lld\n",
-                             seconds_since(build_start),
-                             net_idx + 1,
-                             num_nets,
-                             graph.num_nodes,
-                             graph.num_edges,
-                             final_pinloc_seconds,
-                             final_attach_seconds,
-                             final_reorder_seconds,
-                             final_repair_seconds,
-                             final_prune_seconds,
-                             final_append_seconds,
-                             repair_adjacency_nets,
-                             repair_scan_nets,
-                             repair_node_edge_product_max,
-                             stats.skipped_missing_high_fanout_nets,
-                             stats.skipped_missing_high_fanout_pins);
-                std::fflush(stderr);
-            }
-            continue;
+            net_node_count[net_idx] = static_cast<int>(local.node2pin.size());
+            net_edge_count[net_idx] = static_cast<int>(local.edge_from.size());
+            return;
         }
 
         int min_route_layer = std::numeric_limits<int>::max();
@@ -485,7 +423,7 @@ HostRcGraph GPUTimer::build_openroad_route_segments_rc(const std::string& file) 
                              loc.conn_layer);
             }
         }
-        final_pinloc_seconds += seconds_since(phase_start);
+        thread_stats.pinloc_seconds += seconds_since(phase_start);
         phase_start = std::chrono::steady_clock::now();
 
         if (local.node2pin.empty() && driver_pin >= 0) {
@@ -493,6 +431,7 @@ HostRcGraph GPUTimer::build_openroad_route_segments_rc(const std::string& file) 
         }
 
         std::unordered_set<int> present_pins;
+        present_pins.reserve(local.node2pin.size() + std::max(fanout, 0));
         for (int pin : local.node2pin) {
             if (pin >= 0) {
                 present_pins.insert(pin);
@@ -533,10 +472,10 @@ HostRcGraph GPUTimer::build_openroad_route_segments_rc(const std::string& file) 
                 }
             }
             if (route_node < 0 && pin_node > 0) {
-                if (parsed_net[net_idx]) {
-                    stats.missing_net_pins++;
+                if (net_parsed) {
+                    local_stats.missing_net_pins++;
                 } else {
-                    stats.fallback_net_pins++;
+                    local_stats.fallback_net_pins++;
                 }
             }
 
@@ -559,17 +498,16 @@ HostRcGraph GPUTimer::build_openroad_route_segments_rc(const std::string& file) 
                     const float cap = (rc.cap_f_per_um * length_um) / gtdb.cap_unit;
                     add_attr_cap(local.node_cap, pin_node, cap * 0.5f);
                     add_attr_cap(local.node_cap, route_node, cap * 0.5f);
-                    stats.pin_stub_edges++;
-                } else if (parsed_net[net_idx]) {
-                    stats.missing_net_pins++;
+                    local_stats.pin_stub_edges++;
+                } else if (net_parsed) {
+                    local_stats.missing_net_pins++;
                 } else {
-                    stats.fallback_net_pins++;
+                    local_stats.fallback_net_pins++;
                 }
                 add_edge(local, pin_node, route_node, edge_res);
             }
-
         }
-        final_attach_seconds += seconds_since(phase_start);
+        thread_stats.attach_seconds += seconds_since(phase_start);
         phase_start = std::chrono::steady_clock::now();
 
         int driver_node = -1;
@@ -581,10 +519,10 @@ HostRcGraph GPUTimer::build_openroad_route_segments_rc(const std::string& file) 
         }
         if (driver_pin >= 0 && driver_node < 0) {
             driver_node = append_pin_node(local, driver_pin, gtdb.pin_names, keep_route_node_names);
-            stats.missing_driver_nodes++;
+            local_stats.missing_driver_nodes++;
         }
         reorder_root(local, driver_node);
-        final_reorder_seconds += seconds_since(phase_start);
+        thread_stats.reorder_seconds += seconds_since(phase_start);
         phase_start = std::chrono::steady_clock::now();
 
         if (!local.node2pin.empty()) {
@@ -596,11 +534,11 @@ HostRcGraph GPUTimer::build_openroad_route_segments_rc(const std::string& file) 
             const long long node_edge_product =
                 static_cast<long long>(local.node2pin.size()) *
                 static_cast<long long>(local.edge_from.size());
-            repair_node_edge_product_max = std::max(repair_node_edge_product_max,
-                                                    node_edge_product);
+            thread_stats.repair_node_edge_product_max =
+                std::max(thread_stats.repair_node_edge_product_max, node_edge_product);
 
             if (node_edge_product > 4096) {
-                ++repair_adjacency_nets;
+                ++thread_stats.repair_adjacency_nets;
                 std::vector<std::vector<int>> adjacency(local.node2pin.size());
                 for (std::size_t edge = 0; edge < local.edge_from.size(); ++edge) {
                     const int from = local.edge_from[edge];
@@ -622,7 +560,7 @@ HostRcGraph GPUTimer::build_openroad_route_segments_rc(const std::string& file) 
                     }
                 }
             } else {
-                ++repair_scan_nets;
+                ++thread_stats.repair_scan_nets;
                 for (std::size_t cursor = 0; cursor < stack.size(); ++cursor) {
                     const int node = stack[cursor];
                     for (std::size_t edge = 0; edge < local.edge_from.size(); ++edge) {
@@ -641,60 +579,139 @@ HostRcGraph GPUTimer::build_openroad_route_segments_rc(const std::string& file) 
                     local.edge_from.emplace_back(0);
                     local.edge_to.emplace_back(node);
                     local.edge_res.emplace_back(0.0f);
-                    stats.repaired_edges++;
+                    local_stats.repaired_edges++;
                 }
             }
         }
-        final_repair_seconds += seconds_since(phase_start);
+        thread_stats.repair_seconds += seconds_since(phase_start);
         phase_start = std::chrono::steady_clock::now();
 
         const int skipped_loop_edges = prune_to_rooted_tree(local);
         if (skipped_loop_edges > 0) {
-            stats.skipped_loop_edges += skipped_loop_edges;
+            local_stats.skipped_loop_edges += skipped_loop_edges;
         }
-        final_prune_seconds += seconds_since(phase_start);
-        phase_start = std::chrono::steady_clock::now();
+        thread_stats.prune_seconds += seconds_since(phase_start);
 
-        for (std::size_t edge = 0; edge < local.edge_from.size(); ++edge) {
-            graph.edge_from.emplace_back(graph.num_nodes + local.edge_from[edge]);
-            graph.edge_to.emplace_back(graph.num_nodes + local.edge_to[edge]);
-            graph.edge_res.emplace_back(local.edge_res[edge]);
-            graph.num_edges++;
+        net_node_count[net_idx] = static_cast<int>(local.node2pin.size());
+        net_edge_count[net_idx] = static_cast<int>(local.edge_from.size());
+    };
+
+#pragma omp parallel for num_threads(finalize_threads) schedule(dynamic, 1024)
+    for (int net_idx = 0; net_idx < num_nets; ++net_idx) {
+        int tid = 0;
+#ifdef _OPENMP
+        tid = omp_get_thread_num();
+#endif
+        finalize_one_net(net_idx, finalize_stats[tid]);
+    }
+
+    double final_pinloc_seconds = 0.0;
+    double final_attach_seconds = 0.0;
+    double final_reorder_seconds = 0.0;
+    double final_repair_seconds = 0.0;
+    double final_prune_seconds = 0.0;
+    double final_append_seconds = 0.0;
+    int repair_adjacency_nets = 0;
+    int repair_scan_nets = 0;
+    long long repair_node_edge_product_max = 0;
+    for (const RouteFinalizeThreadStats& thread_stats : finalize_stats) {
+        const OpenroadRouteSegmentsBuildStats& local_stats = thread_stats.stats;
+        stats.missing_nets += local_stats.missing_nets;
+        stats.missing_driver_nodes += local_stats.missing_driver_nodes;
+        stats.missing_net_pins += local_stats.missing_net_pins;
+        stats.fallback_net_pins += local_stats.fallback_net_pins;
+        stats.pin_stub_edges += local_stats.pin_stub_edges;
+        stats.skipped_missing_unconnected_nets += local_stats.skipped_missing_unconnected_nets;
+        stats.skipped_missing_unconnected_pins += local_stats.skipped_missing_unconnected_pins;
+        stats.skipped_missing_high_fanout_nets += local_stats.skipped_missing_high_fanout_nets;
+        stats.skipped_missing_high_fanout_pins += local_stats.skipped_missing_high_fanout_pins;
+        stats.repaired_edges += local_stats.repaired_edges;
+        stats.skipped_loop_edges += local_stats.skipped_loop_edges;
+        final_pinloc_seconds += thread_stats.pinloc_seconds;
+        final_attach_seconds += thread_stats.attach_seconds;
+        final_reorder_seconds += thread_stats.reorder_seconds;
+        final_repair_seconds += thread_stats.repair_seconds;
+        final_prune_seconds += thread_stats.prune_seconds;
+        repair_adjacency_nets += thread_stats.repair_adjacency_nets;
+        repair_scan_nets += thread_stats.repair_scan_nets;
+        repair_node_edge_product_max = std::max(repair_node_edge_product_max,
+                                                thread_stats.repair_node_edge_product_max);
+    }
+
+    const double finalize_wall_seconds = seconds_since(finalize_start);
+    if (profile) {
+        std::fprintf(stderr,
+                     "[ROUTE_SEG_PROFILE] phase=finalize_parallel_done elapsed=%.3f wall=%.3f pinloc_work=%.3f attach_work=%.3f reorder_work=%.3f repair_work=%.3f prune_work=%.3f adj_nets=%d scan_nets=%d max_node_edge_product=%lld\n",
+                     seconds_since(build_start),
+                     finalize_wall_seconds,
+                     final_pinloc_seconds,
+                     final_attach_seconds,
+                     final_reorder_seconds,
+                     final_repair_seconds,
+                     final_prune_seconds,
+                     repair_adjacency_nets,
+                     repair_scan_nets,
+                     repair_node_edge_product_max);
+        std::fflush(stderr);
+    }
+
+    graph.net2node_start.resize(static_cast<std::size_t>(num_nets) + 1, 0);
+    graph.net2edge_start.resize(static_cast<std::size_t>(num_nets) + 1, 0);
+    long long total_nodes = 0;
+    long long total_edges = 0;
+    for (int net_idx = 0; net_idx < num_nets; ++net_idx) {
+        total_nodes += net_node_count[net_idx];
+        total_edges += net_edge_count[net_idx];
+        if (total_nodes > std::numeric_limits<int>::max() ||
+            total_edges > std::numeric_limits<int>::max()) {
+            throw std::runtime_error("OpenROAD route-segment RC graph exceeds int indexing capacity.");
         }
-        for (int node = 0; node < static_cast<int>(local.node2pin.size()); ++node) {
-            graph.node2pin.emplace_back(local.node2pin[node]);
+        graph.net2node_start[net_idx + 1] = static_cast<int>(total_nodes);
+        graph.net2edge_start[net_idx + 1] = static_cast<int>(total_edges);
+    }
+    graph.num_nodes = static_cast<int>(total_nodes);
+    graph.num_edges = static_cast<int>(total_edges);
+
+    const auto materialize_start = std::chrono::steady_clock::now();
+    graph.edge_from.reserve(static_cast<std::size_t>(graph.num_edges));
+    graph.edge_to.reserve(static_cast<std::size_t>(graph.num_edges));
+    graph.edge_res.reserve(static_cast<std::size_t>(graph.num_edges));
+    graph.node2pin.reserve(static_cast<std::size_t>(graph.num_nodes));
+    graph.node_cap.reserve(static_cast<std::size_t>(graph.num_nodes) * NUM_ATTR);
+    if (keep_route_node_names) {
+        graph.node_names.reserve(static_cast<std::size_t>(graph.num_nodes));
+    }
+
+    for (int net_idx = 0; net_idx < num_nets; ++net_idx) {
+        LocalSpefNetRc* local = local_nets[net_idx].get();
+        if (local == nullptr) {
+            continue;
+        }
+        const int node_base = graph.net2node_start[net_idx];
+        for (std::size_t edge = 0; edge < local->edge_from.size(); ++edge) {
+            graph.edge_from.emplace_back(node_base + local->edge_from[edge]);
+            graph.edge_to.emplace_back(node_base + local->edge_to[edge]);
+            graph.edge_res.emplace_back(local->edge_res[edge]);
+        }
+        for (int node = 0; node < static_cast<int>(local->node2pin.size()); ++node) {
+            graph.node2pin.emplace_back(local->node2pin[node]);
             if (keep_route_node_names) {
-                graph.node_names.emplace_back(local.node_names[node]);
+                if (node < static_cast<int>(local->node_names.size())) {
+                    graph.node_names.emplace_back(std::move(local->node_names[node]));
+                } else {
+                    graph.node_names.emplace_back("");
+                }
             }
             for (int attr = 0; attr < NUM_ATTR; ++attr) {
-                graph.node_cap.emplace_back(local.node_cap[node * NUM_ATTR + attr]);
+                graph.node_cap.emplace_back(local->node_cap[node * NUM_ATTR + attr]);
             }
         }
-        graph.num_nodes += static_cast<int>(local.node2pin.size());
-        graph.net2node_start.emplace_back(graph.num_nodes);
-        graph.net2edge_start.emplace_back(graph.num_edges);
-        final_append_seconds += seconds_since(phase_start);
-
-        if (progress_interval > 0 && (net_idx + 1) % progress_interval == 0) {
-            std::fprintf(stderr,
-                         "[ROUTE_SEG_PROFILE] phase=finalize_progress elapsed=%.3f nets=%d/%d nodes=%d edges=%d pinloc=%.3f attach=%.3f reorder=%.3f repair=%.3f prune=%.3f append=%.3f adj_nets=%d scan_nets=%d max_node_edge_product=%lld\n",
-                         seconds_since(build_start),
-                         net_idx + 1,
-                         num_nets,
-                         graph.num_nodes,
-                         graph.num_edges,
-                         final_pinloc_seconds,
-                         final_attach_seconds,
-                         final_reorder_seconds,
-                         final_repair_seconds,
-                         final_prune_seconds,
-                         final_append_seconds,
-                         repair_adjacency_nets,
-                         repair_scan_nets,
-                         repair_node_edge_product_max);
-            std::fflush(stderr);
-        }
+        local_nets[net_idx].reset();
+        route_node_maps[net_idx].reset();
     }
+    local_nets.clear();
+    route_node_maps.clear();
+    final_append_seconds = seconds_since(materialize_start);
 
     if (profile) {
         std::fprintf(stderr,
