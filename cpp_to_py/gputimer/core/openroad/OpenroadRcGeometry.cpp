@@ -1,5 +1,9 @@
 #include "gputimer/core/openroad/OpenroadRcInternal.h"
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 namespace gt {
 namespace openroad_rc {
 
@@ -169,32 +173,78 @@ int infer_openroad_grid_origin_from_first(int first_coord,
 OpenroadInferredGrid infer_openroad_route_grid(
     const std::vector<std::unique_ptr<LocalSpefNetRc>>& local_nets,
     const db::Database& rawdb,
-    int fallback_tile_size)
+    int fallback_tile_size,
+    int threads)
 {
+    struct GridThreadStats {
+        bool have_x = false;
+        bool have_y = false;
+        int first_x = 0;
+        int first_y = 0;
+        int x_step = 0;
+        int y_step = 0;
+    };
+
+    const int worker_count = std::max(1, threads);
+    std::vector<GridThreadStats> thread_stats(worker_count);
+
+#pragma omp parallel for num_threads(worker_count) schedule(static)
+    for (int tid = 0; tid < worker_count; ++tid) {
+        GridThreadStats& stats = thread_stats[tid];
+        const std::size_t net_begin =
+            (local_nets.size() * static_cast<std::size_t>(tid)) / static_cast<std::size_t>(worker_count);
+        const std::size_t net_end =
+            (local_nets.size() * static_cast<std::size_t>(tid + 1)) / static_cast<std::size_t>(worker_count);
+        for (std::size_t net_idx = net_begin; net_idx < net_end; ++net_idx) {
+            const auto& local_ptr = local_nets[net_idx];
+            if (!local_ptr) {
+                continue;
+            }
+            for (const OpenroadRoutePt& pt : local_ptr->route_points) {
+                if (!pt.valid) {
+                    continue;
+                }
+                if (!stats.have_x) {
+                    stats.have_x = true;
+                    stats.first_x = pt.x;
+                } else {
+                    stats.x_step = std::gcd(stats.x_step, std::abs(pt.x - stats.first_x));
+                }
+                if (!stats.have_y) {
+                    stats.have_y = true;
+                    stats.first_y = pt.y;
+                } else {
+                    stats.y_step = std::gcd(stats.y_step, std::abs(pt.y - stats.first_y));
+                }
+            }
+        }
+    }
+
     bool have_x = false;
     bool have_y = false;
     int first_x = 0;
     int first_y = 0;
     int x_step = 0;
     int y_step = 0;
-    for (const auto& local_ptr : local_nets) {
-        if (!local_ptr) {
-            continue;
+    for (const GridThreadStats& stats : thread_stats) {
+        if (stats.have_x) {
+            if (!have_x) {
+                have_x = true;
+                first_x = stats.first_x;
+                x_step = stats.x_step;
+            } else {
+                x_step = std::gcd(x_step, std::abs(stats.first_x - first_x));
+                x_step = std::gcd(x_step, stats.x_step);
+            }
         }
-        for (const OpenroadRoutePt& pt : local_ptr->route_points) {
-            if (pt.valid) {
-                if (!have_x) {
-                    have_x = true;
-                    first_x = pt.x;
-                } else {
-                    x_step = std::gcd(x_step, std::abs(pt.x - first_x));
-                }
-                if (!have_y) {
-                    have_y = true;
-                    first_y = pt.y;
-                } else {
-                    y_step = std::gcd(y_step, std::abs(pt.y - first_y));
-                }
+        if (stats.have_y) {
+            if (!have_y) {
+                have_y = true;
+                first_y = stats.first_y;
+                y_step = stats.y_step;
+            } else {
+                y_step = std::gcd(y_step, std::abs(stats.first_y - first_y));
+                y_step = std::gcd(y_step, stats.y_step);
             }
         }
     }

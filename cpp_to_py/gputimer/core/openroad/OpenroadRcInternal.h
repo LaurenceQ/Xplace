@@ -267,7 +267,8 @@ int infer_openroad_grid_origin_from_first(int first_coord,
 OpenroadInferredGrid infer_openroad_route_grid(
     const std::vector<std::unique_ptr<LocalSpefNetRc>>& local_nets,
     const db::Database& rawdb,
-    int fallback_tile_size);
+    int fallback_tile_size,
+    int threads);
 std::pair<int, int> openroad_position_on_inferred_grid(
     const db::Database& rawdb,
     const OpenroadInferredGrid& grid,

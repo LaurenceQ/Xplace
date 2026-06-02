@@ -574,8 +574,18 @@ HostRcGraph GPUTimer::build_openroad_route_segments_rc(const std::string& file) 
     if (openroad_tile_size <= 0) {
         throw std::runtime_error("OpenROAD route segment RC requires a positive OpenROAD gcell tile size.");
     }
+    int grid_threads = std::max(1, num_threads);
+    if (const char* thread_env = std::getenv("GPUTIMER_ROUTE_SEG_GRID_THREADS")) {
+        const int env_threads = std::atoi(thread_env);
+        if (env_threads > 0) {
+            grid_threads = env_threads;
+        }
+    }
+    if (!debug_pin_net.empty()) {
+        grid_threads = 1;
+    }
     const OpenroadInferredGrid openroad_grid =
-        infer_openroad_route_grid(local_nets, gtdb.rawdb, openroad_tile_size);
+        infer_openroad_route_grid(local_nets, gtdb.rawdb, openroad_tile_size, grid_threads);
     if (!openroad_grid.valid) {
         throw std::runtime_error("OpenROAD route segment RC could not infer the route segment grid.");
     }
