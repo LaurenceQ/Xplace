@@ -256,8 +256,10 @@ bool Database::readDEF(const std::string& file) {
     defrSetComponentCbk(readDefComponent);
     defrSetStartPinsCbk(readDefPinStart);
     defrSetPinCbk(readDefPin);
-    defrSetBlockageStartCbk(readDefBlockageStart);
-    defrSetBlockageCbk(readDefBlockage);
+    if (!setting.SkipDefBlockages) {
+        defrSetBlockageStartCbk(readDefBlockageStart);
+        defrSetBlockageCbk(readDefBlockage);
+    }
 
     if (setting.EnablePG) {
         defrSetSNetStartCbk(readDefSNetStart);
@@ -271,11 +273,13 @@ bool Database::readDEF(const std::string& file) {
         defrSetAddPathToNet();
     }
 
-    defrSetRegionStartCbk(readDefRegionStart);
-    defrSetRegionCbk(readDefRegion);
-    //  defrSetGroupNameCbk(readDefGroupName);
-    defrSetGroupMemberCbk(readDefGroupMember);
-    defrSetGroupCbk(readDefGroup);
+    if (setting.EnableFence) {
+        defrSetRegionStartCbk(readDefRegionStart);
+        defrSetRegionCbk(readDefRegion);
+        //  defrSetGroupNameCbk(readDefGroupName);
+        defrSetGroupMemberCbk(readDefGroupMember);
+        defrSetGroupCbk(readDefGroup);
+    }
 
     defrInit();
     defrReset();

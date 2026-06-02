@@ -77,8 +77,14 @@ bool loadParams(const pybind11::dict& kwargs) {
     if (kwargs.contains("enable_pg")) {
         db::setting.EnablePG = kwargs["enable_pg"].cast<bool>();
     }
+    if (kwargs.contains("enable_fence")) {
+        db::setting.EnableFence = kwargs["enable_fence"].cast<bool>();
+    }
     if (kwargs.contains("skip_def_net_wires")) {
         db::setting.SkipDefNetWires = kwargs["skip_def_net_wires"].cast<bool>();
+    }
+    if (kwargs.contains("skip_def_blockages")) {
+        db::setting.SkipDefBlockages = kwargs["skip_def_blockages"].cast<bool>();
     }
 
     // enable random place or not

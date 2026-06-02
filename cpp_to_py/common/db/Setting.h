@@ -15,6 +15,7 @@ public:
     bool EnablePG = true;
     bool EnableIOPin = true;
     bool SkipDefNetWires = false;
+    bool SkipDefBlockages = false;
     bool liteMode = true;
     bool random_place = false;
 
