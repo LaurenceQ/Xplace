@@ -238,3 +238,11 @@ Gated fast DEF nets and in-memory defr stub:
   fast DEF path `9.238s`, `read_input=18.826s`, `build_rc=6.148s`. Timing,
   power, and group comparisons passed: `wns_err=9.77207e-05`,
   `ptotal_err=0.0001035`, worst group `clock.internal=0.000613238`.
+
+
+Route net-name index optimization:
+
+- Added a per-design `RouteNetNameIndex` for route-segment net header lookup. It builds an open-address table sized from `gtdb.net_names`, initializes/inserts with OpenMP workers and relaxed atomic CAS, then uses read-only lookup while scanning the mmap route-segment char buffer. It does not rely on cross-design cache and does not use mutexes. Alias normalization is only attempted on direct lookup misses.
+- Validation after build/install/import passed for no-cache `visible_ariane` and `visible_mempool_group` with fast DEF components+nets enabled. Both had `unknown_nets=0`; timing, power, and group comparisons passed.
+- On `visible_mempool_group`, compared with `result/codex_dmp_rc_init_profile_mempool_group`, cumulative route profile points improved: `build_net_name_map 0.873 -> 0.209`, `map_pins_by_gpdb 0.967 -> 0.303`, `scan_route_blocks 1.633 -> 0.883`, `finalize_done 5.573 -> 4.933`, and `build_route_segments_graph 5.913 -> 4.999`. Total `build_rc 6.382 -> 6.351` was mostly masked by CUDA allocation variance in `initialize_dmp_rc_explicit` (`0.353 -> 1.228`).
+- The original DEF file remains read-only in this flow; fast DEF still uses the in-memory defr stub for skipped sections.

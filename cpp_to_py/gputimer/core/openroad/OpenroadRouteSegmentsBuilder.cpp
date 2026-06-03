@@ -4,6 +4,7 @@
 #include <omp.h>
 #endif
 
+#include <atomic>
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
@@ -78,6 +79,123 @@ struct RouteSegmentScanCandidate {
     int net_idx = -1;
     std::size_t line_begin = 0;
     std::size_t block_begin = 0;
+};
+
+
+class RouteNetNameIndex {
+public:
+    void build(const std::vector<std::string>& names, int threads)
+    {
+        names_ = &names;
+        std::size_t table_size = 1;
+        const std::size_t min_size = std::max<std::size_t>(2, names.size() * 2);
+        while (table_size < min_size) {
+            table_size <<= 1;
+        }
+        mask_ = table_size - 1;
+        table_ = std::vector<std::atomic<int>>(table_size);
+#pragma omp parallel for num_threads(threads) schedule(static)
+        for (std::int64_t slot = 0; slot < static_cast<std::int64_t>(table_.size()); ++slot) {
+            table_[static_cast<std::size_t>(slot)].store(-1, std::memory_order_relaxed);
+        }
+#pragma omp parallel for num_threads(threads) schedule(static)
+        for (int idx = 0; idx < static_cast<int>(names.size()); ++idx) {
+            if (!names[idx].empty()) {
+                insert(idx);
+            }
+        }
+    }
+
+    int resolve(const char* begin, const char* end) const
+    {
+        int net_idx = find(begin, end);
+        if (net_idx >= 0) {
+            return net_idx;
+        }
+        const std::string name(begin, end);
+        const std::string normalized = normalized_spef_name(name);
+        if (normalized != name) {
+            net_idx = find(normalized.data(), normalized.data() + normalized.size());
+            if (net_idx >= 0) {
+                return net_idx;
+            }
+        }
+        const std::array<std::string, 4> aliases = {
+            replace_char(name, '/', ':'),
+            replace_char(name, ':', '/'),
+            replace_last_char(name, '/', ':'),
+            replace_last_char(name, ':', '/'),
+        };
+        for (const std::string& alias : aliases) {
+            if (alias == name || alias == normalized) {
+                continue;
+            }
+            net_idx = find(alias.data(), alias.data() + alias.size());
+            if (net_idx >= 0) {
+                return net_idx;
+            }
+        }
+        return -1;
+    }
+
+private:
+    static std::uint64_t hash_range(const char* begin, const char* end)
+    {
+        std::uint64_t hash = 1469598103934665603ULL;
+        for (const char* p = begin; p < end; ++p) {
+            hash ^= static_cast<unsigned char>(*p);
+            hash *= 1099511628211ULL;
+        }
+        return hash;
+    }
+
+    bool name_matches(int idx, const char* begin, const char* end) const
+    {
+        const std::string& name = (*names_)[idx];
+        return static_cast<std::size_t>(end - begin) == name.size() &&
+               std::memcmp(begin, name.data(), name.size()) == 0;
+    }
+
+    void insert(int idx)
+    {
+        const std::string& name = (*names_)[idx];
+        std::size_t slot = static_cast<std::size_t>(hash_range(name.data(), name.data() + name.size())) & mask_;
+        for (;;) {
+            int expected = -1;
+            if (table_[slot].compare_exchange_strong(expected,
+                                                     idx,
+                                                     std::memory_order_relaxed,
+                                                     std::memory_order_relaxed)) {
+                return;
+            }
+            if (expected >= 0 && name_matches(expected, name.data(), name.data() + name.size())) {
+                return;
+            }
+            slot = (slot + 1) & mask_;
+        }
+    }
+
+    int find(const char* begin, const char* end) const
+    {
+        if (table_.empty()) {
+            return -1;
+        }
+        std::size_t slot = static_cast<std::size_t>(hash_range(begin, end)) & mask_;
+        for (;;) {
+            const int idx = table_[slot].load(std::memory_order_relaxed);
+            if (idx < 0) {
+                return -1;
+            }
+            if (name_matches(idx, begin, end)) {
+                return idx;
+            }
+            slot = (slot + 1) & mask_;
+        }
+    }
+
+    const std::vector<std::string>* names_ = nullptr;
+    std::vector<std::atomic<int>> table_;
+    std::size_t mask_ = 0;
 };
 
 bool parse_route_segment_row_range(const char* line_begin,
@@ -213,13 +331,8 @@ HostRcGraph GPUTimer::build_openroad_route_segments_rc(const std::string& file) 
         throw std::runtime_error("OpenROAD route segment RC requires a positive DBU/micron value.");
     }
 
-    std::unordered_map<std::string_view, int> net_name_to_index;
-    net_name_to_index.reserve(gtdb.net_names.size() * 2);
-    for (int i = 0; i < static_cast<int>(gtdb.net_names.size()); ++i) {
-        if (!gtdb.net_names[i].empty()) {
-            net_name_to_index.emplace(std::string_view(gtdb.net_names[i]), i);
-        }
-    }
+    RouteNetNameIndex net_name_to_index;
+    net_name_to_index.build(gtdb.net_names, std::max(1, num_threads));
     profile_log("build_net_name_map");
 
     std::unordered_map<std::string, int> layer_name_to_level;
@@ -348,7 +461,7 @@ HostRcGraph GPUTimer::build_openroad_route_segments_rc(const std::string& file) 
                 continue;
             }
 
-            const int net_idx = resolve_route_net_token(net_name_to_index, first, token_end);
+            const int net_idx = net_name_to_index.resolve(first, token_end);
             if (net_idx < 0 || net_idx >= num_nets) {
                 local_stats.unknown_nets++;
             }
