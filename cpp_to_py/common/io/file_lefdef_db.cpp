@@ -2,6 +2,9 @@
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 
 #include "common/db/BsRouteInfo.h"
 #include "common/db/Cell.h"
@@ -28,6 +31,86 @@
 #include "lef58/include/lefrReader.hpp"
 
 using namespace db;
+
+namespace {
+
+bool defProfileEnabled()
+{
+    const char* def_profile = std::getenv("XPLACE_DEF_PROFILE");
+    const char* io_profile = std::getenv("XPLACE_IO_PROFILE");
+    const char* value = (def_profile != nullptr) ? def_profile : io_profile;
+    if (value == nullptr || value[0] == '\0') {
+        return false;
+    }
+    return !(value[0] == '0' ||
+             value[0] == 'f' || value[0] == 'F' ||
+             value[0] == 'n' || value[0] == 'N');
+}
+
+struct DefReadProfile {
+    bool enabled = false;
+    std::chrono::steady_clock::time_point start;
+    std::chrono::steady_clock::time_point last;
+    const char* phase = "setup";
+    long long rows = 0;
+    long long tracks = 0;
+    long long gcells = 0;
+    long long vias = 0;
+    long long ndrs = 0;
+    long long components = 0;
+    long long pins = 0;
+    long long blockages = 0;
+    long long snets = 0;
+    long long nets = 0;
+    long long net_connections = 0;
+    long long regions = 0;
+
+    void begin()
+    {
+        enabled = defProfileEnabled();
+        start = std::chrono::steady_clock::now();
+        last = start;
+        phase = "setup";
+        rows = tracks = gcells = vias = ndrs = components = pins = 0;
+        blockages = snets = nets = net_connections = regions = 0;
+    }
+
+    void switchPhase(const char* next)
+    {
+        if (!enabled) {
+            phase = next;
+            return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        const double elapsed = std::chrono::duration<double>(now - last).count();
+        const double total = std::chrono::duration<double>(now - start).count();
+        std::fprintf(stdout,
+                     "[XPLACE_DEF_PROFILE] phase=%s elapsed=%.3f total=%.3f\n",
+                     phase, elapsed, total);
+        std::fflush(stdout);
+        last = now;
+        phase = next;
+    }
+
+    void finish(const char* status)
+    {
+        if (!enabled) {
+            return;
+        }
+        switchPhase(phase);
+        const auto now = std::chrono::steady_clock::now();
+        const double total = std::chrono::duration<double>(now - start).count();
+        std::fprintf(stdout,
+                     "[XPLACE_DEF_PROFILE] phase=summary status=%s total=%.3f rows=%lld tracks=%lld gcells=%lld vias=%lld ndrs=%lld components=%lld pins=%lld blockages=%lld snets=%lld nets=%lld net_connections=%lld regions=%lld\n",
+                     status, total, rows, tracks, gcells, vias, ndrs,
+                     components, pins, blockages, snets, nets, net_connections, regions);
+        std::fflush(stdout);
+    }
+};
+
+DefReadProfile g_def_profile;
+
+}  // namespace
 
 bool isFlipX(int orient) {
     switch (orient) {
@@ -242,6 +325,8 @@ bool Database::readDEF(const std::string& file) {
     logger.info("reading %s", file.c_str());
 #endif
 
+    g_def_profile.begin();
+
     defrSetDesignCbk(readDefDesign);
     defrSetUnitsCbk(readDefUnits);
     defrSetVersionCbk(readDefVersion);
@@ -286,11 +371,13 @@ bool Database::readDEF(const std::string& file) {
     int res = defrRead(fp, file.c_str(), (void*)this, 1);
     if (res) {
         logger.error("Error in reading DEF");
+        g_def_profile.finish("error");
         defrReleaseNResetMemory();
         defrUnsetCallbacks();
         fclose(fp);
         return false;
     }
+    g_def_profile.finish("ok");
     defrReleaseNResetMemory();
     defrUnsetCallbacks();
     fclose(fp);
@@ -1398,6 +1485,7 @@ int readDefDieArea(defrCallbackType_e c, defiBox* dbox, defiUserData ud) {
 
 //-----Row-----
 int readDefRow(defrCallbackType_e c, defiRow* drow, defiUserData ud) {
+    ++g_def_profile.rows;
     ((Database*)ud)
         ->addRow(string(drow->name()),
                  string(drow->macro()),
@@ -1414,6 +1502,7 @@ int readDefRow(defrCallbackType_e c, defiRow* drow, defiUserData ud) {
 
 //-----Track-----
 int readDefTrack(defrCallbackType_e c, defiTrack* dtrack, defiUserData ud) {
+    ++g_def_profile.tracks;
     Database* db = (Database*)ud;
     char direction = 'x';
     if (strcmp(dtrack->macro(), "X") == 0) {
@@ -1448,6 +1537,7 @@ int readDefTrack(defrCallbackType_e c, defiTrack* dtrack, defiUserData ud) {
 
 //-----GcellGrid-----
 int readDefGcellGrid(defrCallbackType_e c, defiGcellGrid* dgrid, defiUserData ud) {
+    ++g_def_profile.gcells;
     Database* db = (Database*)ud;
     const string macro(dgrid->macro());
     if (macro == "X") {
@@ -1464,11 +1554,13 @@ int readDefGcellGrid(defrCallbackType_e c, defiGcellGrid* dgrid, defiUserData ud
 
 //-----Via-----
 int readDefViaStart(defrCallbackType_e c, int num, defiUserData ud) {
+    g_def_profile.switchPhase("vias");
     reinterpret_cast<Database*>(ud)->reserveViaTypes(num);
     return 0;
 }
 
 int readDefVia(defrCallbackType_e c, defiVia* dvia, defiUserData ud) {
+    ++g_def_profile.vias;
     Database* db = (Database*)ud;
 
     const string name(dvia->name());
@@ -1551,6 +1643,7 @@ int readDefVia(defrCallbackType_e c, defiVia* dvia, defiUserData ud) {
 //-----NonDefaultRule-----
 
 int readDefNdr(defrCallbackType_e c, defiNonDefault* nd, defiUserData ud) {
+    ++g_def_profile.ndrs;
     Database* db = (Database*)ud;
     NDR* ndr = db->addNDR(string(nd->name()), nd->hasHardspacing());
 
@@ -1574,11 +1667,13 @@ int readDefNdr(defrCallbackType_e c, defiNonDefault* nd, defiUserData ud) {
 
 //-----Cell-----
 int readDefComponentStart(defrCallbackType_e c, int num, defiUserData ud) {
+    g_def_profile.switchPhase("components");
     reinterpret_cast<Database*>(ud)->reserveCells(num);
     return 0;
 }
 
 int readDefComponent(defrCallbackType_e c, defiComponent* co, defiUserData ud) {
+    ++g_def_profile.components;
     Database* db = (Database*)ud;
     CellType* celltype = db->getCellType(co->name());
 
@@ -1622,11 +1717,13 @@ int readDefComponent(defrCallbackType_e c, defiComponent* co, defiUserData ud) {
 
 //-----Pin-----
 int readDefPinStart(defrCallbackType_e c, int num, defiUserData ud) {
+    g_def_profile.switchPhase("pins");
     reinterpret_cast<Database*>(ud)->reserveIOPins(num);
     return 0;
 }
 
 int readDefPin(defrCallbackType_e c, defiPin* dpin, defiUserData ud) {
+    ++g_def_profile.pins;
     Database* db = (Database*)ud;
 
     char direction = 'x';
@@ -1694,11 +1791,13 @@ int readDefPin(defrCallbackType_e c, defiPin* dpin, defiUserData ud) {
 
 //-----Blockages-----
 int readDefBlockageStart(defrCallbackType_e c, int num, defiUserData ud) {
+    g_def_profile.switchPhase("blockages");
     reinterpret_cast<Database*>(ud)->reserveBlockages(num);
     return 0;
 }
 
 int readDefBlockage(defrCallbackType_e c, defiBlockage* dblk, defiUserData ud) {
+    ++g_def_profile.blockages;
     Database* db = (Database*)ud;
 
     if (dblk->hasLayer()) {
@@ -1721,11 +1820,13 @@ int readDefBlockage(defrCallbackType_e c, defiBlockage* dblk, defiUserData ud) {
 
 //-----Net-----
 int readDefSNetStart(defrCallbackType_e c, int num, defiUserData ud) {
+    g_def_profile.switchPhase("specialnets");
     reinterpret_cast<Database*>(ud)->reserveSNets(num);
     return 0;
 }
 
 int readDefSNet(defrCallbackType_e c, defiNet* dnet, defiUserData ud) {
+    ++g_def_profile.snets;
     Database* db = (Database*)ud;
 
     SNet* snet = db->addSNet(dnet->name());
@@ -1858,11 +1959,13 @@ int readDefSNet(defrCallbackType_e c, defiNet* dnet, defiUserData ud) {
 }
 
 int readDefNetStart(defrCallbackType_e c, int num, defiUserData ud) {
+    g_def_profile.switchPhase("nets");
     reinterpret_cast<Database*>(ud)->reserveNets(num);
     return 0;
 }
 
 int readDefNet(defrCallbackType_e c, defiNet* dnet, defiUserData ud) {
+    ++g_def_profile.nets;
     Database* db{reinterpret_cast<Database*>(ud)};
     NDR* ndr{nullptr};
 
@@ -1874,6 +1977,7 @@ int readDefNet(defrCallbackType_e c, defiNet* dnet, defiUserData ud) {
         }
     }
     const unsigned num_connections = static_cast<unsigned>(dnet->numConnections());
+    g_def_profile.net_connections += num_connections;
     if (num_connections == 0) {
         string netName(dnet->name());
         logger.warning("Net %s is 0-Pin net. Ignore.", netName.c_str());
@@ -2022,11 +2126,13 @@ int readDefNet(defrCallbackType_e c, defiNet* dnet, defiUserData ud) {
 
 //-----Region-----
 int readDefRegionStart(defrCallbackType_e c, int num, defiUserData ud) {
+    g_def_profile.switchPhase("regions");
     reinterpret_cast<Database*>(ud)->reserveRegions(num);
     return 0;
 }
 
 int readDefRegion(defrCallbackType_e c, defiRegion* dreg, defiUserData ud) {
+    ++g_def_profile.regions;
     Database* db = (Database*)ud;
 
     char type = 'f';
