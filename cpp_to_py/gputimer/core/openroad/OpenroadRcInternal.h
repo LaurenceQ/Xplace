@@ -97,6 +97,12 @@ struct LocalSpefNetRc {
     std::unordered_map<std::string, int> pin_name2id;
 };
 
+struct FlatLocalAdjacency {
+    std::vector<int> start;
+    std::vector<int> edge;
+    std::vector<int> next;
+};
+
 using OpenroadRouteNodeMap =
     std::unordered_map<OpenroadRoutePtKey, int, OpenroadRoutePtKeyHash>;
 
@@ -230,6 +236,7 @@ void ensure_local_node(LocalSpefNetRc& local, int node_id);
 std::string spef_upper(std::string value);
 bool spef_includes_pin_caps_from_design_flow(const std::string& design_flow);
 int count_tree_edges_from_root(const LocalSpefNetRc& local);
+FlatLocalAdjacency build_flat_local_adjacency(const LocalSpefNetRc& local);
 int prune_to_rooted_tree(LocalSpefNetRc& local);
 int append_blank_node(LocalSpefNetRc& local,
                       int pin_id,

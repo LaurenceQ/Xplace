@@ -875,20 +875,11 @@ HostRcGraph GPUTimer::build_openroad_route_segments_rc(const std::string& file) 
 
             if (node_edge_product > 4096) {
                 ++thread_stats.repair_adjacency_nets;
-                std::vector<std::vector<int>> adjacency(local.node2pin.size());
-                for (std::size_t edge = 0; edge < local.edge_from.size(); ++edge) {
-                    const int from = local.edge_from[edge];
-                    const int to = local.edge_to[edge];
-                    if (from >= 0 && to >= 0 &&
-                        from < static_cast<int>(adjacency.size()) &&
-                        to < static_cast<int>(adjacency.size())) {
-                        adjacency[from].emplace_back(to);
-                        adjacency[to].emplace_back(from);
-                    }
-                }
+                const FlatLocalAdjacency adjacency = build_flat_local_adjacency(local);
                 for (std::size_t cursor = 0; cursor < stack.size(); ++cursor) {
                     const int node = stack[cursor];
-                    for (int next : adjacency[node]) {
+                    for (int pos = adjacency.start[node]; pos < adjacency.start[node + 1]; ++pos) {
+                        const int next = adjacency.next[pos];
                         if (!seen[next]) {
                             seen[next] = 1;
                             stack.emplace_back(next);

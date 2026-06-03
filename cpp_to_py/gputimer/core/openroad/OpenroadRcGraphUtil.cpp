@@ -105,6 +105,44 @@ int count_tree_edges_from_root(const LocalSpefNetRc& local)
     return tree_edges;
 }
 
+FlatLocalAdjacency build_flat_local_adjacency(const LocalSpefNetRc& local)
+{
+    FlatLocalAdjacency adjacency;
+    const int node_count = static_cast<int>(local.node2pin.size());
+    adjacency.start.assign(static_cast<std::size_t>(node_count) + 1, 0);
+
+    for (std::size_t edge = 0; edge < local.edge_from.size(); ++edge) {
+        const int from = local.edge_from[edge];
+        const int to = local.edge_to[edge];
+        if (from >= 0 && to >= 0 && from < node_count && to < node_count) {
+            ++adjacency.start[from + 1];
+            ++adjacency.start[to + 1];
+        }
+    }
+    for (int node = 0; node < node_count; ++node) {
+        adjacency.start[node + 1] += adjacency.start[node];
+    }
+
+    const int adjacency_size = adjacency.start[node_count];
+    adjacency.edge.resize(adjacency_size);
+    adjacency.next.resize(adjacency_size);
+    std::vector<int> cursor(adjacency.start.begin(), adjacency.start.end() - 1);
+    for (std::size_t edge = 0; edge < local.edge_from.size(); ++edge) {
+        const int from = local.edge_from[edge];
+        const int to = local.edge_to[edge];
+        if (from >= 0 && to >= 0 && from < node_count && to < node_count) {
+            int pos = cursor[from]++;
+            adjacency.edge[pos] = static_cast<int>(edge);
+            adjacency.next[pos] = to;
+            pos = cursor[to]++;
+            adjacency.edge[pos] = static_cast<int>(edge);
+            adjacency.next[pos] = from;
+        }
+    }
+
+    return adjacency;
+}
+
 int prune_to_rooted_tree(LocalSpefNetRc& local)
 {
     if (local.node2pin.empty() || local.edge_from.empty()) {
@@ -118,18 +156,36 @@ int prune_to_rooted_tree(LocalSpefNetRc& local)
     seen[0] = 1;
     stack.emplace_back(0);
 
-    for (std::size_t cursor = 0; cursor < stack.size(); ++cursor) {
-        const int node = stack[cursor];
-        for (std::size_t edge = 0; edge < local.edge_from.size(); ++edge) {
-            const int from = local.edge_from[edge];
-            const int to = local.edge_to[edge];
-            int next = -1;
-            if (from == node) next = to;
-            if (to == node) next = from;
-            if (next >= 0 && next < node_count && !seen[next]) {
-                seen[next] = 1;
-                stack.emplace_back(next);
-                keep[edge] = 1;
+    const long long node_edge_product =
+        static_cast<long long>(node_count) *
+        static_cast<long long>(local.edge_from.size());
+    if (node_edge_product > 4096) {
+        const FlatLocalAdjacency adjacency = build_flat_local_adjacency(local);
+        for (std::size_t cursor = 0; cursor < stack.size(); ++cursor) {
+            const int node = stack[cursor];
+            for (int pos = adjacency.start[node]; pos < adjacency.start[node + 1]; ++pos) {
+                const int next = adjacency.next[pos];
+                if (next >= 0 && next < node_count && !seen[next]) {
+                    seen[next] = 1;
+                    stack.emplace_back(next);
+                    keep[adjacency.edge[pos]] = 1;
+                }
+            }
+        }
+    } else {
+        for (std::size_t cursor = 0; cursor < stack.size(); ++cursor) {
+            const int node = stack[cursor];
+            for (std::size_t edge = 0; edge < local.edge_from.size(); ++edge) {
+                const int from = local.edge_from[edge];
+                const int to = local.edge_to[edge];
+                int next = -1;
+                if (from == node) next = to;
+                if (to == node) next = from;
+                if (next >= 0 && next < node_count && !seen[next]) {
+                    seen[next] = 1;
+                    stack.emplace_back(next);
+                    keep[edge] = 1;
+                }
             }
         }
     }
