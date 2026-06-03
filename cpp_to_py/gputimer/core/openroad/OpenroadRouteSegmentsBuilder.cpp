@@ -1025,20 +1025,20 @@ HostRcGraph GPUTimer::build_openroad_route_segments_rc(const std::string& file) 
         }
         const int node_base = graph.net2node_start[net_idx];
         const int edge_base = graph.net2edge_start[net_idx];
+        std::copy(local->edge_res.begin(), local->edge_res.end(),
+                  graph.edge_res.begin() + edge_base);
         for (int edge = 0; edge < static_cast<int>(local->edge_from.size()); ++edge) {
             const int global_edge = edge_base + edge;
             graph.edge_from[global_edge] = node_base + local->edge_from[edge];
             graph.edge_to[global_edge] = node_base + local->edge_to[edge];
-            graph.edge_res[global_edge] = local->edge_res[edge];
         }
-        for (int node = 0; node < static_cast<int>(local->node2pin.size()); ++node) {
-            const int global_node = node_base + node;
-            graph.node2pin[global_node] = local->node2pin[node];
-            if (keep_route_node_names && node < static_cast<int>(local->node_names.size())) {
-                graph.node_names[global_node] = std::move(local->node_names[node]);
-            }
-            for (int attr = 0; attr < NUM_ATTR; ++attr) {
-                graph.node_cap[global_node * NUM_ATTR + attr] = local->node_cap[node * NUM_ATTR + attr];
+        std::copy(local->node2pin.begin(), local->node2pin.end(),
+                  graph.node2pin.begin() + node_base);
+        std::copy(local->node_cap.begin(), local->node_cap.end(),
+                  graph.node_cap.begin() + static_cast<std::size_t>(node_base) * NUM_ATTR);
+        if (keep_route_node_names) {
+            for (int node = 0; node < static_cast<int>(local->node_names.size()); ++node) {
+                graph.node_names[node_base + node] = std::move(local->node_names[node]);
             }
         }
         local_nets[net_idx].reset();
