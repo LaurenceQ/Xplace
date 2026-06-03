@@ -153,3 +153,16 @@ Additional accepted DEF connection lookup optimization:
   `23.975`, `setup_nets=6.632`, `setup_index_map=0.354`,
   `build_route_segments_graph=4.659`, and `build_rc=6.642`. The route-RC
   numbers are noted as run-to-run noise for this read-input-only code change.
+
+
+Accepted route-RC CUDA scaling optimization:
+
+- Moved explicit route-segment `rc_time_factor` scaling out of the host loop
+  and into `DmpRc.cu` as `scale_explicit_edge_res_kernel`. The host now copies
+  raw edge resistance values to the GPU and scales `h_dmp_db->edge_res` in
+  place before copying the `DmpModel` descriptor to device memory.
+- `visible_ariane` no-cache passed timing/power/group checks after the change.
+  `visible_mempool_group` no-cache also passed. The measured local RC init
+  substage improved from `initialize_dmp_rc_explicit=1.848` in the prior
+  profile to `0.271`; total `build_rc=6.770` in that run was still dominated
+  by route graph construction noise (`build_route_segments_graph=6.387`).
