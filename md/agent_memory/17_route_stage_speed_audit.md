@@ -166,3 +166,23 @@ Accepted route-RC CUDA scaling optimization:
   substage improved from `initialize_dmp_rc_explicit=1.848` in the prior
   profile to `0.271`; total `build_rc=6.770` in that run was still dominated
   by route graph construction noise (`build_route_segments_graph=6.387`).
+
+
+DEF char-buffer scanner prototype:
+
+- Added an explicit `XPLACE_DEF_BUFFER_PROFILE=1` mmap scanner in `readDEF()`. It
+  does not change normal DEF parsing unless the env flag is set. The scanner
+  finds `COMPONENTS`, `PINS`, `SPECIALNETS`, and `NETS` section ranges and
+  counts object-start lines with `std::thread` chunk scans, using per-thread
+  counters only.
+- On `visible_mempool_group` no-cache with `XPLACE_DEF_BUFFER_THREADS=16`, the
+  scanner matched declared counts: `COMPONENTS=3,077,989`, `PINS=11,422`,
+  `SPECIALNETS=2`, `NETS=3,503,992`. It found `12,022,924` simple net
+  connection lines versus the callback profile's `12,026,191` connections; the
+  difference is expected because high-fanout nets can place multiple `( inst pin )`
+  connections on one line.
+- The full 2.33 GB DEF section scan took `1.110s`, while the normal callback DEF
+  reader in the same run spent `components=9.162s`, `pins=2.133s`, `nets=23.445s`,
+  total `read_def=34.866s`. This validates the user's proposed buffer/object
+  offset direction; the next step is to reuse these section offsets for a
+  direct-timing fast parser instead of only profiling them.

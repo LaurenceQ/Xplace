@@ -3,8 +3,18 @@
 #include <iostream>
 #include <sstream>
 #include <chrono>
+#include <algorithm>
+#include <cerrno>
+#include <cctype>
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <thread>
+#include <vector>
 
 #include "common/db/BsRouteInfo.h"
 #include "common/db/Cell.h"
@@ -109,6 +119,314 @@ struct DefReadProfile {
 };
 
 DefReadProfile g_def_profile;
+
+
+bool defBufferProfileEnabled()
+{
+    const char* value = std::getenv("XPLACE_DEF_BUFFER_PROFILE");
+    if (value == nullptr || value[0] == '\0') {
+        return false;
+    }
+    return !(value[0] == '0' ||
+             value[0] == 'f' || value[0] == 'F' ||
+             value[0] == 'n' || value[0] == 'N');
+}
+
+struct DefMappedFile {
+    int fd = -1;
+    const char* data = nullptr;
+    std::size_t size = 0;
+
+    explicit DefMappedFile(const std::string& file)
+    {
+        fd = ::open(file.c_str(), O_RDONLY);
+        if (fd < 0) {
+            std::fprintf(stderr,
+                         "[XPLACE_DEF_BUFFER_PROFILE] open failed file=%s error=%s\n",
+                         file.c_str(), std::strerror(errno));
+            return;
+        }
+
+        struct stat st;
+        if (::fstat(fd, &st) != 0) {
+            std::fprintf(stderr,
+                         "[XPLACE_DEF_BUFFER_PROFILE] stat failed file=%s error=%s\n",
+                         file.c_str(), std::strerror(errno));
+            ::close(fd);
+            fd = -1;
+            return;
+        }
+        if (st.st_size <= 0) {
+            return;
+        }
+        size = static_cast<std::size_t>(st.st_size);
+        void* mapped = ::mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
+        if (mapped == MAP_FAILED) {
+            std::fprintf(stderr,
+                         "[XPLACE_DEF_BUFFER_PROFILE] mmap failed file=%s size=%zu error=%s\n",
+                         file.c_str(), size, std::strerror(errno));
+            data = nullptr;
+            size = 0;
+            return;
+        }
+        data = static_cast<const char*>(mapped);
+    }
+
+    DefMappedFile(const DefMappedFile&) = delete;
+    DefMappedFile& operator=(const DefMappedFile&) = delete;
+
+    ~DefMappedFile()
+    {
+        if (data != nullptr) {
+            ::munmap(const_cast<char*>(data), size);
+        }
+        if (fd >= 0) {
+            ::close(fd);
+        }
+    }
+};
+
+struct DefBufferSection {
+    const char* name = "";
+    long long declared_count = -1;
+    std::size_t header_begin = 0;
+    std::size_t body_begin = 0;
+    std::size_t end_begin = 0;
+    std::size_t end_after = 0;
+    long long object_lines = 0;
+    long long connection_lines = 0;
+    bool found = false;
+};
+
+const char* defSkipWs(const char* p, const char* end)
+{
+    while (p < end && std::isspace(static_cast<unsigned char>(*p))) {
+        ++p;
+    }
+    return p;
+}
+
+bool defTokenEquals(const char* begin, const char* end, const char* token)
+{
+    const std::size_t token_len = std::strlen(token);
+    return static_cast<std::size_t>(end - begin) == token_len &&
+           std::memcmp(begin, token, token_len) == 0;
+}
+
+bool defLineStartsWithToken(const char* line_begin, const char* line_end, const char* token)
+{
+    const char* p = defSkipWs(line_begin, line_end);
+    const char* q = p;
+    while (q < line_end && !std::isspace(static_cast<unsigned char>(*q))) {
+        ++q;
+    }
+    return defTokenEquals(p, q, token);
+}
+
+bool defParseLongLongToken(const char*& p, const char* end, long long& value)
+{
+    p = defSkipWs(p, end);
+    if (p == end || !std::isdigit(static_cast<unsigned char>(*p))) {
+        return false;
+    }
+    long long result = 0;
+    while (p < end && std::isdigit(static_cast<unsigned char>(*p))) {
+        result = result * 10 + (*p - '0');
+        ++p;
+    }
+    value = result;
+    return true;
+}
+
+std::size_t defNextLineOffset(const char* data, std::size_t size, std::size_t offset)
+{
+    if (offset >= size) {
+        return size;
+    }
+    const void* newline = std::memchr(data + offset, '\n', size - offset);
+    if (newline == nullptr) {
+        return size;
+    }
+    return static_cast<const char*>(newline) - data + 1;
+}
+
+std::size_t defAlignLineStart(const char* data, std::size_t size, std::size_t offset)
+{
+    if (offset == 0 || offset >= size || data[offset - 1] == '\n') {
+        return offset;
+    }
+    return defNextLineOffset(data, size, offset);
+}
+
+void defFindSection(const char* data,
+                    std::size_t size,
+                    const char* section_name,
+                    DefBufferSection& section)
+{
+    section.name = section_name;
+    bool in_section = false;
+    for (std::size_t line_begin_offset = 0; line_begin_offset < size;) {
+        const std::size_t line_end_offset = [&]() {
+            const void* newline = std::memchr(data + line_begin_offset, '\n', size - line_begin_offset);
+            return newline == nullptr ? size : static_cast<const char*>(newline) - data;
+        }();
+        const std::size_t next_line_offset = line_end_offset < size ? line_end_offset + 1 : line_end_offset;
+        const char* line_begin = data + line_begin_offset;
+        const char* line_end = data + line_end_offset;
+
+        if (!in_section) {
+            const char* p = defSkipWs(line_begin, line_end);
+            const char* q = p;
+            while (q < line_end && !std::isspace(static_cast<unsigned char>(*q))) {
+                ++q;
+            }
+            if (defTokenEquals(p, q, section_name)) {
+                p = q;
+                long long declared = -1;
+                if (defParseLongLongToken(p, line_end, declared)) {
+                    section.declared_count = declared;
+                }
+                section.header_begin = line_begin_offset;
+                section.body_begin = next_line_offset;
+                in_section = true;
+            }
+        } else if (defLineStartsWithToken(line_begin, line_end, "END")) {
+            const char* p = defSkipWs(line_begin, line_end);
+            while (p < line_end && !std::isspace(static_cast<unsigned char>(*p))) {
+                ++p;
+            }
+            const char* q = defSkipWs(p, line_end);
+            const char* r = q;
+            while (r < line_end && !std::isspace(static_cast<unsigned char>(*r))) {
+                ++r;
+            }
+            if (defTokenEquals(q, r, section_name)) {
+                section.end_begin = line_begin_offset;
+                section.end_after = next_line_offset;
+                section.found = true;
+                return;
+            }
+        }
+        line_begin_offset = next_line_offset;
+    }
+}
+
+void defCountSectionObjects(const char* data,
+                            const DefBufferSection& section,
+                            int num_threads,
+                            long long& object_lines,
+                            long long& connection_lines)
+{
+    object_lines = 0;
+    connection_lines = 0;
+    if (!section.found || section.body_begin >= section.end_begin) {
+        return;
+    }
+    num_threads = std::max(1, num_threads);
+    std::vector<long long> object_counts(num_threads, 0);
+    std::vector<long long> connection_counts(num_threads, 0);
+    const std::size_t begin = section.body_begin;
+    const std::size_t end = section.end_begin;
+    const std::size_t size = end - begin;
+
+    auto scan_chunk = [&](int tid) {
+        const std::size_t chunk_begin =
+            begin + (size * static_cast<std::size_t>(tid)) / static_cast<std::size_t>(num_threads);
+        const std::size_t chunk_end =
+            begin + (size * static_cast<std::size_t>(tid + 1)) / static_cast<std::size_t>(num_threads);
+        const std::size_t scan_begin = defAlignLineStart(data, end, chunk_begin);
+        const std::size_t scan_end = (tid + 1 == num_threads) ? end : defAlignLineStart(data, end, chunk_end);
+        long long local_objects = 0;
+        long long local_connections = 0;
+        for (std::size_t line_begin_offset = scan_begin; line_begin_offset < scan_end;) {
+            const void* newline = std::memchr(data + line_begin_offset, '\n', scan_end - line_begin_offset);
+            const std::size_t line_end_offset = newline == nullptr ? scan_end : static_cast<const char*>(newline) - data;
+            const std::size_t next_line_offset = line_end_offset < scan_end ? line_end_offset + 1 : line_end_offset;
+            const char* line_begin = data + line_begin_offset;
+            const char* line_end = data + line_end_offset;
+            const char* p = defSkipWs(line_begin, line_end);
+            if (p < line_end && *p == '-') {
+                ++local_objects;
+            }
+            if (p < line_end && *p == '(') {
+                ++local_connections;
+            }
+            line_begin_offset = next_line_offset;
+        }
+        object_counts[tid] = local_objects;
+        connection_counts[tid] = local_connections;
+    };
+
+    std::vector<std::thread> workers;
+    workers.reserve(num_threads > 1 ? static_cast<std::size_t>(num_threads - 1) : 0);
+    for (int tid = 1; tid < num_threads; ++tid) {
+        workers.emplace_back(scan_chunk, tid);
+    }
+    scan_chunk(0);
+    for (std::thread& worker : workers) {
+        worker.join();
+    }
+
+    for (int tid = 0; tid < num_threads; ++tid) {
+        object_lines += object_counts[tid];
+        connection_lines += connection_counts[tid];
+    }
+}
+
+void profileDefBufferScan(const std::string& file, int requested_threads)
+{
+    if (!defBufferProfileEnabled()) {
+        return;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    auto seconds_since = [](std::chrono::steady_clock::time_point t) {
+        return std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count();
+    };
+
+    DefMappedFile mapped(file);
+    if (mapped.data == nullptr || mapped.size == 0) {
+        return;
+    }
+    std::fprintf(stdout,
+                 "[XPLACE_DEF_BUFFER_PROFILE] phase=mmap elapsed=%.3f size=%zu\n",
+                 seconds_since(start), mapped.size);
+    std::fflush(stdout);
+
+    std::vector<DefBufferSection> sections(4);
+    defFindSection(mapped.data, mapped.size, "COMPONENTS", sections[0]);
+    defFindSection(mapped.data, mapped.size, "PINS", sections[1]);
+    defFindSection(mapped.data, mapped.size, "SPECIALNETS", sections[2]);
+    defFindSection(mapped.data, mapped.size, "NETS", sections[3]);
+    std::fprintf(stdout,
+                 "[XPLACE_DEF_BUFFER_PROFILE] phase=find_sections elapsed=%.3f\n",
+                 seconds_since(start));
+    std::fflush(stdout);
+
+    int num_threads = std::max(1, requested_threads);
+    if (const char* env_threads = std::getenv("XPLACE_DEF_BUFFER_THREADS")) {
+        const int value = std::atoi(env_threads);
+        if (value > 0) {
+            num_threads = value;
+        }
+    }
+    for (DefBufferSection& section : sections) {
+        defCountSectionObjects(mapped.data, section, num_threads,
+                               section.object_lines, section.connection_lines);
+        std::fprintf(stdout,
+                     "[XPLACE_DEF_BUFFER_PROFILE] section=%s found=%d declared=%lld object_lines=%lld connection_lines=%lld bytes=%zu body_begin=%zu end_begin=%zu threads=%d elapsed=%.3f\n",
+                     section.name,
+                     section.found ? 1 : 0,
+                     section.declared_count,
+                     section.object_lines,
+                     section.connection_lines,
+                     section.found ? section.end_begin - section.body_begin : 0,
+                     section.body_begin,
+                     section.end_begin,
+                     num_threads,
+                     seconds_since(start));
+        std::fflush(stdout);
+    }
+}
 
 }  // namespace
 
@@ -324,6 +642,8 @@ bool Database::readDEF(const std::string& file) {
 #ifndef NDEBUG
     logger.info("reading %s", file.c_str());
 #endif
+
+    profileDefBufferScan(file, setting.numThreads);
 
     g_def_profile.begin();
 
