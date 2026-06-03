@@ -150,6 +150,21 @@ public:
         name.append(port_name);
         name_ref = nullptr;
     }
+    void setNameRef(const std::string& name_ref_) {
+        name.clear();
+        name_ref = &name_ref_;
+    }
+    void setNameFromNodePortTo(const std::string& node_name,
+                               const std::string& port_name,
+                               std::string& dst) {
+        dst.clear();
+        dst.reserve(node_name.size() + 1 + port_name.size());
+        dst.append(node_name);
+        dst.push_back(':');
+        dst.append(port_name);
+        name.clear();
+        name_ref = &dst;
+    }
 
 protected:
     std::string macro_name = "";

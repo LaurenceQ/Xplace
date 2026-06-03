@@ -357,6 +357,9 @@ void GPDatabase::setupNets() {
     nets.resize(num_nets);
     pins.resize(num_pins);
     net_names.resize(num_nets);
+    pin_id2node_id.resize(num_pins);
+    pin_id2net_id.resize(num_pins);
+    pin_names.resize(num_pins);
     profile_log("resize");
 
 #pragma omp parallel for num_threads(setup_threads) schedule(dynamic, 1024)
@@ -377,15 +380,17 @@ void GPDatabase::setupNets() {
             const db::PinType* pintype = is_iopin ? dbpin->iopin->type : dbpin->type;
             GPNode& node = is_iopin ? nodes[dbpin->iopin->gpdb_id]
                                     : nodes[dbpin->cell->gpdb_id];
+            const index_type node_id = node.getId();
             const index_type pin_id = pin_begin + pin_offset;
 
             GPPin& pin = pins[pin_id];
             pin.setId(pin_id);
             const std::string& macro_pin_name = pintype->name();
             if (is_iopin) {
-                pin.setName(macro_pin_name);
+                pin_names[pin_id] = macro_pin_name;
+                pin.setNameRef(pin_names[pin_id]);
             } else {
-                pin.setNameFromNodePort(node.getName(), macro_pin_name);
+                pin.setNameFromNodePortTo(node.getName(), macro_pin_name, pin_names[pin_id]);
             }
             pin.setMacroNameRef(macro_pin_name);
             pin.setRelLx(pintype->boundLX);
@@ -394,9 +399,11 @@ void GPDatabase::setupNets() {
             pin.setHeight(pintype->getH());
             pin.setDirection(pintype->direction());
             pin.setType(pintype->type());
-            pin.setParNodeId(node.getId());
+            pin.setParNodeId(node_id);
             pin.setParNetId(net.getId());
             pin.setOriDBInfo({node.getOriDBId(), is_iopin ? -1 : dbpin->parentCellPinId, net.getOriDBId()});
+            pin_id2node_id[pin_id] = node_id;
+            pin_id2net_id[pin_id] = net.getId();
 
             net.addPin(pin.getId(), pintype->direction() == 'o');
             dbpin->gpdb_id = pin.getId();
@@ -405,8 +412,8 @@ void GPDatabase::setupNets() {
     profile_log("pin_fill");
 
     std::vector<index_type> node_pin_counts(num_nodes, 0);
-    for (const GPPin& pin : pins) {
-        ++node_pin_counts[pin.getParNodeId()];
+    for (index_type pin_id = 0; pin_id < static_cast<index_type>(num_pins); ++pin_id) {
+        ++node_pin_counts[pin_id2node_id[pin_id]];
     }
     profile_log("node_pin_count");
 
@@ -418,9 +425,9 @@ void GPDatabase::setupNets() {
 
     std::vector<index_type> node_pin_cursor = node_pin_start;
     std::vector<index_type> flat_node_pins(num_pins);
-    for (const GPPin& pin : pins) {
-        const index_type node_id = pin.getParNodeId();
-        flat_node_pins[node_pin_cursor[node_id]++] = pin.getId();
+    for (index_type pin_id = 0; pin_id < static_cast<index_type>(num_pins); ++pin_id) {
+        const index_type node_id = pin_id2node_id[pin_id];
+        flat_node_pins[node_pin_cursor[node_id]++] = pin_id;
     }
     profile_log("node_pin_flatten");
 
@@ -448,19 +455,25 @@ void GPDatabase::setupRegions() {
 }
 
 void GPDatabase::setupIndexMap() {
-    pin_id2node_id.resize(num_pins);
-    pin_id2net_id.resize(num_pins);
-    pin_names.resize(num_pins);
+    const bool pin_index_maps_ready =
+        pin_id2node_id.size() == num_pins &&
+        pin_id2net_id.size() == num_pins &&
+        pin_names.size() == num_pins;
     node_id2node_name.resize(num_nodes);
     node_id2celltype_name.resize(num_nodes);
 
     const int setup_threads = gpdbThreadCount("XPLACE_GPDB_SETUP_THREADS");
+    if (!pin_index_maps_ready) {
+        pin_id2node_id.resize(num_pins);
+        pin_id2net_id.resize(num_pins);
+        pin_names.resize(num_pins);
 #pragma omp parallel for num_threads(setup_threads) schedule(static)
-    for (index_type pin_id = 0; pin_id < static_cast<index_type>(pins.size()); ++pin_id) {
-        GPPin& pin = pins[pin_id];
-        pin_id2node_id[pin_id] = pin.getParNodeId();
-        pin_id2net_id[pin_id] = pin.getParNetId();
-        pin.moveNameTo(pin_names[pin_id]);
+        for (index_type pin_id = 0; pin_id < static_cast<index_type>(pins.size()); ++pin_id) {
+            GPPin& pin = pins[pin_id];
+            pin_id2node_id[pin_id] = pin.getParNodeId();
+            pin_id2net_id[pin_id] = pin.getParNetId();
+            pin.moveNameTo(pin_names[pin_id]);
+        }
     }
 
 #pragma omp parallel for num_threads(setup_threads) schedule(static)
