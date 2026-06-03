@@ -3,6 +3,7 @@
 #include "gputimer/core/utils.cuh"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
@@ -49,6 +50,37 @@ static bool dmp_rc_profile_enabled()
            dmp_rc_env_enabled("DMP_RC_PROFILE") ||
            dmp_rc_env_enabled("DMP_DEBUG_TIMING");
 }
+
+
+class DmpRcPhaseProfile {
+public:
+    DmpRcPhaseProfile(const char* tag, bool enabled)
+        : tag_(tag), enabled_(enabled), start_(std::chrono::steady_clock::now()), last_(start_) {}
+
+    void log(const char* phase)
+    {
+        if (!enabled_) {
+            return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        const double elapsed = std::chrono::duration<double>(now - last_).count();
+        const double total = std::chrono::duration<double>(now - start_).count();
+        std::fprintf(stderr,
+                     "[%s] phase=%s elapsed=%.3f total=%.3f\n",
+                     tag_,
+                     phase,
+                     elapsed,
+                     total);
+        std::fflush(stderr);
+        last_ = now;
+    }
+
+private:
+    const char* tag_;
+    bool enabled_;
+    std::chrono::steady_clock::time_point start_;
+    std::chrono::steady_clock::time_point last_;
+};
 
 __global__ void scale_explicit_edge_res_kernel(float* edge_res, int num_edges, float scale)
 {
@@ -356,13 +388,16 @@ __host__ void DmpModel::initialize_rc_explicit(
                int num_nets_,
                int num_nodes_,
                int num_edges_){
-        if (dmp_rc_profile_enabled()) {
+        const bool profile = dmp_rc_profile_enabled();
+        DmpRcPhaseProfile init_profile("DMP_RC_INIT_MODEL", profile);
+        if (profile) {
             print_dmp_rc_parallel_stats(host_flat_net2node_start_map,
                                         host_flat_net2edge_start_map,
                                         num_nets_,
                                         num_nodes_,
                                         num_edges_);
         }
+        init_profile.log("stats");
         pinCap = pinCap_;
         num_nets = num_nets_;
         num_nodes = num_nodes_;
@@ -383,6 +418,7 @@ __host__ void DmpModel::initialize_rc_explicit(
         dmp_rc_cuda_malloc_checked(&node_cap, static_cast<size_t>(num_nodes) * NUM_ATTR, "node_cap");
         dmp_rc_cuda_malloc_checked(&includes_pin_caps, num_nets, "includes_pin_caps");
         edge_wl = nullptr;
+        init_profile.log("malloc_graph");
 
         dmp_rc_cuda_memcpy_checked(edge_from, host_edge_from.data(), host_edge_from.size() * sizeof(int), cudaMemcpyHostToDevice, "edge_from");
         dmp_rc_cuda_memcpy_checked(edge_to, host_edge_to.data(), host_edge_to.size() * sizeof(int), cudaMemcpyHostToDevice, "edge_to");
@@ -392,17 +428,20 @@ __host__ void DmpModel::initialize_rc_explicit(
         dmp_rc_cuda_memcpy_checked(edge_res, host_edge_res.data(), host_edge_res.size() * sizeof(float), cudaMemcpyHostToDevice, "edge_res");
         dmp_rc_cuda_memcpy_checked(node_cap, host_node_cap.data(), static_cast<size_t>(num_nodes) * NUM_ATTR * sizeof(float), cudaMemcpyHostToDevice, "node_cap");
         dmp_rc_cuda_memcpy_checked(includes_pin_caps, host_includes_pin_caps.data(), static_cast<size_t>(num_nets) * sizeof(uint8_t), cudaMemcpyHostToDevice, "includes_pin_caps");
+        init_profile.log("copy_graph");
 
         dmp_rc_cuda_malloc_checked(&root_dist, num_nodes, "root_dist");
         dmp_rc_cuda_malloc_checked(&cnts, num_nodes, "cnts");
         dmp_rc_cuda_malloc_checked(&node_order, num_nodes, "node_order");
         dmp_rc_cuda_malloc_checked(&parent_node, num_nodes, "parent_node");
         dmp_rc_cuda_malloc_checked(&res_parent, static_cast<size_t>(num_nodes), "res_parent");
+        init_profile.log("malloc_scratch");
         dmp_rc_cuda_memset_checked(cnts, 0, static_cast<size_t>(num_nodes) * sizeof(int), "cnts");
         dmp_rc_cuda_memset_checked(node_order, 0, static_cast<size_t>(num_nodes) * sizeof(int), "node_order");
         dmp_rc_cuda_memset_checked(parent_node, -1, static_cast<size_t>(num_nodes) * sizeof(int), "parent_node");
         dmp_rc_cuda_memset_checked(res_parent, 0, static_cast<size_t>(num_nodes) * sizeof(float), "res_parent");
         dmp_rc_cuda_memset_checked(root_dist, -1, static_cast<size_t>(num_nodes) * sizeof(int), "root_dist");
+        init_profile.log("memset_scratch");
       }
 
 void GPUTimer::initialize_dmp_rc(
@@ -449,6 +488,8 @@ void GPUTimer::initialize_dmp_rc_explicit(
                   int num_nets,
                   int num_nodes,
                   int num_edges){
+    const bool profile = dmp_rc_profile_enabled();
+    DmpRcPhaseProfile init_profile("DMP_RC_INIT_WRAPPER", profile);
     const float rc_time_factor = (res_unit * cap_unit) / time_unit();
     logger.info("DMP explicit RC time scale: res_unit=%.5E cap_unit=%.5E time_unit=%.5E factor=%.5E",
                 res_unit, cap_unit, time_unit(), rc_time_factor);
@@ -465,6 +506,7 @@ void GPUTimer::initialize_dmp_rc_explicit(
                                        num_nets,
                                        num_nodes,
                                        num_edges);
+    init_profile.log("initialize_model");
     if (num_edges > 0 && rc_time_factor != 1.0f) {
         constexpr int threads = 256;
         const int blocks = (num_edges + threads - 1) / threads;
@@ -473,8 +515,10 @@ void GPUTimer::initialize_dmp_rc_explicit(
         gpuErrchk(cudaPeekAtLastError());
         gpuErrchk(cudaDeviceSynchronize());
     }
+    init_profile.log("scale_edge_res");
     dmp_rc_cuda_malloc_checked(&dmp_db, 1, "dmp_db");
     dmp_rc_cuda_memcpy_checked(dmp_db, h_dmp_db, sizeof(DmpModel), cudaMemcpyHostToDevice, "dmp_db");
+    init_profile.log("copy_model_descriptor");
    
 }
 
