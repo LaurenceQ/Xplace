@@ -375,8 +375,8 @@ void GPDatabase::setupNets() {
             assert_msg(dbpin->is_connected, "Pin is not connected!");
             const bool is_iopin = dbpin->iopin != nullptr;
             const db::PinType* pintype = is_iopin ? dbpin->iopin->type : dbpin->type;
-            GPNode& node = is_iopin ? nodes.at(dbpin->iopin->gpdb_id)
-                                    : nodes.at(dbpin->cell->gpdb_id);
+            GPNode& node = is_iopin ? nodes[dbpin->iopin->gpdb_id]
+                                    : nodes[dbpin->cell->gpdb_id];
             const index_type pin_id = pin_begin + pin_offset;
 
             GPPin& pin = pins[pin_id];
