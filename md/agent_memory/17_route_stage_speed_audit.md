@@ -135,3 +135,21 @@ Additional accepted read-input profiling and optimization:
   components `11.787 -> 9.445`, `read_def 37.218 -> 35.524`, and
   `read_input 47.983 -> 47.112`. The remaining DEF reader hotspot is the
   serial nets section at about `23.7s`.
+
+
+Additional accepted DEF connection lookup optimization:
+
+- Rejected a lazy `CellType` pin-name hash map experiment: it passed
+  correctness, but the large no-cache profile was not a clear total win
+  (`read_def=34.868`, `read_input=47.632`) and it added persistent map storage
+  to every `CellType`.
+- Kept the simpler indexed linear `Cell::pin(const char*)` lookup instead:
+  scan the fixed `CellType::pins` vector by index, compare first character
+  before `strcmp`, and touch the per-cell `_pins` vector only after the pin type
+  name matches. This keeps the code readable and avoids per-cell/per-type maps.
+- Validation after the simplified scan: `visible_ariane` no-cache passed timing,
+  power, and group checks. `visible_mempool_group` no-cache passed with
+  `read_input=45.579`, `read_def=35.652`, DEF components `9.382`, DEF nets
+  `23.975`, `setup_nets=6.632`, `setup_index_map=0.354`,
+  `build_route_segments_graph=4.659`, and `build_rc=6.642`. The route-RC
+  numbers are noted as run-to-run noise for this read-input-only code change.
