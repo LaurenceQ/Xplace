@@ -1,5 +1,7 @@
 #include "Cell.h"
 
+#include <cstring>
+
 #include "DatabaseClass.h"
 #include "Geometry.h"
 #include "Pin.h"
@@ -17,12 +19,16 @@ Cell::~Cell() {
 }
 
 Pin* Cell::pin(const char* name) const {
-    if (!name) {
+    if (!_type || !name) {
         return nullptr;
     }
-    for (Pin* pin : _pins) {
-        if (pin->type->name() == name) {
-            return pin;
+
+    const char first = name[0];
+    const std::vector<PinType*>& type_pins = _type->pins;
+    for (unsigned i = 0; i != type_pins.size(); ++i) {
+        const std::string& pin_name = type_pins[i]->name();
+        if (!pin_name.empty() && pin_name[0] == first && std::strcmp(pin_name.c_str(), name) == 0) {
+            return _pins[i];
         }
     }
     return nullptr;
