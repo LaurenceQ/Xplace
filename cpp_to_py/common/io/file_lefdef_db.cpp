@@ -1873,7 +1873,8 @@ int readDefNet(defrCallbackType_e c, defiNet* dnet, defiUserData ud) {
             logger.warning("NDR rule is not defined: %s", designrulename.c_str());
         }
     }
-    if ((unsigned)dnet->numConnections() == 0) {
+    const unsigned num_connections = static_cast<unsigned>(dnet->numConnections());
+    if (num_connections == 0) {
         string netName(dnet->name());
         logger.warning("Net %s is 0-Pin net. Ignore.", netName.c_str());
         return 0;
@@ -1887,6 +1888,10 @@ int readDefNet(defrCallbackType_e c, defiNet* dnet, defiUserData ud) {
     }
     
     Net* net = db->addNet(netName, ndr);
+    // Avoid exact-reserving millions of small nets; high-fanout nets benefit most.
+    if (num_connections > 4) {
+        net->pins.reserve(num_connections);
+    }
 
     if (dnet->hasUse()) {
         const string use(dnet->use());
@@ -1903,7 +1908,7 @@ int readDefNet(defrCallbackType_e c, defiNet* dnet, defiUserData ud) {
         }
     }
 
-    for (unsigned i = 0; i != (unsigned)dnet->numConnections(); ++i) {
+    for (unsigned i = 0; i != num_connections; ++i) {
         Pin* pin = nullptr;
         if (strcmp(dnet->instance(i), "PIN") == 0) {
             string iopinname(dnet->pin(i));
