@@ -5,6 +5,7 @@
 #include "Geometry.h"
 #include "Layer.h"
 #include "Net.h"
+#include "Setting.h"
 #include "common/utils/utils.h"
 
 using namespace db;
@@ -48,7 +49,9 @@ void IOPin::getBounds(int& lx, int& ly, int& hx, int& hy, int& rIndex) const {
 
 Pin::Pin(const PinType* type) : type(type) {}
 Pin::Pin(Cell* cell, int i) : cell(cell), type(cell->ctype()->pins[i]), parentCellPinId(i) {
-    name = cell->name() + ":" + type->name();
+    if (!setting.SkipDefNetWires) {
+        name = cell->name() + ":" + type->name();
+    }
 }
 Pin::Pin(IOPin* iopin) : iopin(iopin), type(iopin->type) {}
 Pin::Pin(const Pin& pin) : cell(pin.cell), net(pin.net), type(pin.type) {}

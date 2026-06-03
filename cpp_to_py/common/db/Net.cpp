@@ -1,5 +1,6 @@
 #include "Net.h"
 
+#include "Cell.h"
 #include "DatabaseClass.h"
 #include "DesignRule.h"
 #include "Layer.h"
@@ -126,6 +127,12 @@ int Net::getPin(const string& name) {
     for (int i = 0; i < (int)pins.size(); i++) {
         if (pins[i]->name == name) {
             return i;
+        }
+        if (pins[i]->name.empty() && pins[i]->cell != nullptr && pins[i]->type != nullptr) {
+            const string full_name = pins[i]->cell->name() + ":" + pins[i]->type->name();
+            if (full_name == name) {
+                return i;
+            }
         }
     }
     return -1;
