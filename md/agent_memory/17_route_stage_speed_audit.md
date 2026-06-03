@@ -246,3 +246,11 @@ Route net-name index optimization:
 - Validation after build/install/import passed for no-cache `visible_ariane` and `visible_mempool_group` with fast DEF components+nets enabled. Both had `unknown_nets=0`; timing, power, and group comparisons passed.
 - On `visible_mempool_group`, compared with `result/codex_dmp_rc_init_profile_mempool_group`, cumulative route profile points improved: `build_net_name_map 0.873 -> 0.209`, `map_pins_by_gpdb 0.967 -> 0.303`, `scan_route_blocks 1.633 -> 0.883`, `finalize_done 5.573 -> 4.933`, and `build_route_segments_graph 5.913 -> 4.999`. Total `build_rc 6.382 -> 6.351` was mostly masked by CUDA allocation variance in `initialize_dmp_rc_explicit` (`0.353 -> 1.228`).
 - The original DEF file remains read-only in this flow; fast DEF still uses the in-memory defr stub for skipped sections.
+
+
+Fast DEF name-index materialization optimization:
+
+- Added a char-range `Cell::pin(begin,end)` overload so the fast DEF net materializer can resolve cell pins without allocating a temporary pin-name string per connection. Existing `pin(const char*)` and `pin(const std::string&)` keep the same public behavior.
+- Added a local `FastDefNameIndex` helper in the fast DEF path. It builds an open-address table from existing object names with relaxed atomic CAS and then performs read-only char-buffer lookup. The component materializer uses it for `CellType` lookup; the net materializer uses it for cells and IO pins, with a validated-string fallback only for escaped DEF tokens. The original DEF file remains mmap-read only.
+- Validation after build/install/import passed no-cache `visible_ariane` and `visible_mempool_group` with fast DEF components+nets enabled. `visible_mempool_group` timing, power, and group checks passed with `wns_err=9.77207e-05` and `ptotal_err=0.0001035`.
+- On `visible_mempool_group`, compared with `result/codex_atomic_route_net_index_mempool_group`, read-side profile improved: `materialize_components 2.683 -> 2.117`, DEF stub pins parse `2.487 -> 2.071`, `read_def 10.984 -> 10.154`, GPDB `setup_nets 8.495 -> 6.451`, and total `read_input 23.674 -> 19.710`. The new net-materialize subprofile was `net_output_index=0.612`, `cell_name_index=0.145`, `parallel_build=1.031`, and `name_map=1.114`; net materialization is now mostly map/name construction rather than connection string lookup.

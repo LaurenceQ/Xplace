@@ -122,6 +122,7 @@ public:
 
     const std::string& name() const { return _name; }
     Pin* pin(const char* name) const;
+    Pin* pin(const char* begin, const char* end) const;
     Pin* pin(const std::string& name) const;
     Pin* pin(unsigned i) const { return _pins[i]; }
     std::vector<Pin*> pins() { return _pins; }

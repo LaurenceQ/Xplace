@@ -4,6 +4,8 @@
 #include <sstream>
 #include <chrono>
 #include <algorithm>
+#include <atomic>
+#include <cstdint>
 #include <cerrno>
 #include <cctype>
 #include <cstring>
@@ -14,6 +16,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "common/db/BsRouteInfo.h"
@@ -626,6 +629,153 @@ struct FastDefToken {
     }
 };
 
+
+bool fastDefTokenNeedsValidation(const FastDefToken& token)
+{
+    for (const char* p = token.begin; p < token.end; ++p) {
+        if (*p == 0x5c || *p == 0x20) {
+            return true;
+        }
+    }
+    return false;
+}
+
+struct FastDefNameIndexEntry {
+    const std::string* name = nullptr;
+    void* value = nullptr;
+};
+
+class FastDefNameIndex {
+public:
+    void build(std::vector<FastDefNameIndexEntry> entries, int num_threads)
+    {
+        entries_ = std::move(entries);
+        table_.clear();
+        mask_ = 0;
+        if (entries_.empty()) {
+            return;
+        }
+
+        std::size_t table_size = 1;
+        const std::size_t min_size = std::max<std::size_t>(2, entries_.size() * 2);
+        while (table_size < min_size) {
+            table_size <<= 1;
+        }
+        mask_ = table_size - 1;
+        table_ = std::vector<std::atomic<int>>(table_size);
+        num_threads = std::max(1, num_threads);
+
+        auto init_chunk = [&](int tid) {
+            const std::size_t begin = (table_.size() * static_cast<std::size_t>(tid)) /
+                                      static_cast<std::size_t>(num_threads);
+            const std::size_t end = (table_.size() * static_cast<std::size_t>(tid + 1)) /
+                                    static_cast<std::size_t>(num_threads);
+            for (std::size_t slot = begin; slot < end; ++slot) {
+                table_[slot].store(-1, std::memory_order_relaxed);
+            }
+        };
+
+        std::vector<std::thread> workers;
+        workers.reserve(num_threads > 1 ? static_cast<std::size_t>(num_threads - 1) : 0);
+        for (int tid = 1; tid < num_threads; ++tid) {
+            workers.emplace_back(init_chunk, tid);
+        }
+        init_chunk(0);
+        for (std::thread& worker : workers) {
+            worker.join();
+        }
+
+        auto insert_chunk = [&](int tid) {
+            const std::size_t begin = (entries_.size() * static_cast<std::size_t>(tid)) /
+                                      static_cast<std::size_t>(num_threads);
+            const std::size_t end = (entries_.size() * static_cast<std::size_t>(tid + 1)) /
+                                    static_cast<std::size_t>(num_threads);
+            for (std::size_t i = begin; i < end; ++i) {
+                if (entries_[i].name != nullptr && !entries_[i].name->empty()) {
+                    insert(static_cast<int>(i));
+                }
+            }
+        };
+
+        workers.clear();
+        for (int tid = 1; tid < num_threads; ++tid) {
+            workers.emplace_back(insert_chunk, tid);
+        }
+        insert_chunk(0);
+        for (std::thread& worker : workers) {
+            worker.join();
+        }
+    }
+
+    void* find(const FastDefToken& token) const
+    {
+        return find(token.begin, token.end);
+    }
+
+    void* find(const char* begin, const char* end) const
+    {
+        if (table_.empty() || begin == nullptr || end == nullptr || begin >= end) {
+            return nullptr;
+        }
+        std::size_t slot = static_cast<std::size_t>(hashRange(begin, end)) & mask_;
+        for (;;) {
+            const int entry_idx = table_[slot].load(std::memory_order_relaxed);
+            if (entry_idx < 0) {
+                return nullptr;
+            }
+            if (nameMatches(entry_idx, begin, end)) {
+                return entries_[static_cast<std::size_t>(entry_idx)].value;
+            }
+            slot = (slot + 1) & mask_;
+        }
+    }
+
+private:
+    static std::uint64_t hashRange(const char* begin, const char* end)
+    {
+        std::uint64_t hash = 1469598103934665603ULL;
+        for (const char* p = begin; p < end; ++p) {
+            hash ^= static_cast<unsigned char>(*p);
+            hash *= 1099511628211ULL;
+        }
+        return hash;
+    }
+
+    bool nameMatches(int entry_idx, const char* begin, const char* end) const
+    {
+        const FastDefNameIndexEntry& entry = entries_[static_cast<std::size_t>(entry_idx)];
+        if (entry.name == nullptr) {
+            return false;
+        }
+        const std::string& name = *entry.name;
+        return name.size() == static_cast<std::size_t>(end - begin) &&
+               std::memcmp(name.data(), begin, name.size()) == 0;
+    }
+
+    void insert(int entry_idx)
+    {
+        const std::string& name = *entries_[static_cast<std::size_t>(entry_idx)].name;
+        std::size_t slot = static_cast<std::size_t>(hashRange(name.data(), name.data() + name.size())) & mask_;
+        for (;;) {
+            int expected = -1;
+            if (table_[slot].compare_exchange_strong(expected,
+                                                     entry_idx,
+                                                     std::memory_order_relaxed,
+                                                     std::memory_order_relaxed)) {
+                return;
+            }
+            if (expected >= 0 && nameMatches(expected, name.data(), name.data() + name.size())) {
+                return;
+            }
+            slot = (slot + 1) & mask_;
+        }
+    }
+
+    std::vector<FastDefNameIndexEntry> entries_;
+    std::vector<std::atomic<int>> table_;
+    std::size_t mask_ = 0;
+};
+
 struct FastDefObjectRange {
     std::size_t begin = 0;
     std::size_t end = 0;
@@ -903,6 +1053,16 @@ void fastDefMaterializeComponents(Database& db,
     db.name_cells.reserve(base + count);
     num_threads = std::max(1, num_threads);
 
+    std::vector<FastDefNameIndexEntry> celltype_entries;
+    celltype_entries.reserve(db.celltypes.size());
+    for (CellType* celltype : db.celltypes) {
+        if (celltype != nullptr) {
+            celltype_entries.push_back(FastDefNameIndexEntry{&celltype->name, celltype});
+        }
+    }
+    FastDefNameIndex celltype_index;
+    celltype_index.build(std::move(celltype_entries), num_threads);
+
     auto build_chunk = [&](int tid) {
         const std::size_t begin = (count * static_cast<std::size_t>(tid)) /
                                   static_cast<std::size_t>(num_threads);
@@ -910,8 +1070,7 @@ void fastDefMaterializeComponents(Database& db,
                                 static_cast<std::size_t>(num_threads);
         for (std::size_t i = begin; i < end; ++i) {
             const FastDefComponent& component = components[i];
-            std::string type_name(component.type.begin, component.type.end);
-            CellType* celltype = db.getCellType(type_name);
+            CellType* celltype = static_cast<CellType*>(celltype_index.find(component.type));
             std::string cell_name(component.name.begin, component.name.end);
             validate_token(cell_name);
 
@@ -1087,6 +1246,26 @@ void fastDefMaterializeNets(Database& db,
                             const std::vector<FastDefNet>& parsed_nets,
                             int num_threads)
 {
+    const bool profile = defProfileEnabled();
+    const auto profile_start = std::chrono::steady_clock::now();
+    auto profile_last = profile_start;
+    auto profile_log = [&](const char* phase) {
+        if (!profile) {
+            return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        const double elapsed = std::chrono::duration<double>(now - profile_last).count();
+        const double total = std::chrono::duration<double>(now - profile_start).count();
+        std::fprintf(stdout,
+                     "[XPLACE_FAST_DEF_NETS_MATERIALIZE] phase=%s elapsed=%.3f total=%.3f threads=%d\n",
+                     phase,
+                     elapsed,
+                     total,
+                     num_threads);
+        std::fflush(stdout);
+        profile_last = now;
+    };
+
     std::vector<int> out_index(parsed_nets.size(), -1);
     std::size_t valid_count = 0;
     for (std::size_t i = 0; i < parsed_nets.size(); ++i) {
@@ -1094,18 +1273,57 @@ void fastDefMaterializeNets(Database& db,
         if (parsed.skip || parsed.connections.empty()) {
             continue;
         }
-        std::string net_name(parsed.name.begin, parsed.name.end);
-        validate_token(net_name);
-        if (net_name == "VDD" || net_name == "VSS") {
+        if (parsed.name.equals("VDD") || parsed.name.equals("VSS")) {
             continue;
+        }
+        if (fastDefTokenNeedsValidation(parsed.name)) {
+            std::string net_name(parsed.name.begin, parsed.name.end);
+            validate_token(net_name);
+            if (net_name == "VDD" || net_name == "VSS") {
+                continue;
+            }
         }
         out_index[i] = static_cast<int>(valid_count++);
     }
+    profile_log("net_output_index");
 
     const std::size_t base = db.nets.size();
     db.nets.resize(base + valid_count, nullptr);
     db.name_nets.reserve(base + valid_count);
     num_threads = std::max(1, num_threads);
+    profile_log("resize");
+
+    std::vector<FastDefNameIndexEntry> cell_entries;
+    cell_entries.reserve(db.cells.size());
+    for (Cell* cell : db.cells) {
+        if (cell != nullptr) {
+            cell_entries.push_back(FastDefNameIndexEntry{&cell->name(), cell});
+        }
+    }
+    FastDefNameIndex cell_index;
+    cell_index.build(std::move(cell_entries), num_threads);
+    profile_log("cell_name_index");
+
+    std::vector<FastDefNameIndexEntry> iopin_entries;
+    iopin_entries.reserve(db.iopins.size());
+    for (IOPin* iopin : db.iopins) {
+        if (iopin != nullptr) {
+            iopin_entries.push_back(FastDefNameIndexEntry{&iopin->name, iopin});
+        }
+    }
+    FastDefNameIndex iopin_index;
+    iopin_index.build(std::move(iopin_entries), num_threads);
+    profile_log("iopin_name_index");
+
+    auto find_validated_cell = [&](const FastDefToken& token) -> Cell* {
+        Cell* cell = static_cast<Cell*>(cell_index.find(token));
+        if (cell != nullptr || !fastDefTokenNeedsValidation(token)) {
+            return cell;
+        }
+        std::string cell_name(token.begin, token.end);
+        validate_token(cell_name);
+        return static_cast<Cell*>(cell_index.find(cell_name.data(), cell_name.data() + cell_name.size()));
+    };
 
     auto build_chunk = [&](int tid) {
         const std::size_t begin = (parsed_nets.size() * static_cast<std::size_t>(tid)) /
@@ -1129,22 +1347,18 @@ void fastDefMaterializeNets(Database& db,
             for (const FastDefConnection& connection : parsed.connections) {
                 Pin* pin = nullptr;
                 if (connection.is_iopin) {
-                    std::string iopin_name(connection.pin.begin, connection.pin.end);
-                    IOPin* iopin = db.getIOPin(iopin_name);
+                    IOPin* iopin = static_cast<IOPin*>(iopin_index.find(connection.pin));
                     if (!iopin) {
                         continue;
                     }
                     pin = iopin->pin;
                     iopin->is_connected.store(true, std::memory_order_relaxed);
                 } else {
-                    std::string cell_name(connection.inst.begin, connection.inst.end);
-                    validate_token(cell_name);
-                    Cell* cell = db.getCell(cell_name);
+                    Cell* cell = find_validated_cell(connection.inst);
                     if (!cell) {
                         continue;
                     }
-                    std::string pin_name(connection.pin.begin, connection.pin.end);
-                    pin = cell->pin(pin_name.c_str());
+                    pin = cell->pin(connection.pin.begin, connection.pin.end);
                     if (!pin) {
                         continue;
                     }
@@ -1167,6 +1381,7 @@ void fastDefMaterializeNets(Database& db,
     for (std::thread& worker : workers) {
         worker.join();
     }
+    profile_log("parallel_build");
 
     for (std::size_t i = 0; i < valid_count; ++i) {
         Net* net = db.nets[base + i];
@@ -1178,6 +1393,7 @@ void fastDefMaterializeNets(Database& db,
             logger.warning("Net re-defined: %s", net->name.c_str());
         }
     }
+    profile_log("name_map");
 }
 
 

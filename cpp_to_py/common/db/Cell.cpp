@@ -19,15 +19,26 @@ Cell::~Cell() {
 }
 
 Pin* Cell::pin(const char* name) const {
-    if (!_type || !name) {
+    if (name == nullptr) {
+        return nullptr;
+    }
+    return pin(name, name + std::strlen(name));
+}
+
+Pin* Cell::pin(const char* begin, const char* end) const {
+    if (!_type || begin == nullptr || end == nullptr || begin >= end) {
         return nullptr;
     }
 
-    const char first = name[0];
+    const char first = *begin;
+    const std::size_t name_size = static_cast<std::size_t>(end - begin);
     const std::vector<PinType*>& type_pins = _type->pins;
     for (unsigned i = 0; i != type_pins.size(); ++i) {
         const std::string& pin_name = type_pins[i]->name();
-        if (!pin_name.empty() && pin_name[0] == first && std::strcmp(pin_name.c_str(), name) == 0) {
+        if (pin_name.size() == name_size &&
+            !pin_name.empty() &&
+            pin_name[0] == first &&
+            std::memcmp(pin_name.data(), begin, name_size) == 0) {
             return _pins[i];
         }
     }
@@ -35,7 +46,7 @@ Pin* Cell::pin(const char* name) const {
 }
 
 Pin* Cell::pin(const string& name) const {
-    return pin(name.c_str());
+    return pin(name.data(), name.data() + name.size());
 }
 
 void Cell::ctype(CellType* t) {
