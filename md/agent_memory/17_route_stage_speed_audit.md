@@ -186,3 +186,23 @@ DEF char-buffer scanner prototype:
   total `read_def=34.866s`. This validates the user's proposed buffer/object
   offset direction; the next step is to reuse these section offsets for a
   direct-timing fast parser instead of only profiling them.
+
+
+Gated fast DEF components experiment:
+
+- Added `XPLACE_FAST_DEF_COMPONENTS=1` as a direct-timing-only experiment. It
+  parses the `COMPONENTS` section from the mmap buffer, creates component
+  objects in parallel into pre-sized `db.cells` slots, and then serially builds
+  `name_cells`. `CellType::usedCount` is now a relaxed atomic so parallel
+  `Cell::ctype()` has no data race.
+- Directly calling `db.addCell()` from worker threads is still avoided because
+  it mutates `db.cells`, `name_cells`, and `usedCount` together. The safe pattern
+  is pre-sized vector slot writes plus a separate map-build phase.
+- Validation passed for `visible_ariane` and `visible_mempool_group` no-cache
+  timing/power/group comparisons with `XPLACE_FAST_DEF_COMPONENTS=1`.
+  On `mempool_group`, fast component parse took `0.597s` and parallel
+  materialization reached `3.372s`, but `defrRead()` still spent `5.520s`
+  lexing the component section even without component callbacks. Total
+  `read_input=45.008s`; the experiment is useful scaffolding but not the final
+  read-input win. The next real target is a full direct-timing DEF parser that
+  bypasses `defrRead()` for both `COMPONENTS` and `NETS`.

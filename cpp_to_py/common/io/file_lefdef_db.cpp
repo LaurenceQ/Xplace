@@ -595,6 +595,458 @@ int readDefGroupMember(defrCallbackType_e c, const char* cl, defiUserData ud);
 int readDefGroup(defrCallbackType_e c, defiGroup* dgp, defiUserData ud);
 inline void fastCopy(char* t, const char* s, size_t n);
 
+
+namespace {
+
+bool fastDefComponentsEnabled()
+{
+    const char* value = std::getenv("XPLACE_FAST_DEF_COMPONENTS");
+    if (value == nullptr || value[0] == '\0') {
+        return false;
+    }
+    return !(value[0] == '0' ||
+             value[0] == 'f' || value[0] == 'F' ||
+             value[0] == 'n' || value[0] == 'N');
+}
+
+struct FastDefToken {
+    const char* begin = nullptr;
+    const char* end = nullptr;
+
+    bool empty() const { return begin == end; }
+
+    bool equals(const char* text) const
+    {
+        return defTokenEquals(begin, end, text);
+    }
+
+    std::string str() const
+    {
+        return std::string(begin, end);
+    }
+};
+
+struct FastDefObjectRange {
+    std::size_t begin = 0;
+    std::size_t end = 0;
+};
+
+struct FastDefComponent {
+    FastDefToken name;
+    FastDefToken type;
+    int x = INT_MIN;
+    int y = INT_MIN;
+    int orient = -1;
+    char placement = 'u';  // u: unplaced, p: placed, f: fixed
+};
+
+const char* fastDefSkipWsAndComments(const char* p, const char* end)
+{
+    while (p < end) {
+        while (p < end && std::isspace(static_cast<unsigned char>(*p))) {
+            ++p;
+        }
+        if (p < end && *p == '#') {
+            while (p < end && *p != '\n') {
+                ++p;
+            }
+            continue;
+        }
+        break;
+    }
+    return p;
+}
+
+bool fastDefNextToken(const char*& p, const char* end, FastDefToken& token)
+{
+    p = fastDefSkipWsAndComments(p, end);
+    if (p >= end) {
+        token = FastDefToken{end, end};
+        return false;
+    }
+    const char ch = *p;
+    if (ch == '(' || ch == ')' || ch == '+' || ch == '-' || ch == ';') {
+        token = FastDefToken{p, p + 1};
+        ++p;
+        return true;
+    }
+    const char* begin = p;
+    while (p < end) {
+        const char c = *p;
+        if (std::isspace(static_cast<unsigned char>(c)) ||
+            c == '(' || c == ')' || c == '+' || c == '-' || c == ';') {
+            break;
+        }
+        ++p;
+    }
+    token = FastDefToken{begin, p};
+    return true;
+}
+
+bool fastDefParseIntToken(const FastDefToken& token, int& value)
+{
+    if (token.empty()) {
+        return false;
+    }
+    const char* p = token.begin;
+    bool negative = false;
+    if (p < token.end && *p == '-') {
+        negative = true;
+        ++p;
+    }
+    if (p == token.end || !std::isdigit(static_cast<unsigned char>(*p))) {
+        return false;
+    }
+    long long result = 0;
+    while (p < token.end && std::isdigit(static_cast<unsigned char>(*p))) {
+        result = result * 10 + (*p - '0');
+        ++p;
+    }
+    if (p != token.end) {
+        return false;
+    }
+    value = static_cast<int>(negative ? -result : result);
+    return true;
+}
+
+int fastDefOrient(const FastDefToken& token)
+{
+    if (token.equals("N")) return 0;
+    if (token.equals("W")) return 1;
+    if (token.equals("S")) return 2;
+    if (token.equals("E")) return 3;
+    if (token.equals("FN")) return 4;
+    if (token.equals("FW")) return 5;
+    if (token.equals("FS")) return 6;
+    if (token.equals("FE")) return 7;
+    if (token.equals("NONE")) return -1;
+    return 0;
+}
+
+void fastDefCollectObjectRanges(const char* data,
+                                const DefBufferSection& section,
+                                int num_threads,
+                                std::vector<FastDefObjectRange>& ranges)
+{
+    ranges.clear();
+    if (!section.found || section.body_begin >= section.end_begin) {
+        return;
+    }
+    num_threads = std::max(1, num_threads);
+    const std::size_t begin = section.body_begin;
+    const std::size_t end = section.end_begin;
+    const std::size_t size = end - begin;
+    std::vector<std::vector<std::size_t>> starts_by_thread(num_threads);
+
+    auto scan_chunk = [&](int tid) {
+        const std::size_t chunk_begin =
+            begin + (size * static_cast<std::size_t>(tid)) / static_cast<std::size_t>(num_threads);
+        const std::size_t chunk_end =
+            begin + (size * static_cast<std::size_t>(tid + 1)) / static_cast<std::size_t>(num_threads);
+        const std::size_t scan_begin = defAlignLineStart(data, end, chunk_begin);
+        const std::size_t scan_end = (tid + 1 == num_threads) ? end : defAlignLineStart(data, end, chunk_end);
+        std::vector<std::size_t>& starts = starts_by_thread[tid];
+        starts.reserve(static_cast<std::size_t>(section.declared_count > 0
+                           ? section.declared_count / num_threads + 1
+                           : 1024));
+        for (std::size_t line_begin_offset = scan_begin; line_begin_offset < scan_end;) {
+            const void* newline = std::memchr(data + line_begin_offset, '\n', scan_end - line_begin_offset);
+            const std::size_t line_end_offset = newline == nullptr ? scan_end : static_cast<const char*>(newline) - data;
+            const std::size_t next_line_offset = line_end_offset < scan_end ? line_end_offset + 1 : line_end_offset;
+            const char* line_begin = data + line_begin_offset;
+            const char* line_end = data + line_end_offset;
+            const char* first = defSkipWs(line_begin, line_end);
+            if (first < line_end && *first == '-') {
+                starts.push_back(static_cast<std::size_t>(first - data));
+            }
+            line_begin_offset = next_line_offset;
+        }
+    };
+
+    std::vector<std::thread> workers;
+    workers.reserve(num_threads > 1 ? static_cast<std::size_t>(num_threads - 1) : 0);
+    for (int tid = 1; tid < num_threads; ++tid) {
+        workers.emplace_back(scan_chunk, tid);
+    }
+    scan_chunk(0);
+    for (std::thread& worker : workers) {
+        worker.join();
+    }
+
+    std::size_t total = 0;
+    for (const auto& starts : starts_by_thread) {
+        total += starts.size();
+    }
+    std::vector<std::size_t> starts;
+    starts.reserve(total);
+    for (const auto& local : starts_by_thread) {
+        starts.insert(starts.end(), local.begin(), local.end());
+    }
+    starts_by_thread.clear();
+    std::sort(starts.begin(), starts.end());
+
+    ranges.resize(starts.size());
+    for (std::size_t i = 0; i < starts.size(); ++i) {
+        ranges[i].begin = starts[i];
+        ranges[i].end = (i + 1 < starts.size()) ? starts[i + 1] : section.end_begin;
+    }
+}
+
+bool fastDefParseComponent(const char* data,
+                           const FastDefObjectRange& range,
+                           FastDefComponent& component)
+{
+    const char* p = data + range.begin;
+    const char* end = data + range.end;
+    FastDefToken token;
+    if (!fastDefNextToken(p, end, token) || !token.equals("-")) {
+        return false;
+    }
+    if (!fastDefNextToken(p, end, component.name) || component.name.empty()) {
+        return false;
+    }
+    if (!fastDefNextToken(p, end, component.type) || component.type.empty()) {
+        return false;
+    }
+
+    while (fastDefNextToken(p, end, token)) {
+        if (token.equals(";")) {
+            return true;
+        }
+        if (token.equals("UNPLACED")) {
+            component.placement = 'u';
+            continue;
+        }
+        if (!token.equals("PLACED") && !token.equals("FIXED")) {
+            continue;
+        }
+        component.placement = token.equals("FIXED") ? 'f' : 'p';
+        FastDefToken open;
+        FastDefToken x_token;
+        FastDefToken y_token;
+        FastDefToken close;
+        FastDefToken orient;
+        if (!fastDefNextToken(p, end, open) || !open.equals("(") ||
+            !fastDefNextToken(p, end, x_token) ||
+            !fastDefNextToken(p, end, y_token) ||
+            !fastDefNextToken(p, end, close) || !close.equals(")") ||
+            !fastDefNextToken(p, end, orient)) {
+            return false;
+        }
+        if (!fastDefParseIntToken(x_token, component.x) ||
+            !fastDefParseIntToken(y_token, component.y)) {
+            return false;
+        }
+        component.orient = fastDefOrient(orient);
+    }
+    return false;
+}
+
+bool fastDefParseComponents(const char* data,
+                            const DefBufferSection& section,
+                            int num_threads,
+                            std::vector<FastDefComponent>& components)
+{
+    std::vector<FastDefObjectRange> ranges;
+    fastDefCollectObjectRanges(data, section, num_threads, ranges);
+    if (section.declared_count >= 0 &&
+        ranges.size() != static_cast<std::size_t>(section.declared_count)) {
+        std::fprintf(stderr,
+                     "[XPLACE_FAST_DEF_COMPONENTS] component count mismatch declared=%lld found=%zu\n",
+                     section.declared_count, ranges.size());
+        return false;
+    }
+
+    components.resize(ranges.size());
+    num_threads = std::max(1, num_threads);
+    std::vector<int> ok(num_threads, 1);
+    auto parse_chunk = [&](int tid) {
+        const std::size_t begin = (ranges.size() * static_cast<std::size_t>(tid)) /
+                                  static_cast<std::size_t>(num_threads);
+        const std::size_t end = (ranges.size() * static_cast<std::size_t>(tid + 1)) /
+                                static_cast<std::size_t>(num_threads);
+        for (std::size_t i = begin; i < end; ++i) {
+            if (!fastDefParseComponent(data, ranges[i], components[i])) {
+                ok[tid] = 0;
+                return;
+            }
+        }
+    };
+
+    std::vector<std::thread> workers;
+    workers.reserve(num_threads > 1 ? static_cast<std::size_t>(num_threads - 1) : 0);
+    for (int tid = 1; tid < num_threads; ++tid) {
+        workers.emplace_back(parse_chunk, tid);
+    }
+    parse_chunk(0);
+    for (std::thread& worker : workers) {
+        worker.join();
+    }
+    return std::all_of(ok.begin(), ok.end(), [](int value) { return value != 0; });
+}
+
+void fastDefMaterializeComponents(Database& db,
+                                  const std::vector<FastDefComponent>& components,
+                                  int num_threads)
+{
+    const std::size_t base = db.cells.size();
+    const std::size_t count = components.size();
+    db.cells.resize(base + count, nullptr);
+    db.name_cells.reserve(base + count);
+    num_threads = std::max(1, num_threads);
+
+    auto build_chunk = [&](int tid) {
+        const std::size_t begin = (count * static_cast<std::size_t>(tid)) /
+                                  static_cast<std::size_t>(num_threads);
+        const std::size_t end = (count * static_cast<std::size_t>(tid + 1)) /
+                                static_cast<std::size_t>(num_threads);
+        for (std::size_t i = begin; i < end; ++i) {
+            const FastDefComponent& component = components[i];
+            std::string type_name(component.type.begin, component.type.end);
+            CellType* celltype = db.getCellType(type_name);
+            std::string cell_name(component.name.begin, component.name.end);
+            validate_token(cell_name);
+
+            Cell* cell = new Cell(cell_name, celltype);
+            if (component.placement == 'u') {
+                cell->fixed(false);
+                cell->unplace();
+            } else {
+                cell->place(component.x, component.y, component.orient);
+                if (component.placement == 'f') {
+                    cell->fixed(true);
+                } else if (celltype && (celltype->cls == "CORE" || celltype->cls == "BLOCK")) {
+                    cell->fixed(false);
+                } else {
+                    cell->fixed(true);
+                }
+            }
+            db.cells[base + i] = cell;
+        }
+    };
+
+    std::vector<std::thread> workers;
+    workers.reserve(num_threads > 1 ? static_cast<std::size_t>(num_threads - 1) : 0);
+    for (int tid = 1; tid < num_threads; ++tid) {
+        workers.emplace_back(build_chunk, tid);
+    }
+    build_chunk(0);
+    for (std::thread& worker : workers) {
+        worker.join();
+    }
+
+    for (std::size_t i = 0; i < count; ++i) {
+        Cell* cell = db.cells[base + i];
+        if (!cell) {
+            continue;
+        }
+        auto inserted = db.name_cells.emplace(cell->name(), cell);
+        if (!inserted.second) {
+            logger.warning("cell re-defined: %s", cell->name().c_str());
+        }
+    }
+}
+
+bool readDEFWithFastComponents(Database& db, const std::string& file)
+{
+    if (!fastDefComponentsEnabled() ||
+        !setting.SkipDefNetWires ||
+        !setting.SkipDefBlockages ||
+        setting.EnablePG ||
+        setting.EnableFence) {
+        return false;
+    }
+
+    const auto start = std::chrono::steady_clock::now();
+    auto seconds_since = [](std::chrono::steady_clock::time_point t) {
+        return std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count();
+    };
+
+    DefMappedFile mapped(file);
+    if (mapped.data == nullptr || mapped.size == 0) {
+        return false;
+    }
+    DefBufferSection components_section;
+    defFindSection(mapped.data, mapped.size, "COMPONENTS", components_section);
+    if (!components_section.found) {
+        std::fprintf(stderr, "[XPLACE_FAST_DEF_COMPONENTS] COMPONENTS section not found; fallback\n");
+        return false;
+    }
+
+    int num_threads = std::max(1, setting.numThreads);
+    if (const char* env_threads = std::getenv("XPLACE_FAST_DEF_THREADS")) {
+        const int value = std::atoi(env_threads);
+        if (value > 0) {
+            num_threads = value;
+        }
+    }
+
+    std::vector<FastDefComponent> components;
+    if (!fastDefParseComponents(mapped.data, components_section, num_threads, components)) {
+        std::fprintf(stderr, "[XPLACE_FAST_DEF_COMPONENTS] parse failed; fallback\n");
+        return false;
+    }
+    std::fprintf(stdout,
+                 "[XPLACE_FAST_DEF_COMPONENTS] phase=parse_components elapsed=%.3f components=%zu threads=%d\n",
+                 seconds_since(start), components.size(), num_threads);
+    std::fflush(stdout);
+
+    fastDefMaterializeComponents(db, components, num_threads);
+    components.clear();
+    components.shrink_to_fit();
+    std::fprintf(stdout,
+                 "[XPLACE_FAST_DEF_COMPONENTS] phase=materialize_components elapsed=%.3f cells=%zu\n",
+                 seconds_since(start), db.cells.size());
+    std::fflush(stdout);
+
+    FILE* fp = nullptr;
+    if (!(fp = fopen(file.c_str(), "r"))) {
+        logger.error("Unable to open DEF file: %s", file.c_str());
+        return false;
+    }
+
+    g_def_profile.begin();
+
+    defrSetDesignCbk(readDefDesign);
+    defrSetUnitsCbk(readDefUnits);
+    defrSetVersionCbk(readDefVersion);
+    defrSetDieAreaCbk(readDefDieArea);
+    defrSetRowCbk(readDefRow);
+    defrSetTrackCbk(readDefTrack);
+    defrSetGcellGridCbk(readDefGcellGrid);
+    defrSetViaStartCbk(readDefViaStart);
+    defrSetViaCbk(readDefVia);
+    defrSetNonDefaultCbk(readDefNdr);
+    defrSetComponentStartCbk(readDefComponentStart);
+    defrSetStartPinsCbk(readDefPinStart);
+    defrSetPinCbk(readDefPin);
+    defrSetNetStartCbk(readDefNetStart);
+    defrSetNetCbk(readDefNet);
+
+    defrInit();
+    defrReset();
+    const int res = defrRead(fp, file.c_str(), (void*)&db, 1);
+    if (res) {
+        logger.error("Error in reading DEF");
+        g_def_profile.finish("fast_components_error");
+        defrReleaseNResetMemory();
+        defrUnsetCallbacks();
+        fclose(fp);
+        return false;
+    }
+    g_def_profile.finish("fast_components_ok");
+    defrReleaseNResetMemory();
+    defrUnsetCallbacks();
+    fclose(fp);
+    std::fprintf(stdout,
+                 "[XPLACE_FAST_DEF_COMPONENTS] phase=total elapsed=%.3f\n",
+                 seconds_since(start));
+    std::fflush(stdout);
+    return true;
+}
+
+}  // namespace
+
 bool Database::readLEF(const std::string& file) {
     FILE* fp;
     if (!(fp = fopen(file.c_str(), "r"))) {
@@ -644,6 +1096,9 @@ bool Database::readDEF(const std::string& file) {
 #endif
 
     profileDefBufferScan(file, setting.numThreads);
+    if (readDEFWithFastComponents(*this, file)) {
+        return true;
+    }
 
     g_def_profile.begin();
 

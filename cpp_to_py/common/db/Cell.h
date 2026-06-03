@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -55,7 +56,7 @@ public:
     vector<PinType*> pins;
     int edgetypeL = 0;
     int edgetypeR = 0;
-    int usedCount = 0;
+    std::atomic<int> usedCount{0};
 
     CellType(const string& name, int libcell) : _libcell(libcell), name(name) {}
     ~CellType();

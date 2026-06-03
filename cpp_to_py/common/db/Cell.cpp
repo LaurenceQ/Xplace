@@ -47,7 +47,7 @@ void Cell::ctype(CellType* t) {
         return;
     }
     _type = t;
-    ++(_type->usedCount);
+    _type->usedCount.fetch_add(1, std::memory_order_relaxed);
     _pins.resize(_type->pins.size(), nullptr);
     for (unsigned i = 0; i != _pins.size(); ++i) {
         _pins[i] = new Pin(this, i);
