@@ -47,3 +47,69 @@
   are not all reported as one `build_rc` number.
 - Next speed target is Xplace `read_input`: it reparses Liberty/LEF/DEF and
   builds rawdb/gpdb every run; cache/narrower timing-only read path would help.
+
+## 2026-06-03 No-Cache Read/Input And Route RC Speed Work
+
+All accepted changes below were built from `build/`, followed by `make install`,
+then checked with no route cache (`GPUTIMER_ROUTE_SEG_DISABLE_CACHE=1`). Smoke
+case was `visible_ariane`; profile case was `visible_mempool_group` with
+`XPLACE_IO_PROFILE=1`, `XPLACE_TIMER_PROFILE=1`, `DMP_RC_PROFILE=1`, and
+`GPUTIMER_ROUTE_SEG_PROFILE=1`.
+
+Accepted read-input / GPDB commits:
+
+- `711db59 Avoid GPDB port map name copies`: changed `GPNode::portMap` to
+  `std::unordered_map<std::string_view, int>` and borrowed macro pin names.
+  Targeted `setup_nets` sub-stages improved despite noisy total `read_def`.
+- `79d4246 Avoid bounds checks in GPDB net setup`: replaced hot-loop
+  `nodes.at(...)` with `nodes[...]` inside validated `setupNets` ids.
+  `visible_ariane` passed; `visible_mempool_group` profile showed
+  `setup_nets=6.986`, `read_input=48.473`.
+- `884dff7 Build GPDB pin index maps during net setup`: filled
+  `pin_id2node_id`, `pin_id2net_id`, and `pin_names` during the existing
+  parallel pin fill so `setupIndexMap` skips its redundant 12M-pin walk.
+  Compared with `79d4246` profile: `setup_index_map 0.698 -> 0.344`,
+  `read_input 48.473 -> 48.136`; `pin_fill` increased slightly as expected.
+
+Accepted route-RC commits:
+
+- `fc7460b Speed up route pin location lookup`: replaced per-pin map/vote
+  structures with stack-backed one-box fast paths and precomputed routing
+  level-to-layer lookup. This reduced targeted pin-location work, with total
+  `build_rc` still noisy.
+- `f98a651 Use flat adjacency for route RC finalization`: replaced large-net
+  `vector<vector<int>>` repair adjacency with a flat adjacency and used the
+  same large-net path in prune. On `visible_mempool_group`, compared with the
+  prior committed profile: `repair_work 3.366 -> 2.337`,
+  `prune_work 2.520 -> 1.732`, finalize wall `0.942 -> 0.817`, and
+  `build_route_segments_graph 5.941 -> 5.678`.
+- `11fd6d4 Copy route RC graph ranges during materialization`: copied
+  contiguous `edge_res`, `node2pin`, and `node_cap` ranges directly during
+  HostRcGraph materialization. Compared with `f98a651` profile:
+  `append 1.432 -> 1.186`, `build_route_segments_graph 5.678 -> 5.338`.
+  `initialize_dmp_rc_explicit` varied widely run-to-run and should not be used
+  alone to judge this host graph construction change.
+
+Rejected/reverted experiments:
+
+- Route attach duplicate detection with small-net linear scans (thresholds 32
+  and 8) was correct but did not improve `attach_work`; reverted.
+- `CellType` pin-name index in `common/db/Cell` regressed `read_def`; reverted.
+- Moving GPNode names/cell-type strings into `node_id2*` arrays reduced
+  `setup_index_map 0.344 -> 0.188` but enlarged/touched GPNode enough that the
+  same run regressed `setup_nets 7.083 -> 9.981` and `read_input 48.136 ->
+  54.305`; reverted and reinstalled `884dff7` before continuing.
+- Earlier attempts that should stay rejected: robin-hood route net-name map,
+  raw DB secondary cell-name index, DEF connection marker check caching, and
+  direct route trailing-integer parser.
+
+Current no-cache `visible_mempool_group` profile after `11fd6d4`:
+
+```text
+read_input 49.115  (read_def noise: 38.266)
+setup_nets 6.997, setup_index_map 0.334
+build_net_name_map 1.010, map_pins_by_gpdb 1.154, scan_route_blocks 1.691
+parse_segments 2.700, finalize_done 5.055, append 1.186
+build_route_segments_graph 5.338
+build_rc 7.501 (dominated by noisy initialize_dmp_rc_explicit=2.052 in this run)
+```
