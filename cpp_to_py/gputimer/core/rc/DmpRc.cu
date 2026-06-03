@@ -50,6 +50,14 @@ static bool dmp_rc_profile_enabled()
            dmp_rc_env_enabled("DMP_DEBUG_TIMING");
 }
 
+__global__ void scale_explicit_edge_res_kernel(float* edge_res, int num_edges, float scale)
+{
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < num_edges) {
+        edge_res[idx] *= scale;
+    }
+}
+
 template <typename T>
 static void dmp_rc_cuda_malloc_checked(T** ptr, size_t count, const char* name)
 {
@@ -442,9 +450,6 @@ void GPUTimer::initialize_dmp_rc_explicit(
                   int num_nodes,
                   int num_edges){
     const float rc_time_factor = (res_unit * cap_unit) / time_unit();
-    for (float& res : host_edge_res) {
-        res *= rc_time_factor;
-    }
     logger.info("DMP explicit RC time scale: res_unit=%.5E cap_unit=%.5E time_unit=%.5E factor=%.5E",
                 res_unit, cap_unit, time_unit(), rc_time_factor);
     h_dmp_db = new DmpModel(this);
@@ -460,8 +465,16 @@ void GPUTimer::initialize_dmp_rc_explicit(
                                        num_nets,
                                        num_nodes,
                                        num_edges);
-    cudaMalloc(&dmp_db, sizeof(DmpModel));
-    cudaMemcpy(dmp_db, h_dmp_db, sizeof(DmpModel), cudaMemcpyHostToDevice);
+    if (num_edges > 0 && rc_time_factor != 1.0f) {
+        constexpr int threads = 256;
+        const int blocks = (num_edges + threads - 1) / threads;
+        clear_stale_cuda_error("scale_explicit_edge_res");
+        scale_explicit_edge_res_kernel<<<blocks, threads>>>(h_dmp_db->edge_res, num_edges, rc_time_factor);
+        gpuErrchk(cudaPeekAtLastError());
+        gpuErrchk(cudaDeviceSynchronize());
+    }
+    dmp_rc_cuda_malloc_checked(&dmp_db, 1, "dmp_db");
+    dmp_rc_cuda_memcpy_checked(dmp_db, h_dmp_db, sizeof(DmpModel), cudaMemcpyHostToDevice, "dmp_db");
    
 }
 
