@@ -16,13 +16,20 @@ Cell::~Cell() {
     _pins.clear();
 }
 
-Pin* Cell::pin(const string& name) const {
+Pin* Cell::pin(const char* name) const {
+    if (!name) {
+        return nullptr;
+    }
     for (Pin* pin : _pins) {
         if (pin->type->name() == name) {
             return pin;
         }
     }
     return nullptr;
+}
+
+Pin* Cell::pin(const string& name) const {
+    return pin(name.c_str());
 }
 
 void Cell::ctype(CellType* t) {
