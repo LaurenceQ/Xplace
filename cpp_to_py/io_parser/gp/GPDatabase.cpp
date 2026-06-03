@@ -156,7 +156,7 @@ void GPDatabase::addPin(db::Pin* dbpin, const db::PinType* pintype, GPNode& node
     if (isIOPin) {
         pin.setName(macroPinName);
     } else {
-        pin.setName(node.getName() + ":" + macroPinName);
+        pin.setNameFromNodePort(node.getName(), macroPinName);
     }
     pin.setMacroNameRef(macroPinName);
 
@@ -385,7 +385,7 @@ void GPDatabase::setupNets() {
             if (is_iopin) {
                 pin.setName(macro_pin_name);
             } else {
-                pin.setName(node.getName() + ":" + macro_pin_name);
+                pin.setNameFromNodePort(node.getName(), macro_pin_name);
             }
             pin.setMacroNameRef(macro_pin_name);
             pin.setRelLx(pintype->boundLX);

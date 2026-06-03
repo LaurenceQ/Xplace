@@ -141,6 +141,14 @@ public:
         macro_name.clear();
         macro_name_ref = &name_ref;
     }
+    void setNameFromNodePort(const std::string& node_name, const std::string& port_name) {
+        name.clear();
+        name.reserve(node_name.size() + 1 + port_name.size());
+        name.append(node_name);
+        name.push_back(':');
+        name.append(port_name);
+        name_ref = nullptr;
+    }
 
 protected:
     std::string macro_name = "";
