@@ -599,6 +599,20 @@ HostRcGraph GPUTimer::build_openroad_route_segments_rc(const std::string& file) 
                      openroad_grid.origin_y);
     }
 
+    std::vector<const db::Layer*> routing_level_to_layer;
+    int max_routing_level = 0;
+    for (const db::Layer& layer : gtdb.rawdb.layers) {
+        if (layer.rIndex >= 0) {
+            max_routing_level = std::max(max_routing_level, layer.rIndex + 1);
+        }
+    }
+    routing_level_to_layer.assign(static_cast<std::size_t>(max_routing_level + 1), nullptr);
+    for (const db::Layer& layer : gtdb.rawdb.layers) {
+        if (layer.rIndex >= 0) {
+            routing_level_to_layer[static_cast<std::size_t>(layer.rIndex + 1)] = &layer;
+        }
+    }
+
     HostRcGraph graph;
     graph.includes_pin_caps.assign(num_nets, 0);
 
@@ -706,7 +720,12 @@ HostRcGraph GPUTimer::build_openroad_route_segments_rc(const std::string& file) 
         for (int pin_pos = pin_begin; pin_pos < pin_end; ++pin_pos) {
             const int pin_id = flat_net2pin_map[pin_pos];
             OpenroadPinRouteLoc loc;
-            openroad_pin_route_loc(gtdb, pin_id_to_dbpin, openroad_grid, pin_id, loc);
+            openroad_pin_route_loc(gtdb,
+                                   pin_id_to_dbpin,
+                                   routing_level_to_layer,
+                                   openroad_grid,
+                                   pin_id,
+                                   loc);
             pin_route_locs[pin_pos - pin_begin] = loc;
             if (!debug_pin_net.empty() &&
                 net_idx < static_cast<int>(gtdb.net_names.size()) &&

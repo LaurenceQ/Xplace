@@ -7,6 +7,135 @@
 namespace gt {
 namespace openroad_rc {
 
+namespace {
+
+constexpr int kInlinePinBoxCapacity = 8;
+using PinBox = std::array<int, 4>;
+using PinGrid = std::pair<int, int>;
+
+struct PinBoxList {
+    std::array<PinBox, kInlinePinBoxCapacity> inline_boxes{};
+    int inline_count = 0;
+    std::vector<PinBox> overflow;
+
+    void clear()
+    {
+        inline_count = 0;
+        overflow.clear();
+    }
+
+    bool empty() const
+    {
+        return inline_count == 0 && overflow.empty();
+    }
+
+    int size() const
+    {
+        return overflow.empty() ? inline_count : static_cast<int>(overflow.size());
+    }
+
+    const PinBox& front() const
+    {
+        return overflow.empty() ? inline_boxes[0] : overflow.front();
+    }
+
+    void push(const PinBox& box)
+    {
+        if (overflow.empty() && inline_count < kInlinePinBoxCapacity) {
+            inline_boxes[inline_count++] = box;
+            return;
+        }
+        if (overflow.empty()) {
+            overflow.reserve(kInlinePinBoxCapacity * 2);
+            for (int i = 0; i < inline_count; ++i) {
+                overflow.emplace_back(inline_boxes[i]);
+            }
+            inline_count = 0;
+        }
+        overflow.emplace_back(box);
+    }
+
+    template <typename Fn>
+    void for_each(Fn fn) const
+    {
+        if (!overflow.empty()) {
+            for (const PinBox& box : overflow) {
+                fn(box);
+            }
+            return;
+        }
+        for (int i = 0; i < inline_count; ++i) {
+            fn(inline_boxes[i]);
+        }
+    }
+};
+
+struct PinGridVotes {
+    std::array<PinGrid, kInlinePinBoxCapacity> inline_grids{};
+    std::array<int, kInlinePinBoxCapacity> inline_counts{};
+    int inline_count = 0;
+    std::vector<PinGrid> overflow_grids;
+    std::vector<int> overflow_counts;
+
+    void add(const PinGrid& grid)
+    {
+        if (overflow_grids.empty()) {
+            for (int i = 0; i < inline_count; ++i) {
+                if (inline_grids[i] == grid) {
+                    ++inline_counts[i];
+                    return;
+                }
+            }
+            if (inline_count < kInlinePinBoxCapacity) {
+                inline_grids[inline_count] = grid;
+                inline_counts[inline_count] = 1;
+                ++inline_count;
+                return;
+            }
+            overflow_grids.reserve(kInlinePinBoxCapacity * 2);
+            overflow_counts.reserve(kInlinePinBoxCapacity * 2);
+            for (int i = 0; i < inline_count; ++i) {
+                overflow_grids.emplace_back(inline_grids[i]);
+                overflow_counts.emplace_back(inline_counts[i]);
+            }
+            inline_count = 0;
+        }
+
+        for (int i = 0; i < static_cast<int>(overflow_grids.size()); ++i) {
+            if (overflow_grids[i] == grid) {
+                ++overflow_counts[i];
+                return;
+            }
+        }
+        overflow_grids.emplace_back(grid);
+        overflow_counts.emplace_back(1);
+    }
+
+    PinGrid best_grid() const
+    {
+        PinGrid best{0, 0};
+        int best_votes = -1;
+        auto consider = [&](const PinGrid& grid, int votes) {
+            if (votes > best_votes) {
+                best_votes = votes;
+                best = grid;
+            }
+        };
+        if (!overflow_grids.empty()) {
+            for (int i = 0; i < static_cast<int>(overflow_grids.size()); ++i) {
+                consider(overflow_grids[i], overflow_counts[i]);
+            }
+        } else {
+            for (int i = 0; i < inline_count; ++i) {
+                consider(inline_grids[i], inline_counts[i]);
+            }
+        }
+        return best;
+    }
+};
+
+}  // namespace
+
 OpenroadPinMapStats resolve_openroad_timer_pins(const GTDatabase& gtdb,
                                                 int num_pins,
                                                 std::vector<db::Pin*>& pin_id_to_dbpin,
@@ -117,6 +246,7 @@ OpenroadPinMapStats resolve_openroad_timer_pins(const GTDatabase& gtdb,
 
 bool openroad_pin_route_loc(const GTDatabase& gtdb,
                             const std::vector<db::Pin*>& pin_id_to_dbpin,
+                            const std::vector<const db::Layer*>& routing_level_to_layer,
                             const OpenroadInferredGrid& openroad_grid,
                             int pin_id,
                             OpenroadPinRouteLoc& loc)
@@ -131,12 +261,19 @@ bool openroad_pin_route_loc(const GTDatabase& gtdb,
         return false;
     }
 
-    std::map<int, std::vector<std::array<int, 4>>> boxes_by_layer;
+    PinBoxList conn_boxes;
+    int conn_layer = 0;
     auto add_box = [&](int routing_layer, int lx, int ly, int hx, int hy) {
         loc.pin_x = lx;
         loc.pin_y = ly;
         loc.pin_layer = routing_layer;
-        boxes_by_layer[routing_layer].push_back({lx, ly, hx, hy});
+        if (routing_layer > conn_layer) {
+            conn_layer = routing_layer;
+            conn_boxes.clear();
+        }
+        if (routing_layer == conn_layer) {
+            conn_boxes.push(PinBox{lx, ly, hx, hy});
+        }
     };
 
     if (pin->cell != nullptr) {
@@ -176,19 +313,15 @@ bool openroad_pin_route_loc(const GTDatabase& gtdb,
         }
     }
 
-    if (boxes_by_layer.empty()) {
+    if (conn_boxes.empty()) {
         return false;
     }
 
-    const int conn_layer = boxes_by_layer.rbegin()->first;
     loc.conn_layer = conn_layer;
 
     const db::Layer* conn_db_layer = nullptr;
-    for (const db::Layer& layer : gtdb.rawdb.layers) {
-        if (layer.rIndex + 1 == conn_layer) {
-            conn_db_layer = &layer;
-            break;
-        }
+    if (conn_layer >= 0 && conn_layer < static_cast<int>(routing_level_to_layer.size())) {
+        conn_db_layer = routing_level_to_layer[conn_layer];
     }
     bool adjust_single_track = false;
     bool adjust_horizontal = false;
@@ -199,10 +332,10 @@ bool openroad_pin_route_loc(const GTDatabase& gtdb,
             int min_coord = std::numeric_limits<int>::max();
             int max_coord = std::numeric_limits<int>::min();
             const bool horizontal = conn_db_layer->direction == 'h';
-            for (const auto& box : boxes_by_layer[conn_layer]) {
+            conn_boxes.for_each([&](const PinBox& box) {
                 min_coord = std::min(min_coord, horizontal ? box[1] : box[0]);
                 max_coord = std::max(max_coord, horizontal ? box[3] : box[2]);
-            }
+            });
             if (min_coord <= max_coord &&
                 static_cast<float>(max_coord - min_coord) / static_cast<float>(track.step) <= 3.0f) {
                 const int nearest_track =
@@ -235,9 +368,7 @@ bool openroad_pin_route_loc(const GTDatabase& gtdb,
         }
     }
 
-    std::map<std::pair<int, int>, int> grid_votes;
-    std::vector<std::pair<int, int>> grid_order;
-    for (const auto& box : boxes_by_layer[conn_layer]) {
+    auto box_center = [&](const PinBox& box) {
         int cx = box[0] + (box[2] - box[0]) / 2;
         int cy = box[1] + (box[3] - box[1]) / 2;
         if (adjust_single_track) {
@@ -247,39 +378,53 @@ bool openroad_pin_route_loc(const GTDatabase& gtdb,
                 cx = adjusted_track;
             }
         }
-        const auto grid = openroad_position_on_inferred_grid(gtdb.rawdb, openroad_grid, cx, cy);
-        if (grid_votes.emplace(grid, 0).second) {
-            grid_order.emplace_back(grid);
-        }
-        grid_votes[grid]++;
+        return PinGrid{cx, cy};
+    };
+
+    if (conn_boxes.size() == 1) {
+        const PinGrid center = box_center(conn_boxes.front());
+        const PinGrid grid = openroad_position_on_inferred_grid(gtdb.rawdb,
+                                                                openroad_grid,
+                                                                center.first,
+                                                                center.second);
+        loc.grid_x = grid.first;
+        loc.grid_y = grid.second;
+        loc.grid_src_x = center.first;
+        loc.grid_src_y = center.second;
+        loc.valid = true;
+        return true;
     }
 
-    int best_votes = -1;
-    for (const auto& grid : grid_order) {
-        const int votes = grid_votes[grid];
-        if (votes > best_votes) {
-            best_votes = votes;
-            loc.grid_x = grid.first;
-            loc.grid_y = grid.second;
+    PinGridVotes grid_votes;
+    conn_boxes.for_each([&](const PinBox& box) {
+        const PinGrid center = box_center(box);
+        const PinGrid grid = openroad_position_on_inferred_grid(gtdb.rawdb,
+                                                                openroad_grid,
+                                                                center.first,
+                                                                center.second);
+        grid_votes.add(grid);
+    });
+
+    const PinGrid best_grid = grid_votes.best_grid();
+    loc.grid_x = best_grid.first;
+    loc.grid_y = best_grid.second;
+
+    bool found_source = false;
+    conn_boxes.for_each([&](const PinBox& box) {
+        if (found_source) {
+            return;
         }
-    }
-    for (const auto& box : boxes_by_layer[conn_layer]) {
-        int cx = box[0] + (box[2] - box[0]) / 2;
-        int cy = box[1] + (box[3] - box[1]) / 2;
-        if (adjust_single_track) {
-            if (adjust_horizontal) {
-                cy = adjusted_track;
-            } else {
-                cx = adjusted_track;
-            }
-        }
-        const auto grid = openroad_position_on_inferred_grid(gtdb.rawdb, openroad_grid, cx, cy);
+        const PinGrid center = box_center(box);
+        const PinGrid grid = openroad_position_on_inferred_grid(gtdb.rawdb,
+                                                                openroad_grid,
+                                                                center.first,
+                                                                center.second);
         if (grid.first == loc.grid_x && grid.second == loc.grid_y) {
-            loc.grid_src_x = cx;
-            loc.grid_src_y = cy;
-            break;
+            loc.grid_src_x = center.first;
+            loc.grid_src_y = center.second;
+            found_source = true;
         }
-    }
+    });
 
     loc.valid = true;
     return true;

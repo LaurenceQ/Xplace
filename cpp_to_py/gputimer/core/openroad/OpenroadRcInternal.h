@@ -293,6 +293,7 @@ OpenroadPinMapStats resolve_openroad_timer_pins(const GTDatabase& gtdb,
                                                 int threads);
 bool openroad_pin_route_loc(const GTDatabase& gtdb,
                             const std::vector<db::Pin*>& pin_id_to_dbpin,
+                            const std::vector<const db::Layer*>& routing_level_to_layer,
                             const OpenroadInferredGrid& openroad_grid,
                             int pin_id,
                             OpenroadPinRouteLoc& loc);
