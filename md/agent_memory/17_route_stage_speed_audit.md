@@ -113,3 +113,25 @@ parse_segments 2.700, finalize_done 5.055, append 1.186
 build_route_segments_graph 5.338
 build_rc 7.501 (dominated by noisy initialize_dmp_rc_explicit=2.052 in this run)
 ```
+
+
+Additional accepted read-input profiling and optimization:
+
+- Added env-gated `XPLACE_DEF_PROFILE` section timing inside the DEF reader
+  callbacks. It also turns on under `XPLACE_IO_PROFILE`, prints only when the
+  env flag is enabled, and counts rows/tracks/gcells/vias/components/pins/
+  blockages/specialnets/nets/net-connections/regions.
+- Baseline profiler-only `visible_mempool_group` run:
+  `read_def=37.218`, DEF setup `0.083`, components `11.787`, pins `2.118`,
+  nets `23.223`, total DEF profile `37.211`, with `3,077,989` components,
+  `3,503,992` nets, and `12,026,191` net connections.
+- Skipped raw `Cell:Pin` string construction in `Pin::Pin(Cell*, int)` when
+  `setting.SkipDefNetWires` is true. In route-segment direct-timing mode the
+  Python driver already sets this flag, and GPDB later builds the exported pin
+  names used by the timer. `Net::getPin()` now has a lazy fallback for the rare
+  raw-DB caller that searches by full pin name.
+- After skipping raw cell-pin names, `visible_ariane` no-cache still passed
+  timing/power/group comparisons. `visible_mempool_group` no-cache profile:
+  components `11.787 -> 9.445`, `read_def 37.218 -> 35.524`, and
+  `read_input 47.983 -> 47.112`. The remaining DEF reader hotspot is the
+  serial nets section at about `23.7s`.
