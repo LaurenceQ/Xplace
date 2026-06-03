@@ -3,6 +3,7 @@
 #include "common/common.h"
 
 #include <memory>
+#include <string_view>
 
 namespace db {
 class Database;
@@ -64,7 +65,7 @@ public:
     const index_type& getRegionId() const { return region_id; }
 
     const std::vector<index_type>& pins() const { return pins_id; }
-    std::unordered_map<std::string, int> portMap;
+    std::unordered_map<std::string_view, int> portMap;
     void clearPins() {
         portMap.clear();
         pins_id.clear();
@@ -73,14 +74,14 @@ public:
         portMap.reserve(count);
         pins_id.reserve(count);
     }
-    void addPin(index_type pin_id, const std::string& macroPinName) {
+    void addPin(index_type pin_id, std::string_view macroPinName) {
         auto [iter, inserted] = portMap.emplace(macroPinName, static_cast<int>(pin_id));
         if (!inserted) {
             iter->second = static_cast<int>(pin_id);
         }
         pins_id.emplace_back(pin_id);
     }
-    const int getPinbyPortName(const std::string& portName) const {
+    const int getPinbyPortName(std::string_view portName) const {
         auto it = portMap.find(portName);
         if (it == portMap.end()) {
             return -1;
