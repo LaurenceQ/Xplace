@@ -115,7 +115,7 @@ public:
     bool highlighted = false;
     Region* region = nullptr;
     int gpdb_id = -1;
-    bool is_connected = false;
+    std::atomic<bool> is_connected{false};
 
     Cell(const string& name = "", CellType* t = nullptr) : _name(name) { ctype(t); }
     ~Cell();

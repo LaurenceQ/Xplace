@@ -665,6 +665,14 @@ bool fastDefNextToken(const char*& p, const char* end, FastDefToken& token)
         return false;
     }
     const char ch = *p;
+    if (ch == '-' && p + 1 < end && std::isdigit(static_cast<unsigned char>(p[1]))) {
+        const char* begin = p++;
+        while (p < end && std::isdigit(static_cast<unsigned char>(*p))) {
+            ++p;
+        }
+        token = FastDefToken{begin, p};
+        return true;
+    }
     if (ch == '(' || ch == ')' || ch == '+' || ch == '-' || ch == ';') {
         token = FastDefToken{p, p + 1};
         ++p;
@@ -947,6 +955,289 @@ void fastDefMaterializeComponents(Database& db,
     }
 }
 
+
+bool fastDefNetsEnabled()
+{
+    const char* value = std::getenv("XPLACE_FAST_DEF_NETS");
+    if (value == nullptr || value[0] == '\0') {
+        return false;
+    }
+    return !(value[0] == '0' ||
+             value[0] == 'f' || value[0] == 'F' ||
+             value[0] == 'n' || value[0] == 'N');
+}
+
+struct FastDefConnection {
+    FastDefToken inst;
+    FastDefToken pin;
+    bool is_iopin = false;
+};
+
+struct FastDefNet {
+    FastDefToken name;
+    std::vector<FastDefConnection> connections;
+    char type = 's';
+    bool skip = false;
+};
+
+char fastDefNetUseType(const FastDefToken& token)
+{
+    if (token.equals("POWER")) return 'p';
+    if (token.equals("GROUND")) return 'g';
+    if (token.equals("SIGNAL")) return 's';
+    if (token.equals("CLOCK")) return 'c';
+    return 's';
+}
+
+bool fastDefParseNet(const char* data,
+                     const FastDefObjectRange& range,
+                     FastDefNet& net)
+{
+    const char* p = data + range.begin;
+    const char* end = data + range.end;
+    FastDefToken token;
+    if (!fastDefNextToken(p, end, token) || !token.equals("-")) {
+        return false;
+    }
+    if (!fastDefNextToken(p, end, net.name) || net.name.empty()) {
+        return false;
+    }
+
+    bool in_options = false;
+    while (fastDefNextToken(p, end, token)) {
+        if (token.equals(";")) {
+            net.skip = net.connections.empty();
+            return true;
+        }
+        if (token.equals("+")) {
+            in_options = true;
+            FastDefToken keyword;
+            if (!fastDefNextToken(p, end, keyword)) {
+                return false;
+            }
+            if (keyword.equals("USE")) {
+                FastDefToken use;
+                if (!fastDefNextToken(p, end, use)) {
+                    return false;
+                }
+                net.type = fastDefNetUseType(use);
+            }
+            continue;
+        }
+        if (in_options || !token.equals("(")) {
+            continue;
+        }
+        FastDefToken inst;
+        FastDefToken pin;
+        FastDefToken close;
+        if (!fastDefNextToken(p, end, inst) ||
+            !fastDefNextToken(p, end, pin) ||
+            !fastDefNextToken(p, end, close) || !close.equals(")")) {
+            return false;
+        }
+        net.connections.push_back(FastDefConnection{inst, pin, inst.equals("PIN")});
+    }
+    return false;
+}
+
+bool fastDefParseNets(const char* data,
+                      const DefBufferSection& section,
+                      int num_threads,
+                      std::vector<FastDefNet>& nets)
+{
+    std::vector<FastDefObjectRange> ranges;
+    fastDefCollectObjectRanges(data, section, num_threads, ranges);
+    if (section.declared_count >= 0 &&
+        ranges.size() != static_cast<std::size_t>(section.declared_count)) {
+        std::fprintf(stderr,
+                     "[XPLACE_FAST_DEF_NETS] net count mismatch declared=%lld found=%zu\n",
+                     section.declared_count, ranges.size());
+        return false;
+    }
+
+    nets.resize(ranges.size());
+    num_threads = std::max(1, num_threads);
+    std::vector<int> ok(num_threads, 1);
+    auto parse_chunk = [&](int tid) {
+        const std::size_t begin = (ranges.size() * static_cast<std::size_t>(tid)) /
+                                  static_cast<std::size_t>(num_threads);
+        const std::size_t end = (ranges.size() * static_cast<std::size_t>(tid + 1)) /
+                                static_cast<std::size_t>(num_threads);
+        for (std::size_t i = begin; i < end; ++i) {
+            if (!fastDefParseNet(data, ranges[i], nets[i])) {
+                ok[tid] = 0;
+                return;
+            }
+        }
+    };
+
+    std::vector<std::thread> workers;
+    workers.reserve(num_threads > 1 ? static_cast<std::size_t>(num_threads - 1) : 0);
+    for (int tid = 1; tid < num_threads; ++tid) {
+        workers.emplace_back(parse_chunk, tid);
+    }
+    parse_chunk(0);
+    for (std::thread& worker : workers) {
+        worker.join();
+    }
+    return std::all_of(ok.begin(), ok.end(), [](int value) { return value != 0; });
+}
+
+void fastDefMaterializeNets(Database& db,
+                            const std::vector<FastDefNet>& parsed_nets,
+                            int num_threads)
+{
+    std::vector<int> out_index(parsed_nets.size(), -1);
+    std::size_t valid_count = 0;
+    for (std::size_t i = 0; i < parsed_nets.size(); ++i) {
+        const FastDefNet& parsed = parsed_nets[i];
+        if (parsed.skip || parsed.connections.empty()) {
+            continue;
+        }
+        std::string net_name(parsed.name.begin, parsed.name.end);
+        validate_token(net_name);
+        if (net_name == "VDD" || net_name == "VSS") {
+            continue;
+        }
+        out_index[i] = static_cast<int>(valid_count++);
+    }
+
+    const std::size_t base = db.nets.size();
+    db.nets.resize(base + valid_count, nullptr);
+    db.name_nets.reserve(base + valid_count);
+    num_threads = std::max(1, num_threads);
+
+    auto build_chunk = [&](int tid) {
+        const std::size_t begin = (parsed_nets.size() * static_cast<std::size_t>(tid)) /
+                                  static_cast<std::size_t>(num_threads);
+        const std::size_t end = (parsed_nets.size() * static_cast<std::size_t>(tid + 1)) /
+                                static_cast<std::size_t>(num_threads);
+        for (std::size_t i = begin; i < end; ++i) {
+            const int local_out = out_index[i];
+            if (local_out < 0) {
+                continue;
+            }
+            const FastDefNet& parsed = parsed_nets[i];
+            std::string net_name(parsed.name.begin, parsed.name.end);
+            validate_token(net_name);
+            Net* net = new Net(net_name, nullptr);
+            net->_type = parsed.type;
+            if (parsed.connections.size() > 4) {
+                net->pins.reserve(parsed.connections.size());
+            }
+
+            for (const FastDefConnection& connection : parsed.connections) {
+                Pin* pin = nullptr;
+                if (connection.is_iopin) {
+                    std::string iopin_name(connection.pin.begin, connection.pin.end);
+                    IOPin* iopin = db.getIOPin(iopin_name);
+                    if (!iopin) {
+                        continue;
+                    }
+                    pin = iopin->pin;
+                    iopin->is_connected.store(true, std::memory_order_relaxed);
+                } else {
+                    std::string cell_name(connection.inst.begin, connection.inst.end);
+                    validate_token(cell_name);
+                    Cell* cell = db.getCell(cell_name);
+                    if (!cell) {
+                        continue;
+                    }
+                    std::string pin_name(connection.pin.begin, connection.pin.end);
+                    pin = cell->pin(pin_name.c_str());
+                    if (!pin) {
+                        continue;
+                    }
+                    cell->is_connected.store(true, std::memory_order_relaxed);
+                }
+                pin->net = net;
+                pin->is_connected.store(true, std::memory_order_relaxed);
+                net->pins.push_back(pin);
+            }
+            db.nets[base + static_cast<std::size_t>(local_out)] = net;
+        }
+    };
+
+    std::vector<std::thread> workers;
+    workers.reserve(num_threads > 1 ? static_cast<std::size_t>(num_threads - 1) : 0);
+    for (int tid = 1; tid < num_threads; ++tid) {
+        workers.emplace_back(build_chunk, tid);
+    }
+    build_chunk(0);
+    for (std::thread& worker : workers) {
+        worker.join();
+    }
+
+    for (std::size_t i = 0; i < valid_count; ++i) {
+        Net* net = db.nets[base + i];
+        if (!net) {
+            continue;
+        }
+        auto inserted = db.name_nets.emplace(net->name, net);
+        if (!inserted.second) {
+            logger.warning("Net re-defined: %s", net->name.c_str());
+        }
+    }
+}
+
+
+struct FastDefStripRange {
+    std::size_t begin = 0;
+    std::size_t end = 0;
+    const char* name = "";
+};
+
+void fastDefAddStripRange(std::vector<FastDefStripRange>& ranges,
+                          const DefBufferSection& section)
+{
+    if (!section.found || section.end_after <= section.header_begin) {
+        return;
+    }
+    ranges.push_back(FastDefStripRange{section.header_begin, section.end_after, section.name});
+}
+
+std::vector<char> fastDefBuildDefrStubBuffer(const char* data,
+                                             std::size_t size,
+                                             std::vector<FastDefStripRange> ranges)
+{
+    std::sort(ranges.begin(), ranges.end(), [](const FastDefStripRange& lhs,
+                                               const FastDefStripRange& rhs) {
+        return lhs.begin < rhs.begin;
+    });
+
+    std::size_t removed_bytes = 0;
+    std::size_t replacement_bytes = 0;
+    for (const FastDefStripRange& range : ranges) {
+        if (range.end <= range.begin || range.end > size) {
+            continue;
+        }
+        removed_bytes += range.end - range.begin;
+        replacement_bytes += std::strlen(range.name) * 2 + 16;
+    }
+
+    std::vector<char> buffer;
+    buffer.reserve(size - removed_bytes + replacement_bytes + 1);
+    std::size_t cursor = 0;
+    for (const FastDefStripRange& range : ranges) {
+        if (range.end <= range.begin || range.end > size || range.begin < cursor) {
+            continue;
+        }
+        buffer.insert(buffer.end(), data + cursor, data + range.begin);
+        char replacement[128];
+        const int n = std::snprintf(replacement,
+                                    sizeof(replacement),
+                                    "%s 0 ;\nEND %s\n",
+                                    range.name,
+                                    range.name);
+        if (n > 0) {
+            buffer.insert(buffer.end(), replacement, replacement + n);
+        }
+        cursor = range.end;
+    }
+    buffer.insert(buffer.end(), data + cursor, data + size);
+    return buffer;
+}
+
 bool readDEFWithFastComponents(Database& db, const std::string& file)
 {
     if (!fastDefComponentsEnabled() ||
@@ -961,6 +1252,7 @@ bool readDEFWithFastComponents(Database& db, const std::string& file)
     auto seconds_since = [](std::chrono::steady_clock::time_point t) {
         return std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count();
     };
+    auto last_phase = start;
 
     DefMappedFile mapped(file);
     if (mapped.data == nullptr || mapped.size == 0) {
@@ -986,21 +1278,59 @@ bool readDEFWithFastComponents(Database& db, const std::string& file)
         std::fprintf(stderr, "[XPLACE_FAST_DEF_COMPONENTS] parse failed; fallback\n");
         return false;
     }
+    auto now = std::chrono::steady_clock::now();
     std::fprintf(stdout,
-                 "[XPLACE_FAST_DEF_COMPONENTS] phase=parse_components elapsed=%.3f components=%zu threads=%d\n",
-                 seconds_since(start), components.size(), num_threads);
+                 "[XPLACE_FAST_DEF_COMPONENTS] phase=parse_components elapsed=%.3f total=%.3f components=%zu threads=%d\n",
+                 seconds_since(last_phase), seconds_since(start), components.size(), num_threads);
     std::fflush(stdout);
+    last_phase = now;
+
+    const bool use_fast_nets = fastDefNetsEnabled();
+    std::vector<FastDefNet> parsed_nets;
+    DefBufferSection nets_section;
+    if (use_fast_nets) {
+        defFindSection(mapped.data, mapped.size, "NETS", nets_section);
+        if (!nets_section.found || !fastDefParseNets(mapped.data, nets_section, num_threads, parsed_nets)) {
+            std::fprintf(stderr, "[XPLACE_FAST_DEF_NETS] parse failed; fallback\n");
+            return false;
+        }
+        now = std::chrono::steady_clock::now();
+        std::fprintf(stdout,
+                     "[XPLACE_FAST_DEF_NETS] phase=parse_nets elapsed=%.3f total=%.3f nets=%zu threads=%d\n",
+                     seconds_since(last_phase), seconds_since(start), parsed_nets.size(), num_threads);
+        std::fflush(stdout);
+        last_phase = now;
+    }
 
     fastDefMaterializeComponents(db, components, num_threads);
     components.clear();
     components.shrink_to_fit();
+    now = std::chrono::steady_clock::now();
     std::fprintf(stdout,
-                 "[XPLACE_FAST_DEF_COMPONENTS] phase=materialize_components elapsed=%.3f cells=%zu\n",
-                 seconds_since(start), db.cells.size());
+                 "[XPLACE_FAST_DEF_COMPONENTS] phase=materialize_components elapsed=%.3f total=%.3f cells=%zu\n",
+                 seconds_since(last_phase), seconds_since(start), db.cells.size());
     std::fflush(stdout);
+    last_phase = now;
 
+    std::vector<char> defr_buffer;
     FILE* fp = nullptr;
-    if (!(fp = fopen(file.c_str(), "r"))) {
+    if (use_fast_nets) {
+        std::vector<FastDefStripRange> strip_ranges;
+        fastDefAddStripRange(strip_ranges, components_section);
+        fastDefAddStripRange(strip_ranges, nets_section);
+        defr_buffer = fastDefBuildDefrStubBuffer(mapped.data, mapped.size, std::move(strip_ranges));
+        now = std::chrono::steady_clock::now();
+        std::fprintf(stdout,
+                     "[XPLACE_FAST_DEF_NETS] phase=build_defr_stub elapsed=%.3f total=%.3f bytes=%zu original_bytes=%zu\n",
+                     seconds_since(last_phase), seconds_since(start), defr_buffer.size(), mapped.size);
+        std::fflush(stdout);
+        last_phase = now;
+        fp = fmemopen(defr_buffer.data(), defr_buffer.size(), "r");
+        if (!fp) {
+            logger.error("Unable to open stripped DEF buffer: %s", std::strerror(errno));
+            return false;
+        }
+    } else if (!(fp = fopen(file.c_str(), "r"))) {
         logger.error("Unable to open DEF file: %s", file.c_str());
         return false;
     }
@@ -1021,7 +1351,9 @@ bool readDEFWithFastComponents(Database& db, const std::string& file)
     defrSetStartPinsCbk(readDefPinStart);
     defrSetPinCbk(readDefPin);
     defrSetNetStartCbk(readDefNetStart);
-    defrSetNetCbk(readDefNet);
+    if (!use_fast_nets) {
+        defrSetNetCbk(readDefNet);
+    }
 
     defrInit();
     defrReset();
@@ -1034,10 +1366,23 @@ bool readDEFWithFastComponents(Database& db, const std::string& file)
         fclose(fp);
         return false;
     }
-    g_def_profile.finish("fast_components_ok");
+    g_def_profile.finish(use_fast_nets ? "fast_components_nets_defr_ok" : "fast_components_ok");
     defrReleaseNResetMemory();
     defrUnsetCallbacks();
     fclose(fp);
+
+    if (use_fast_nets) {
+        fastDefMaterializeNets(db, parsed_nets, num_threads);
+        parsed_nets.clear();
+        parsed_nets.shrink_to_fit();
+        now = std::chrono::steady_clock::now();
+        std::fprintf(stdout,
+                     "[XPLACE_FAST_DEF_NETS] phase=materialize_nets elapsed=%.3f total=%.3f nets=%zu\n",
+                     seconds_since(last_phase), seconds_since(start), db.nets.size());
+        std::fflush(stdout);
+        last_phase = now;
+    }
+
     std::fprintf(stdout,
                  "[XPLACE_FAST_DEF_COMPONENTS] phase=total elapsed=%.3f\n",
                  seconds_since(start));

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <string>
 #include <vector>
 #include <climits>
@@ -75,7 +76,7 @@ public:
     PinType* type;
     Pin* pin;
     int gpdb_id = -1;
-    bool is_connected = false;
+    std::atomic<bool> is_connected{false};
 
     IOPin(const string& name = "", const string& netName = "", const char direction = 'x');
     ~IOPin();
@@ -112,7 +113,7 @@ public:
     const PinType* type = nullptr;
     int gpdb_id = -1;
     int parentCellPinId = -1;
-    bool is_connected = false;
+    std::atomic<bool> is_connected{false};
     string name = "";
 
     PinSTA* staInfo = nullptr;

@@ -206,3 +206,35 @@ Gated fast DEF components experiment:
   `read_input=45.008s`; the experiment is useful scaffolding but not the final
   read-input win. The next real target is a full direct-timing DEF parser that
   bypasses `defrRead()` for both `COMPONENTS` and `NETS`.
+
+
+Gated fast DEF nets and in-memory defr stub:
+
+- Added `XPLACE_FAST_DEF_NETS=1` on top of `XPLACE_FAST_DEF_COMPONENTS=1` for
+  direct-timing mode. The fast path parses `NETS` from the read-only mmap DEF
+  buffer, materializes `Net` objects in parallel into pre-sized `db.nets` slots,
+  and serially builds `name_nets` afterward. `Cell::is_connected`,
+  `IOPin::is_connected`, and `Pin::is_connected` are relaxed atomics so worker
+  threads can mark connectivity without mutexes.
+- The safe no-mutex DB pattern remains: pre-size the owning vector, write only
+  disjoint object slots in workers, and build/hash-map indices after the worker
+  phase. The worker path only reads `name_cells`, `name_iopins`, and already
+  constructed cell pin vectors.
+- To avoid spending time in defr over sections already handled by the fast path,
+  `readDEFWithFastComponents()` builds an in-memory-only stub buffer with empty
+  `COMPONENTS` and `NETS` sections and feeds that to defr via `fmemopen()`. The
+  original `.def` file is only mmap-read; no DEF file is written or modified.
+- The fast net parser treats connection tuples only before the first `+` option,
+  so routed/path parentheses in later options are ignored. This matches the
+  direct-timing mode, where routed wires from DEF are skipped and route-segment
+  input supplies RC topology.
+- Validation passed after build/install/import for default `visible_ariane`
+  no-cache with fast env disabled, plus fast components+nets no-cache for
+  `visible_ariane` and `visible_mempool_group`.
+- Final fast run on `visible_mempool_group` with `XPLACE_FAST_DEF_THREADS=16`:
+  components parse `0.646s`, nets parse `1.582s`, component materialize `2.245s`,
+  in-memory defr stub build `0.047s` (`86.5 MB` buffer from `2.33 GB` original),
+  defr over the stub `2.229s` dominated by pins, net materialize `4.719s`, total
+  fast DEF path `9.238s`, `read_input=18.826s`, `build_rc=6.148s`. Timing,
+  power, and group comparisons passed: `wns_err=9.77207e-05`,
+  `ptotal_err=0.0001035`, worst group `clock.internal=0.000613238`.
