@@ -190,6 +190,7 @@ public:
     void setOriDBId(const index_type& ori_db_id_) { ori_db_id = ori_db_id_; }
     const index_type& getOriDBId() const { return ori_db_id; }
     const std::vector<index_type>& pins() const { return pins_id; }
+    void reservePins(std::size_t count) { pins_id.reserve(count); }
     void addPin(index_type pin_id, bool is_root) {
         pins_id.emplace_back(pin_id);
         if (is_root) std::swap(pins_id.front(), pins_id.back());

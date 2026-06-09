@@ -41,26 +41,30 @@ enum class CellPortDirection { input, output, inout, internal, unknown };
 DelayModel findDelayModel(const std::string model_name);
 CellPortDirection findPortDirection(const std::string dir_name);
 
-enum class PowerExprOpcode : uint8_t { port, const_zero, const_one, logical_not, logical_and, logical_or, logical_xor };
+enum class LibertyFuncExprOpcode : uint8_t { port, const_zero, const_one, logical_not, logical_and, logical_or, logical_xor };
 
-struct PowerExprOp {
-    PowerExprOpcode opcode = PowerExprOpcode::const_zero;
+struct LibertyFuncExprOp {
+    LibertyFuncExprOpcode opcode = LibertyFuncExprOpcode::const_zero;
     int port_id = -1;
 };
 
-class PowerExpr {
+class LibertyFuncExpr {
 public:
     bool compile(const string& expr, const LibertyCell* cell);
     int8_t eval(const vector<int8_t>& port_values) const;
     bool valid() const { return valid_; }
     const string& source() const { return source_; }
-    const vector<PowerExprOp>& ops() const { return ops_; }
+    const vector<LibertyFuncExprOp>& ops() const { return ops_; }
 
 private:
     string source_;
-    vector<PowerExprOp> ops_;
+    vector<LibertyFuncExprOp> ops_;
     bool valid_ = false;
 };
+
+using PowerExprOpcode = LibertyFuncExprOpcode;
+using PowerExprOp = LibertyFuncExprOp;
+using PowerExpr = LibertyFuncExpr;
 
 class CellLib {
 public:

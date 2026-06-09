@@ -541,10 +541,12 @@ HostRcGraph GPUTimer::build_openroad_route_segments_rc(const std::string& file) 
     }
 
     std::vector<OpenroadRouteSegmentsBuildStats> parse_stats(parse_threads);
+    std::vector<OpenroadRouteGridStats> parse_grid_stats(parse_threads);
     const auto parse_start = std::chrono::steady_clock::now();
 
     auto parse_one_block = [&](const RouteSegmentBlock& block,
-                               OpenroadRouteSegmentsBuildStats& local_stats) {
+                               OpenroadRouteSegmentsBuildStats& local_stats,
+                               OpenroadRouteGridStats& grid_stats) {
         for (std::size_t line_begin_offset = block.begin;
              line_begin_offset < block.end;) {
             std::size_t line_end_offset = line_begin_offset;
@@ -608,6 +610,9 @@ HostRcGraph GPUTimer::build_openroad_route_segments_rc(const std::string& file) 
                 continue;
             }
 
+            add_openroad_route_grid_point(grid_stats, x1, y1);
+            add_openroad_route_grid_point(grid_stats, x2, y2);
+
             const OpenroadRoutePtKey key1{x1, y1, layer1};
             const OpenroadRoutePtKey key2{x2, y2, layer2};
             const int from = append_route_node(block.net_idx, key1, local_nets,
@@ -661,7 +666,7 @@ HostRcGraph GPUTimer::build_openroad_route_segments_rc(const std::string& file) 
 #ifdef _OPENMP
         tid = omp_get_thread_num();
 #endif
-        parse_one_block(route_blocks[block_idx], parse_stats[tid]);
+        parse_one_block(route_blocks[block_idx], parse_stats[tid], parse_grid_stats[tid]);
     }
 
     double parse_wall_seconds = seconds_since(parse_start);
@@ -687,18 +692,8 @@ HostRcGraph GPUTimer::build_openroad_route_segments_rc(const std::string& file) 
     if (openroad_tile_size <= 0) {
         throw std::runtime_error("OpenROAD route segment RC requires a positive OpenROAD gcell tile size.");
     }
-    int grid_threads = std::max(1, num_threads);
-    if (const char* thread_env = std::getenv("GPUTIMER_ROUTE_SEG_GRID_THREADS")) {
-        const int env_threads = std::atoi(thread_env);
-        if (env_threads > 0) {
-            grid_threads = env_threads;
-        }
-    }
-    if (!debug_pin_net.empty()) {
-        grid_threads = 1;
-    }
     const OpenroadInferredGrid openroad_grid =
-        infer_openroad_route_grid(local_nets, gtdb.rawdb, openroad_tile_size, grid_threads);
+        infer_openroad_route_grid_from_stats(parse_grid_stats, gtdb.rawdb, openroad_tile_size);
     if (!openroad_grid.valid) {
         throw std::runtime_error("OpenROAD route segment RC could not infer the route segment grid.");
     }

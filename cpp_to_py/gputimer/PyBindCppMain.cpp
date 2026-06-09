@@ -5,6 +5,8 @@
 #include "gputimer/db/GTDatabase.h"
 #include "gputimer/core/GPUTimer.h"
 
+#include <pybind11/stl.h>
+
 #include <flute.hpp>
 #include <chrono>
 #include <cstdio>
@@ -168,6 +170,40 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              py::arg("file"))
         .def("init_dmp_rc_route_segments", &gt::GPUTimer::init_dmp_rc_route_segments,
              py::arg("file"))
+        .def("debug_dmp_route_segment_fd_grad",
+             &gt::GPUTimer::debug_dmp_route_segment_fd_grad,
+             py::arg("route_segments_file"),
+             py::arg("kind") = "edge_res",
+             py::arg("ids") = std::vector<int64_t>{},
+             py::arg("sample_count") = 0,
+             py::arg("seed") = 1,
+             py::arg("eps_rel") = 1.0e-3,
+             py::arg("eps_abs") = 0.0,
+             py::arg("tau_ns") = 0.02)
+        .def("compute_dmp_route_segment_soft_timing_grad",
+             &gt::GPUTimer::compute_dmp_route_segment_soft_timing_grad,
+             py::arg("route_segments_file"),
+             py::arg("tau_ns") = 0.02)
+        .def("debug_dmp_route_segment_grad_fd_validate",
+             &gt::GPUTimer::debug_dmp_route_segment_grad_fd_validate,
+             py::arg("route_segments_file"),
+             py::arg("sample_net_count") = 10000,
+             py::arg("seed") = 1,
+             py::arg("eps_rel") = 1.0e-3,
+             py::arg("eps_abs_edge") = 0.0,
+             py::arg("eps_abs_node") = 1.0e-4,
+             py::arg("tau_ns") = 0.02)
+        .def("debug_dmp_route_segment_primitive_slope_stats",
+             &gt::GPUTimer::debug_dmp_route_segment_primitive_slope_stats,
+             py::arg("route_segments_file"))
+        .def("debug_dmp_route_segment_rc_tree_gradcheck",
+             &gt::GPUTimer::debug_dmp_route_segment_rc_tree_gradcheck,
+             py::arg("route_segments_file"),
+             py::arg("sample_net_count") = 10000,
+             py::arg("seed") = 1,
+             py::arg("eps_rel") = 1.0e-4,
+             py::arg("eps_abs_edge") = 1.0e-6,
+             py::arg("eps_abs_node") = 1.0e-8)
         .def("debug_dump_dmp_rc_net", &gt::GPUTimer::debug_dump_dmp_rc_net)
         .def("initialize_dmp_model", &gt::GPUTimer::initialize_dmp_model)
         .def("release_dmp_timing_scratch_for_power", &gt::GPUTimer::release_dmp_timing_scratch_for_power)

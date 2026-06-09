@@ -26,7 +26,7 @@ target_include_directories(gt PRIVATE ${PROJECT_SOURCE_DIR}/cpp_to_py ${TORCH_IN
 target_link_libraries(gt PRIVATE torch ${TORCH_PYTHON_LIBRARY} xplace_common io_parser OpenMP::OpenMP_CXX stdc++fs pthread)
 target_compile_options(gt PRIVATE -fPIC)
 target_compile_options(gt PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>")
-option(DMP_LOAD_CROSSING_BISECTION "Use value-only bisection for DMP load crossing" OFF)
+option(DMP_LOAD_CROSSING_BISECTION "Use value-only bisection for DMP load crossing" ON)
 set(DMP_LOAD_BISECTION_ITERS "12" CACHE STRING "Fixed bisection iterations for DMP load crossing when enabled")
 if(DMP_LOAD_CROSSING_BISECTION)
   target_compile_definitions(gt PRIVATE DMP_LOAD_CROSSING_BISECTION=1 DMP_LOAD_BISECTION_ITERS=${DMP_LOAD_BISECTION_ITERS})

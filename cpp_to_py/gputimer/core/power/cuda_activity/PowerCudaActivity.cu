@@ -34,6 +34,13 @@ static int power_activity_flag_word_count(int n) {
 
 void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
 
+    /*
+     * 1. Unpack the host-side model into local aliases.
+     *
+     * This is the host launcher.  The per-pin activity math runs in kernels;
+     * this function prepares device pointers, scratch buffers, runtime flags,
+     * launch policy, optional debug dumps, and component power kernels.
+     */
     int n = model.n;
     const std::vector<int>& level_list_end_cpu = *model.level_list_end_cpu;
     const int num_primary_inputs = model.state.num_primary_inputs;
@@ -101,6 +108,13 @@ void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
     uint8_t* d_seq_pin_valid = nullptr;
     int* d_pending_seq = nullptr;
     int* d_pending_seq_count = nullptr;
+    /*
+     * 2. Decide which scratch state is needed.
+     *
+     * Some callers only need precomputed activity copied out; others need full
+     * propagation, inline internal/leakage power, tracing, or final dumps.
+     * These booleans keep allocations and kernels scoped to the requested work.
+     */
     const int num_power_levels = std::max(0, static_cast<int>(level_list_end_cpu.size()) - 1);
     const int activity_flag_words = power_activity_flag_word_count(n);
     const char* final_dump_env = std::getenv("XPLACE_POWER_ACTIVITY_FINAL_DUMP");
@@ -124,6 +138,13 @@ void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
         if (const char* env_defer_pending = std::getenv("XPLACE_POWER_DEFER_PENDING_SEQ"))
             defer_pending_seq = std::atoi(env_defer_pending) != 0;
     }
+    /*
+     * 3. Allocate device scratch arrays.
+     *
+     * d_density/d_duty may alias the caller output buffer.  The other arrays
+     * are temporary propagation state: previous pass values, sequential pending
+     * flags, active-level queues, and activity origins.
+     */
     if (needs_density_duty) {
         if (d_out_density && d_out_duty) {
             d_density = d_out_density;
@@ -157,6 +178,12 @@ void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
     if (defer_pending_seq) {
         power_cuda_call(cudaMalloc(&d_prev_origin, sizeof(uint8_t) * n), "activity malloc prev_origin");
     }
+    /*
+     * 4. Initialize scratch state before launching kernels.
+     *
+     * Activity starts at zero unless precomputed data is unpacked later.
+     * Active/pending flags also start cleared before root seeding.
+     */
     if (needs_density_duty) {
         power_cuda_call(cudaMemset(d_density, 0, sizeof(float) * n), "activity memset density");
         power_cuda_call(cudaMemset(d_duty, 0, sizeof(float) * n), "activity memset duty");
@@ -183,6 +210,13 @@ void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
     if (defer_pending_seq) {
         power_cuda_call(cudaMemset(d_prev_origin, 0, sizeof(uint8_t) * n), "activity memset prev_origin");
     }
+    /*
+     * 5. Package model and scratch views for device kernels.
+     *
+     * Kernels receive a pointer to PowerActivityCudaModel plus a pointer to the
+     * scratch view.  The model owns static graph/table data; scratch owns
+     * mutable activity propagation state.
+     */
     PowerActivityScratchView activity_scratch(d_density,
                                                d_duty,
                                                d_prev_density,
@@ -206,6 +240,13 @@ void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
                     "activity copy model");
     power_cuda_call(cudaMemcpy(d_activity_scratch, &activity_scratch, sizeof(PowerActivityScratchView), cudaMemcpyHostToDevice),
                     "activity copy scratch view");
+    /*
+     * 6. Copy runtime knobs into CUDA constants.
+     *
+     * Environment-controlled flags tune clamp behavior, sequential feedback,
+     * and direct-expression-vs-BDD checking inside device code without changing
+     * kernel signatures.
+     */
     size_t power_stack_size = 32768;
     if (const char* env_stack = std::getenv("XPLACE_POWER_CUDA_STACK_SIZE")) {
         char* end = nullptr;
@@ -320,6 +361,12 @@ void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
                                        &direct_expr_mismatch_count,
                                        sizeof(int)),
                     "activity reset direct_expr_mismatch_count");
+    /*
+     * 7. Optional host-side tracing helpers.
+     *
+     * These lambdas copy selected pin or pending-sequential state back to the
+     * host for debugging.  Normal runs skip this unless trace env vars are set.
+     */
     std::vector<int> h_trace_pins(std::max(0, num_trace_pins));
     if (num_trace_pins > 0 && d_trace_pins) {
         cudaMemcpy(h_trace_pins.data(), d_trace_pins, sizeof(int) * num_trace_pins, cudaMemcpyDeviceToHost);
@@ -392,6 +439,13 @@ void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
         }
     };
 
+    /*
+     * 8. Activity source selection.
+     *
+     * If another engine already produced activity, just copy/unpack it.  If
+     * not, seed roots and run CUDA propagation through combinational levels and
+     * sequential feedback passes.
+     */
     if (d_precomputed_activity) {
         if (d_out && n > 0 && out_activity_fields > 0) {
             power_copy_precomputed_activity_output_kernel<<<BLOCK_NUMBER(n), BLOCK_SIZE>>>(
@@ -410,6 +464,12 @@ void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
         }
         trace_cuda("precomputed", 0, 0);
     } else {
+    /*
+     * 9. Choose propagation scheduler.
+     *
+     * Frontier mode uses a device-side level queue.  The default path scans
+     * active levels from the host and launches per-level kernels.
+     */
     bool use_frontier = false;
     if (const char* env_frontier = std::getenv("XPLACE_POWER_ACTIVITY_FRONTIER"))
         use_frontier = std::atoi(env_frontier) != 0;
@@ -436,6 +496,13 @@ void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
         check_power_cuda_error("activity seed_seq_feedback_state");
     }
 
+    /*
+     * 9a. Frontier/queue propagation path.
+     *
+     * Roots are queued by level and a persistent/cooperative kernel drains the
+     * queue on the device.  Ordered mode uses a single ordered kernel for
+     * deterministic debugging.
+     */
     if (use_frontier) {
         int *d_level_offsets = nullptr, *d_level_queue = nullptr, *d_level_counts = nullptr;
         uint32_t *d_queued = nullptr;
@@ -539,6 +606,12 @@ void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
         if (d_frontier_pending_seq_list) cudaFree(d_frontier_pending_seq_list);
         if (d_frontier_pending_seq_list_count) cudaFree(d_frontier_pending_seq_list_count);
     } else {
+        /*
+         * 9b. Host-driven level-scan propagation path.
+         *
+         * Seed case/PI/clock roots, then repeatedly visit active combinational
+         * levels.  Sequential outputs can mark more levels active in later passes.
+         */
         if (d_case_values) {
             power_seed_case_kernel<<<BLOCK_NUMBER(n), BLOCK_SIZE>>>(
                 d_activity_model, d_activity_scratch);
@@ -597,6 +670,12 @@ void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
         auto power_activity_visit_blocks = [](int work_items) {
             return (work_items + POWER_ACTIVITY_VISIT_BLOCK_SIZE - 1) / POWER_ACTIVITY_VISIT_BLOCK_SIZE;
         };
+        /*
+         * Visit one combinational level.
+         *
+         * Depending on debug knobs and level size, this either runs a serial
+         * kernel for deterministic inspection or the normal parallel visitor.
+         */
         auto run_level = [&](int level) {
             if (level < 0 || level >= num_power_levels || level + 1 >= static_cast<int>(level_list_end_cpu.size()))
                 return;
@@ -641,6 +720,12 @@ void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
 
         const bool print_pass_stats = std::getenv("XPLACE_POWER_PRINT_PASS_STATS") != nullptr;
         int total_comb_sweeps = 0;
+        /*
+         * Drain currently active combinational levels.
+         *
+         * This is one BFS-like combinational settle phase.  The sequential loop
+         * below calls it after root seeding and after each sequential seed pass.
+         */
         auto drain_bfs = [&]() {
             if (defer_pending_seq) {
                 cudaMemcpy(d_prev_density, d_density, sizeof(float) * n, cudaMemcpyDeviceToDevice);
@@ -702,6 +787,13 @@ void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
         cudaMemcpy(&pending_count, d_pending_seq_count, sizeof(int), cudaMemcpyDeviceToHost);
         trace_cuda("after_comb", 0, pending_count);
         dump_cuda_pending_seq("after_comb", 0);
+        /*
+         * 9c. Sequential feedback fixed-point loop.
+         *
+         * Pending sequential elements are reseeded, then combinational activity
+         * is drained again.  The loop stops when no sequential state remains
+         * pending or max_activity_passes is reached.
+         */
         int seq_passes = 0;
         const bool direct_ordered_seq_seed =
             std::getenv("XPLACE_POWER_DIRECT_ORDERED_SEQ_SEED") != nullptr;
@@ -787,6 +879,12 @@ void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
 
     }
 
+    /*
+     * 10. Release propagation-only scratch that is no longer needed.
+     *
+     * Density/duty may still be needed for output packing or component power,
+     * so those buffers are handled separately below.
+     */
     auto free_device_ptr = [](auto*& ptr) {
         if (!ptr) return;
         cudaFree(ptr);
@@ -814,6 +912,12 @@ void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
         free_device_ptr(d_pending_seq_count);
     }
 
+    /*
+     * 11. Pack activity output and optional final activity dump.
+     *
+     * Pack writes the caller-visible density/duty array.  The CSV dump is a
+     * debug path that snapshots density, duty, origin, and slew caps.
+     */
     if (d_out && !d_precomputed_activity) {
         power_pack_output_kernel<<<BLOCK_NUMBER(n), BLOCK_SIZE>>>(d_activity_model, d_activity_scratch);
         check_power_cuda_error("activity pack output");
@@ -860,6 +964,12 @@ void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
     if (!needs_inline_internal && !needs_inline_leakage_activity) {
         free_owned_density_duty();
     }
+    /*
+     * 12. Component power kernels.
+     *
+     * Once activity is available, compute switching power, internal power
+     * contributions, and leakage rows/summaries requested by model outputs.
+     */
     if ((d_inst_switching || d_pin_switching) && d_out && d_pin2node_map && d_pinLoad) {
         if (d_inst_switching) cudaMemset(d_inst_switching, 0, sizeof(float) * num_nodes);
         if (d_pin_switching) cudaMemset(d_pin_switching, 0, sizeof(float) * n);
@@ -982,6 +1092,10 @@ void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model) {
         cudaFree(d_group_cond_count);
     }
 
+    /*
+     * 13. Final cleanup for device-side model/scratch wrappers and any buffers
+     * retained for component power.
+     */
     cudaFree(d_activity_model);
     cudaFree(d_activity_scratch);
     free_owned_density_duty();

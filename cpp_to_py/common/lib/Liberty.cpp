@@ -8,9 +8,9 @@ namespace gt {
 
 namespace {
 
-class PowerExprParser {
+class LibertyFuncExprParser {
 public:
-    PowerExprParser(const std::string& expr, const LibertyCell* cell, std::vector<PowerExprOp>& ops)
+    LibertyFuncExprParser(const std::string& expr, const LibertyCell* cell, std::vector<LibertyFuncExprOp>& ops)
         : expr_(expr), cell_(cell), ops_(ops) {}
 
     bool parse() {
@@ -27,7 +27,7 @@ private:
             skip_spaces();
             if (!consume('|') && !consume('+')) break;
             if (!parse_xor()) return false;
-            ops_.push_back({PowerExprOpcode::logical_or, -1});
+            ops_.push_back({LibertyFuncExprOpcode::logical_or, -1});
         }
         return true;
     }
@@ -38,7 +38,7 @@ private:
             skip_spaces();
             if (!consume('^')) break;
             if (!parse_and()) return false;
-            ops_.push_back({PowerExprOpcode::logical_xor, -1});
+            ops_.push_back({LibertyFuncExprOpcode::logical_xor, -1});
         }
         return true;
     }
@@ -50,7 +50,7 @@ private:
             bool explicit_and = consume('&') || consume('*');
             if (!explicit_and && !starts_unary()) break;
             if (!parse_unary()) return false;
-            ops_.push_back({PowerExprOpcode::logical_and, -1});
+            ops_.push_back({LibertyFuncExprOpcode::logical_and, -1});
         }
         return true;
     }
@@ -59,7 +59,7 @@ private:
         skip_spaces();
         if (consume('!')) {
             if (!parse_unary()) return false;
-            ops_.push_back({PowerExprOpcode::logical_not, -1});
+            ops_.push_back({LibertyFuncExprOpcode::logical_not, -1});
             return true;
         }
         return parse_primary();
@@ -76,11 +76,11 @@ private:
         const std::string ident = parse_identifier();
         if (ident.empty()) return false;
         if (ident == "0" || ident == "1'b0") {
-            ops_.push_back({PowerExprOpcode::const_zero, -1});
+            ops_.push_back({LibertyFuncExprOpcode::const_zero, -1});
             return true;
         }
         if (ident == "1" || ident == "1'b1") {
-            ops_.push_back({PowerExprOpcode::const_one, -1});
+            ops_.push_back({LibertyFuncExprOpcode::const_one, -1});
             return true;
         }
 
@@ -88,7 +88,7 @@ private:
         // Sequential Liberty functions may reference state/internal symbols that are
         // not cell ports (for example IQ). Keep the bytecode valid and let eval()
         // return unknown for unresolved symbols until Sim/state handling is added.
-        ops_.push_back({PowerExprOpcode::port, port_id});
+        ops_.push_back({LibertyFuncExprOpcode::port, port_id});
         return true;
     }
 
@@ -131,7 +131,7 @@ private:
 
     const std::string& expr_;
     const LibertyCell* cell_ = nullptr;
-    std::vector<PowerExprOp>& ops_;
+    std::vector<LibertyFuncExprOp>& ops_;
     size_t pos_ = 0;
     bool ok_ = true;
 };
@@ -227,10 +227,10 @@ int LibertyCell::get_port(const std::string& name) const {
     }
 }
 
-bool PowerExpr::compile(const string& expr, const LibertyCell* cell) {
+bool LibertyFuncExpr::compile(const string& expr, const LibertyCell* cell) {
     source_ = expr;
     ops_.clear();
-    PowerExprParser parser(expr, cell, ops_);
+    LibertyFuncExprParser parser(expr, cell, ops_);
     valid_ = parser.parse();
     if (!valid_) {
         ops_.clear();
@@ -238,7 +238,7 @@ bool PowerExpr::compile(const string& expr, const LibertyCell* cell) {
     return valid_;
 }
 
-int8_t PowerExpr::eval(const vector<int8_t>& port_values) const {
+int8_t LibertyFuncExpr::eval(const vector<int8_t>& port_values) const {
     vector<int8_t> stack;
     stack.reserve(ops_.size());
     auto pop = [&]() -> int8_t {
@@ -250,25 +250,25 @@ int8_t PowerExpr::eval(const vector<int8_t>& port_values) const {
 
     for (const auto& op : ops_) {
         switch (op.opcode) {
-            case PowerExprOpcode::port:
+            case LibertyFuncExprOpcode::port:
                 if (op.port_id >= 0 && op.port_id < static_cast<int>(port_values.size())) {
                     stack.push_back(port_values[op.port_id]);
                 } else {
                     stack.push_back(-1);
                 }
                 break;
-            case PowerExprOpcode::const_zero:
+            case LibertyFuncExprOpcode::const_zero:
                 stack.push_back(0);
                 break;
-            case PowerExprOpcode::const_one:
+            case LibertyFuncExprOpcode::const_one:
                 stack.push_back(1);
                 break;
-            case PowerExprOpcode::logical_not: {
+            case LibertyFuncExprOpcode::logical_not: {
                 const int8_t a = pop();
                 stack.push_back(a < 0 ? -1 : static_cast<int8_t>(!a));
                 break;
             }
-            case PowerExprOpcode::logical_and: {
+            case LibertyFuncExprOpcode::logical_and: {
                 const int8_t b = pop();
                 const int8_t a = pop();
                 if (a == 0 || b == 0) stack.push_back(0);
@@ -276,7 +276,7 @@ int8_t PowerExpr::eval(const vector<int8_t>& port_values) const {
                 else stack.push_back(-1);
                 break;
             }
-            case PowerExprOpcode::logical_or: {
+            case LibertyFuncExprOpcode::logical_or: {
                 const int8_t b = pop();
                 const int8_t a = pop();
                 if (a == 1 || b == 1) stack.push_back(1);
@@ -284,7 +284,7 @@ int8_t PowerExpr::eval(const vector<int8_t>& port_values) const {
                 else stack.push_back(-1);
                 break;
             }
-            case PowerExprOpcode::logical_xor: {
+            case LibertyFuncExprOpcode::logical_xor: {
                 const int8_t b = pop();
                 const int8_t a = pop();
                 if (a < 0 || b < 0) stack.push_back(-1);

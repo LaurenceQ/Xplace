@@ -13,6 +13,8 @@ Read this after `AGENTS.md`; open focused notes before grepping logs.
   `05_current_case_debugging.md`.
 - DMP timing path: `08_dmp_timing_path.md`, then
   `12_dmp_arc_vs_fallback_profile.md`.
+- Route-gradient derivatives: `22_dmp_pi_rc_derivative_chain.md`, then
+  `24_route_grad_impl_status.md`.
 - Speed or memory: `09_speed_memory_status.md`, then
   `17_route_stage_speed_audit.md`, then
   `20_mempool_cluster_gpu_memory.md`, then
@@ -53,6 +55,8 @@ Read this after `AGENTS.md`; open focused notes before grepping logs.
 - `22_dmp_pi_rc_derivative_chain.md`: DMP PI/RC derivative-chain notes.
 - `23_read_graph_rc_hotspots.md`: read/prep/graph/RC hotspot profile,
   substage timing evidence, and optimization strategy.
+- `24_route_grad_impl_status.md`: current route segment gradient implementation,
+  validation evidence, and remaining derivative-chain gaps.
 
 ## Do Not Confuse
 

@@ -1,6 +1,7 @@
 
 
 #include "GTDatabase.h"
+#include "sdc/SdcUtils.h"
 
 #include "common/common.h"
 #include "common/db/Cell.h"
@@ -26,6 +27,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <omp.h>
@@ -145,20 +147,75 @@ int graph_thread_count(int fallback)
     return std::max(1, env_threads);
 }
 
-int prefix_sum_counts(vector<int>& starts, const char* label)
+int prefix_sum_counts(vector<int>& starts, const char* label, int num_threads)
 {
+    if (starts.empty()) {
+        return 0;
+    }
+    const size_t count_size = starts.size() - 1;
+    if (count_size == 0) {
+        starts.back() = 0;
+        return 0;
+    }
+    auto overflow_error = [&]() {
+        throw std::runtime_error(std::string("Timing graph ") + label + " exceeds int index range");
+    };
+    auto serial_scan = [&]() -> int {
+        long long total = 0;
+        for (size_t i = 0; i < count_size; ++i) {
+            const int count = starts[i];
+            starts[i] = static_cast<int>(total);
+            total += count;
+            if (total > std::numeric_limits<int>::max()) {
+                overflow_error();
+            }
+        }
+        starts.back() = static_cast<int>(total);
+        return static_cast<int>(total);
+    };
+
+    if (num_threads <= 2 || count_size < 4096) {
+        return serial_scan();
+    }
+    const int workers = num_threads;
+    vector<long long> block_offsets(workers, 0);
+
+#pragma omp parallel num_threads(workers)
+    {
+        const int tid = omp_get_thread_num();
+        const size_t start = (count_size * static_cast<size_t>(tid)) / workers;
+        const size_t end = (count_size * static_cast<size_t>(tid + 1)) / workers;
+        long long block_total = 0;
+        for (size_t i = start; i < end; ++i) {
+            block_total += starts[i];
+        }
+        block_offsets[tid] = block_total;
+    }
+
     long long total = 0;
-    for (size_t i = 0; i + 1 < starts.size(); ++i) {
-        const int count = starts[i];
-        starts[i] = static_cast<int>(total);
-        total += count;
+    for (int tid = 0; tid < workers; ++tid) {
+        const long long block_total = block_offsets[tid];
+        block_offsets[tid] = total;
+        total += block_total;
         if (total > std::numeric_limits<int>::max()) {
-            throw std::runtime_error(std::string("Timing graph ") + label + " exceeds int index range");
+            overflow_error();
         }
     }
-    if (!starts.empty()) {
-        starts.back() = static_cast<int>(total);
+
+#pragma omp parallel num_threads(workers)
+    {
+        const int tid = omp_get_thread_num();
+        const size_t start = (count_size * static_cast<size_t>(tid)) / workers;
+        const size_t end = (count_size * static_cast<size_t>(tid + 1)) / workers;
+        long long running = block_offsets[tid];
+        for (size_t i = start; i < end; ++i) {
+            const int count = starts[i];
+            starts[i] = static_cast<int>(running);
+            running += count;
+        }
     }
+
+    starts.back() = static_cast<int>(total);
     return static_cast<int>(total);
 }
 
@@ -166,6 +223,53 @@ template <typename T>
 void release_vector_storage(vector<T>& values)
 {
     vector<T>().swap(values);
+}
+
+std::array<float, 18> dmp_library_threshold_key(const LibertyCell* min_cell,
+                                                const LibertyCell* max_cell)
+{
+    return {
+        min_cell->input_threshold_pct[RISE],
+        min_cell->input_threshold_pct[FALL],
+        min_cell->output_threshold_pct[RISE],
+        min_cell->output_threshold_pct[FALL],
+        min_cell->slew_lower_threshold_pct[RISE],
+        min_cell->slew_lower_threshold_pct[FALL],
+        min_cell->slew_upper_threshold_pct[RISE],
+        min_cell->slew_upper_threshold_pct[FALL],
+        min_cell->slew_derate_from_library,
+        max_cell->input_threshold_pct[RISE],
+        max_cell->input_threshold_pct[FALL],
+        max_cell->output_threshold_pct[RISE],
+        max_cell->output_threshold_pct[FALL],
+        max_cell->slew_lower_threshold_pct[RISE],
+        max_cell->slew_lower_threshold_pct[FALL],
+        max_cell->slew_upper_threshold_pct[RISE],
+        max_cell->slew_upper_threshold_pct[FALL],
+        max_cell->slew_derate_from_library,
+    };
+}
+
+bool timing_sense_transition_possible(TimingSense sense, int8_t out_when_from_zero, int8_t out_when_from_one)
+{
+    if (out_when_from_zero < 0 || out_when_from_one < 0) {
+        return true;
+    }
+    switch (sense) {
+        case TimingSense::positive_unate:
+            return out_when_from_zero == 0 && out_when_from_one == 1;
+        case TimingSense::negative_unate:
+            return out_when_from_zero == 1 && out_when_from_one == 0;
+        case TimingSense::non_unate:
+        case TimingSense::unknown:
+            return out_when_from_zero != out_when_from_one;
+    }
+    return true;
+}
+
+bool contains_int(const vector<int>& values, int target)
+{
+    return std::find(values.begin(), values.end(), target) != values.end();
 }
 
 
@@ -226,8 +330,8 @@ GTDatabase::~GTDatabase() {
 }
 
 
-void GTDatabase::ExtractTimingGraph() {
-    ExtractProfileTimer extract_profile(extract_profile_enabled());
+void GTDatabase::SetupThresholdAndFlattenLib(
+    const std::function<void(const char*)>& log_phase) {
     res_unit = cell_libs_[MIN]->resistance_unit_->value();
     cap_unit = cell_libs_[MIN]->capacitance_unit_->value();
     time_unit = cell_libs_[MIN]->time_unit_->value();
@@ -270,54 +374,24 @@ void GTDatabase::ExtractTimingGraph() {
                 dmp_slew_derates[1],
                 dmp_slew_derates[2],
                 dmp_slew_derates[3]);
-    extract_profile.log("thresholds");
+    if (log_phase) {
+        log_phase("thresholds");
+    }
 
     //  Flatten Liberty Cell Timing
     std::map<std::array<float, 18>, int> dmp_library_id_by_thresholds;
-    std::unordered_map<const LibertyCell*, int> dmp_library_id_by_cell;
     auto register_dmp_library = [&](const LibertyCell* min_cell,
                                     const LibertyCell* max_cell) -> int {
         if (min_cell == nullptr || max_cell == nullptr) {
             return -1;
         }
-        auto cached_min_cell = dmp_library_id_by_cell.find(min_cell);
-        if (cached_min_cell != dmp_library_id_by_cell.end()) {
-            return cached_min_cell->second;
-        }
-        auto cached_max_cell = dmp_library_id_by_cell.find(max_cell);
-        if (cached_max_cell != dmp_library_id_by_cell.end()) {
-            return cached_max_cell->second;
-        }
-        std::array<float, 18> threshold_key = {
-            min_cell->input_threshold_pct[RISE],
-            min_cell->input_threshold_pct[FALL],
-            min_cell->output_threshold_pct[RISE],
-            min_cell->output_threshold_pct[FALL],
-            min_cell->slew_lower_threshold_pct[RISE],
-            min_cell->slew_lower_threshold_pct[FALL],
-            min_cell->slew_upper_threshold_pct[RISE],
-            min_cell->slew_upper_threshold_pct[FALL],
-            min_cell->slew_derate_from_library,
-            max_cell->input_threshold_pct[RISE],
-            max_cell->input_threshold_pct[FALL],
-            max_cell->output_threshold_pct[RISE],
-            max_cell->output_threshold_pct[FALL],
-            max_cell->slew_lower_threshold_pct[RISE],
-            max_cell->slew_lower_threshold_pct[FALL],
-            max_cell->slew_upper_threshold_pct[RISE],
-            max_cell->slew_upper_threshold_pct[FALL],
-            max_cell->slew_derate_from_library,
-        };
+        std::array<float, 18> threshold_key = dmp_library_threshold_key(min_cell, max_cell);
         auto cached_thresholds = dmp_library_id_by_thresholds.find(threshold_key);
         if (cached_thresholds != dmp_library_id_by_thresholds.end()) {
-            dmp_library_id_by_cell.emplace(min_cell, cached_thresholds->second);
-            dmp_library_id_by_cell.emplace(max_cell, cached_thresholds->second);
             return cached_thresholds->second;
         }
         const int lib_id = static_cast<int>(dmp_library_input_thresholds.size() / NUM_ATTR);
         dmp_library_id_by_thresholds.emplace(threshold_key, lib_id);
-        dmp_library_id_by_cell.emplace(min_cell, lib_id);
-        dmp_library_id_by_cell.emplace(max_cell, lib_id);
         const std::array<const LibertyCell*, MAX_SPLIT> cells = {min_cell, max_cell};
         for_each_el_rf_if(el, rf, true) {
             const LibertyCell* liberty_cell = cells[el];
@@ -328,10 +402,6 @@ void GTDatabase::ExtractTimingGraph() {
             dmp_library_slew_derates.push_back(liberty_cell->slew_derate_from_library);
         }
         return lib_id;
-    };
-    auto dmp_library_id_for_cell = [&](const LibertyCell* liberty_cell) -> int {
-        auto cached_cell = dmp_library_id_by_cell.find(liberty_cell);
-        return cached_cell != dmp_library_id_by_cell.end() ? cached_cell->second : -1;
     };
     for (db::CellType* cell_type : rawdb.celltypes) {
         string cell_type_name = cell_type->name;
@@ -390,73 +460,65 @@ void GTDatabase::ExtractTimingGraph() {
             }
         }
     }
-    extract_profile.log("flatten_liberty");
+    if (log_phase) {
+        log_phase("flatten_liberty");
+    }
+}
+
+vector<uint8_t> GTDatabase::SetPinMapAndTag(
+    int graph_threads,
+    const std::function<void(const char*)>& log_phase) {
+    std::map<std::array<float, 18>, int> dmp_library_id_by_thresholds;
+    std::unordered_map<const LibertyCell*, int> dmp_library_id_by_cell;
+    dmp_library_id_by_cell.reserve(rawdb.celltypes.size() * 2u);
+    auto register_dmp_library_id = [&](const LibertyCell* min_cell,
+                                       const LibertyCell* max_cell) -> int {
+        if (min_cell == nullptr || max_cell == nullptr) {
+            return -1;
+        }
+        std::array<float, 18> threshold_key = dmp_library_threshold_key(min_cell, max_cell);
+        auto cached_thresholds = dmp_library_id_by_thresholds.find(threshold_key);
+        if (cached_thresholds != dmp_library_id_by_thresholds.end()) {
+            dmp_library_id_by_cell.emplace(min_cell, cached_thresholds->second);
+            dmp_library_id_by_cell.emplace(max_cell, cached_thresholds->second);
+            return cached_thresholds->second;
+        }
+        const int lib_id = static_cast<int>(dmp_library_id_by_thresholds.size());
+        dmp_library_id_by_thresholds.emplace(threshold_key, lib_id);
+        dmp_library_id_by_cell.emplace(min_cell, lib_id);
+        dmp_library_id_by_cell.emplace(max_cell, lib_id);
+        return lib_id;
+    };
+    for (db::CellType* cell_type : rawdb.celltypes) {
+        string cell_type_name = cell_type->name;
+        array<LibertyCell*, 2> liberty_cell_view = {
+            cell_libs_[MIN]->get_cell(cell_type_name),
+            cell_libs_[MAX]->get_cell(cell_type_name)};
+        register_dmp_library_id(liberty_cell_view[MIN], liberty_cell_view[MAX]);
+    }
     dmp_timing_library_ids.resize(liberty_timing_arcs.size(), -1);
     for (size_t timing_id = 0; timing_id < liberty_timing_arcs.size(); ++timing_id) {
         TimingArc* timing_arc = liberty_timing_arcs[timing_id];
         LibertyCell* liberty_cell = timing_arc && timing_arc->liberty_port_
                                         ? timing_arc->liberty_port_->cell_
                                         : nullptr;
-        dmp_timing_library_ids[timing_id] = dmp_library_id_for_cell(liberty_cell);
+        auto cached_cell = dmp_library_id_by_cell.find(liberty_cell);
+        dmp_timing_library_ids[timing_id] =
+            cached_cell != dmp_library_id_by_cell.end() ? cached_cell->second : -1;
     }
-    extract_profile.log("liberty_threshold_vectors");
+    if (log_phase) {
+        log_phase("liberty_threshold_vectors");
+    }
 
     //  Traverse Circuit Pins
     //
     num_pins = gpdb.getPins().size();
-    const int graph_threads = graph_thread_count(timing_raw_db.num_threads);
-    logger.info("Timing graph extraction threads: %d", graph_threads);
     pin_name2pin_id.clear();
-    struct PinNameMapEntry {
-        std::string name;
-        int pin_id = -1;
-        bool emplace_only = false;
-    };
-    auto build_pin_name_map_entries = [&](bool full_map) {
-        const int pin_name_count = static_cast<int>(pin_names.size());
-        std::vector<std::vector<PinNameMapEntry>> local_entries(graph_threads);
-#pragma omp parallel num_threads(graph_threads)
-        {
-            const int tid = omp_get_thread_num();
-            const int start = (pin_name_count * tid) / graph_threads;
-            const int end = (pin_name_count * (tid + 1)) / graph_threads;
-            auto& entries = local_entries[tid];
-            if (full_map) {
-                entries.reserve(static_cast<size_t>(end - start) * 2u);
-            }
-            for (int pin_id = start; pin_id < end; ++pin_id) {
-                const std::string& pin_name = pin_names[pin_id];
-                if (!full_map && pin_name_map_targets.find(pin_name) == pin_name_map_targets.end()) {
-                    continue;
-                }
-                entries.push_back(PinNameMapEntry{pin_name, pin_id, false});
-                const auto pin_delim_pos = pin_name.rfind(':');
-                if (pin_delim_pos != std::string::npos) {
-                    std::string sdc_pin_name = pin_name;
-                    sdc_pin_name[pin_delim_pos] = '/';
-                    entries.push_back(PinNameMapEntry{std::move(sdc_pin_name), pin_id, true});
-                }
-            }
-        }
-        for (auto& entries : local_entries) {
-            for (auto& entry : entries) {
-                if (entry.emplace_only) {
-                    pin_name2pin_id.emplace(std::move(entry.name), entry.pin_id);
-                } else {
-                    pin_name2pin_id[entry.name] = entry.pin_id;
-                }
-            }
-        }
-    };
     if (build_full_pin_name_map) {
-        pin_name2pin_id.reserve(pin_names.size() * 2);
-        build_pin_name_map_entries(true);
+        pin_name2pin_id.reserve(pin_names.size());
     } else if (!pin_name_map_targets.empty()) {
-        pin_name2pin_id.reserve(pin_name_map_targets.size() * 2);
-        build_pin_name_map_entries(false);
+        pin_name2pin_id.reserve(pin_name_map_targets.size());
     }
-    pin_name_map_targets.clear();
-    extract_profile.log("pin_name_map");
     pin_id2cell_type_id.resize(num_pins);
     pin_id2port_offset_id.resize(num_pins);
     dmp_pin_library_ids.assign(num_pins, -1);
@@ -464,78 +526,136 @@ void GTDatabase::ExtractTimingGraph() {
     pin_is_ideal_clk.assign(num_pins, 0);
     pin_case_values.assign(num_pins, -1);
     pin_capacitance.resize(2 * 3 * num_pins, 0.0f);
-    vector<uint8_t> primary_input_pin(num_pins, 0);
-    vector<uint8_t> primary_output_pin(num_pins, 0);
     const auto& gp_pins = gpdb.getPins();
     const int gp_pin_count = static_cast<int>(gp_pins.size());
+    const bool build_pin_name_map = build_full_pin_name_map || !pin_name_map_targets.empty();
+    const int pin_name_count = static_cast<int>(pin_names.size());
+    vector<vector<std::pair<std::string, int>>> local_name_entries(graph_threads);
+    vector<vector<int>> local_primary_inputs(graph_threads);
+    vector<vector<int>> local_primary_outputs(graph_threads);
+    const auto& pin_name_map_targets_const = pin_name_map_targets;
     const auto& dmp_library_id_by_cell_const = dmp_library_id_by_cell;
-    auto dmp_library_id_for_cell_const = [&](const LibertyCell* liberty_cell) -> int {
-        auto cached_cell = dmp_library_id_by_cell_const.find(liberty_cell);
-        return cached_cell != dmp_library_id_by_cell_const.end() ? cached_cell->second : -1;
-    };
-#pragma omp parallel for num_threads(graph_threads) schedule(static)
-    for (int pin_index = 0; pin_index < gp_pin_count; ++pin_index) {
-        const auto& gppin = gp_pins[pin_index];
-        int pin_id = static_cast<int>(gppin.getId());
-        const std::string& pin_macro_name = gppin.getMacroName();
-        auto [ori_node_id, ori_node_pin_id, ori_net_id] = gppin.getOriDBInfo();
-        (void) ori_net_id;
-        if (ori_node_pin_id == -1) {
-            auto dbiopin = rawdb.iopins[ori_node_id];
-            pin_id2cell_type_id[pin_id] = -1;
-            if (dbiopin->type->direction() == 'i') {
-                primary_output_pin[pin_id] = 1;
-            } else if (dbiopin->type->direction() == 'o') {
-                primary_input_pin[pin_id] = 1;
+#pragma omp parallel num_threads(graph_threads)
+    {
+        const int tid = omp_get_thread_num();
+        const int start = (gp_pin_count * tid) / graph_threads;
+        const int end = (gp_pin_count * (tid + 1)) / graph_threads;
+        auto& thread_name_entries = local_name_entries[tid];
+        auto& thread_primary_inputs = local_primary_inputs[tid];
+        auto& thread_primary_outputs = local_primary_outputs[tid];
+        if (build_full_pin_name_map) {
+            thread_name_entries.reserve(static_cast<size_t>(end - start));
+        }
+        for (int pin_index = start; pin_index < end; ++pin_index) {
+            const auto& gppin = gp_pins[pin_index];
+            int pin_id = static_cast<int>(gppin.getId());
+            if (build_pin_name_map &&
+                pin_id >= 0 &&
+                pin_id < pin_name_count) {
+                const std::string& pin_name = pin_names[pin_id];
+                if (build_full_pin_name_map || pin_name_map_targets_const.find(pin_name) != pin_name_map_targets_const.end()) {
+                    thread_name_entries.emplace_back(pin_name_colon_to_slash(pin_name), pin_id);
+                }
             }
-        } else {
-            auto& dbcell = rawdb.cells[ori_node_id];
-            LibertyCell* liberty_cell = dbcell->ctype()->liberty_cell;
-            pin_id2cell_type_id[pin_id] = dbcell->ctype()->libcell();
-            dmp_pin_library_ids[pin_id] = dmp_library_id_for_cell_const(liberty_cell);
-            if (!liberty_cell) {
-                pin_id2port_offset_id[pin_id] = 0;
-                continue;
-            }
-            auto port_iter = liberty_cell->ports_map_.find(pin_macro_name);
-            pin_id2port_offset_id[pin_id] = port_iter == liberty_cell->ports_map_.end() ? 0 : port_iter->second;
-            int pin_port_offset = pin_id2port_offset_id[pin_id];
-            if (pin_port_offset >= 0 &&
-                pin_port_offset < static_cast<int>(liberty_cell->ports_.size()) &&
-                liberty_cell->ports_[pin_port_offset]->is_clock_) {
-                pin_is_clk[pin_id] = 1;
-            }
+            const std::string& pin_macro_name = gppin.getMacroName();
+            auto [ori_node_id, ori_node_pin_id, ori_net_id] = gppin.getOriDBInfo();
+            (void) ori_net_id;
+            if (ori_node_pin_id == -1) {
+                auto dbiopin = rawdb.iopins[ori_node_id];
+                pin_id2cell_type_id[pin_id] = -1;
+                if (dbiopin->type->direction() == 'i') {
+                    thread_primary_outputs.push_back(pin_id);
+                } else if (dbiopin->type->direction() == 'o') {
+                    thread_primary_inputs.push_back(pin_id);
+                }
+            } else {
+                auto& dbcell = rawdb.cells[ori_node_id];
+                LibertyCell* liberty_cell = dbcell->ctype()->liberty_cell;
+                pin_id2cell_type_id[pin_id] = dbcell->ctype()->libcell();
+                const auto& dmp_library_iter = dmp_library_id_by_cell_const.find(liberty_cell);
+                dmp_pin_library_ids[pin_id] =
+                    dmp_library_iter == dmp_library_id_by_cell_const.end() ? -1 : dmp_library_iter->second;
+                if (!liberty_cell) {
+                    pin_id2port_offset_id[pin_id] = 0;
+                    continue;
+                }
+                auto port_iter = liberty_cell->ports_map_.find(pin_macro_name);
+                pin_id2port_offset_id[pin_id] = port_iter == liberty_cell->ports_map_.end() ? 0 : port_iter->second;
+                int pin_port_offset = pin_id2port_offset_id[pin_id];
+                if (pin_port_offset >= 0 &&
+                    pin_port_offset < static_cast<int>(liberty_cell->ports_.size()) &&
+                    liberty_cell->ports_[pin_port_offset]->is_clock_) {
+                    pin_is_clk[pin_id] = 1;
+                }
 
-            int liberty_port_id = liberty_cell_type2port_list_end[pin_id2cell_type_id[pin_id]] + pin_id2port_offset_id[pin_id];
+                int liberty_port_id = liberty_cell_type2port_list_end[pin_id2cell_type_id[pin_id]] + pin_id2port_offset_id[pin_id];
 
-            for_each_el(el) {
-                pin_capacitance[6 * pin_id + el * 2 + 0] = liberty_port_capacitance[6 * liberty_port_id + el * 3 + 0];
-                pin_capacitance[6 * pin_id + el * 2 + 1] = liberty_port_capacitance[6 * liberty_port_id + el * 3 + 1];
-                pin_capacitance[6 * pin_id + 4 + el] = liberty_port_capacitance[6 * liberty_port_id + el * 3 + 2];
+                for_each_el(el) {
+                    pin_capacitance[6 * pin_id + el * 2 + 0] = liberty_port_capacitance[6 * liberty_port_id + el * 3 + 0];
+                    pin_capacitance[6 * pin_id + el * 2 + 1] = liberty_port_capacitance[6 * liberty_port_id + el * 3 + 1];
+                    pin_capacitance[6 * pin_id + 4 + el] = liberty_port_capacitance[6 * liberty_port_id + el * 3 + 2];
+                }
             }
         }
     }
-    for (int pin_index = 0; pin_index < gp_pin_count; ++pin_index) {
-        const auto& gppin = gp_pins[pin_index];
-        const int pin_id = static_cast<int>(gppin.getId());
-        if (primary_output_pin[pin_id]) {
-            primary_outputs.push_back(pin_id);
-            endpoints_id.push_back(pin_id);
-            primary_output2pin_id[gppin.getName()] = pin_id;
-        } else if (primary_input_pin[pin_id]) {
-            primary_inputs.push_back(pin_id);
-            primary_input2pin_id[gppin.getName()] = pin_id;
+    for (auto& entries : local_name_entries) {
+        for (auto& entry : entries) {
+            pin_name2pin_id.emplace(std::move(entry.first), entry.second);
+        }
+    }
+    pin_name_map_targets.clear();
+    if (log_phase) {
+        log_phase("pin_name_map");
+    }
+    size_t primary_input_count = 0;
+    size_t primary_output_count = 0;
+    for (int tid = 0; tid < graph_threads; ++tid) {
+        primary_input_count += local_primary_inputs[tid].size();
+        primary_output_count += local_primary_outputs[tid].size();
+    }
+    primary_inputs.reserve(primary_input_count);
+    primary_outputs.reserve(primary_output_count);
+    endpoints_id.reserve(endpoints_id.size() + primary_output_count);
+    for (int tid = 0; tid < graph_threads; ++tid) {
+        primary_inputs.insert(primary_inputs.end(),
+                              local_primary_inputs[tid].begin(),
+                              local_primary_inputs[tid].end());
+        primary_outputs.insert(primary_outputs.end(),
+                               local_primary_outputs[tid].begin(),
+                               local_primary_outputs[tid].end());
+    }
+    for (int pin_id : primary_outputs) {
+        endpoints_id.push_back(pin_id);
+        primary_output2pin_id[pin_names[pin_id]] = pin_id;
+    }
+    for (int pin_id : primary_inputs) {
+        primary_input2pin_id[pin_names[pin_id]] = pin_id;
+    }
+    vector<uint8_t> primary_input_mask(num_pins, 0);
+    for (int pin_id : primary_inputs) {
+        if (pin_id >= 0 && pin_id < num_pins) {
+            primary_input_mask[pin_id] = 1;
         }
     }
     num_POs = primary_outputs.size();
-    extract_profile.log("traverse_pins");
+    if (log_phase) {
+        log_phase("set_pin_map_and_tag");
+    }
+    return primary_input_mask;
+}
+
+void GTDatabase::ExtractTimingGraph() {
+    ExtractProfileTimer extract_profile(extract_profile_enabled());
+    const int graph_threads = graph_thread_count(timing_raw_db.num_threads);
+    logger.info("Timing graph extraction threads: %d", graph_threads);
+    SetupThresholdAndFlattenLib(
+        [&](const char* phase) { extract_profile.log(phase); });
+    vector<uint8_t> primary_input_mask = SetPinMapAndTag(
+        graph_threads,
+        [&](const char* phase) { extract_profile.log(phase); });
 
     const int num_nets = static_cast<int>(gpdb.getNets().size());
     const int num_cells = static_cast<int>(rawdb.cells.size());
-    vector<uint8_t> primary_input_mask(num_pins, 0);
-    for (int pin_id : primary_inputs) {
-        if (pin_id >= 0 && pin_id < num_pins) primary_input_mask[pin_id] = 1;
-    }
 
     vector<int> net_arc_start(num_nets + 1, 0);
     vector<int> net_driver_pin(num_nets, -1);
@@ -547,7 +667,7 @@ void GTDatabase::ExtractTimingGraph() {
             net_arc_start[net_id] = static_cast<int>(pins.size()) - 1;
         }
     }
-    const int num_net_arcs = prefix_sum_counts(net_arc_start, "net arcs");
+    const int num_net_arcs = prefix_sum_counts(net_arc_start, "net arcs", graph_threads);
 
     auto is_primary_input_pin = [&](int pin_id) -> bool {
         return pin_id >= 0 && pin_id < num_pins && primary_input_mask[pin_id] != 0;
@@ -558,31 +678,38 @@ void GTDatabase::ExtractTimingGraph() {
         return net_id >= 0 && net_id < num_nets &&
                net_driver_pin[net_id] >= 0 && net_driver_pin[net_id] != pin_id;
     };
-    auto is_undriven_non_pi_pin = [&](int pin_id) -> bool {
-        return pin_id >= 0 && !is_primary_input_pin(pin_id) && !pin_has_net_fanin(pin_id);
-    };
-    auto is_constant_driver_pin = [&](int pin_id) -> bool {
-        if (pin_id < 0 || pin_id >= num_pins) return false;
+    auto constant_driver_value = [&](int pin_id) -> int {
+        if (pin_id < 0 || pin_id >= num_pins) {
+            return -1;
+        }
         auto [ori_node_id, ori_node_pin_id, ori_net_id] = gpdb.getPins()[pin_id].getOriDBInfo();
         (void) ori_net_id;
         if (ori_node_pin_id == -1 || ori_node_id < 0 || ori_node_id >= static_cast<int>(rawdb.cells.size())) {
-            return false;
-        }
-        auto& cell = rawdb.cells[ori_node_id];
-        return cell && cell->ctype() && cell->ctype()->name.find("__conb_") != std::string::npos;
-    };
-    auto constant_driver_value = [&](int pin_id) -> int {
-        if (!is_constant_driver_pin(pin_id)) {
             return -1;
         }
-        const std::string& name = pin_names[pin_id];
-        if (name.size() >= 3 && name.compare(name.size() - 3, 3, ":LO") == 0) {
-            return 0;
+        db::Cell* dbcell = rawdb.cells[ori_node_id];
+        if (dbcell == nullptr || dbcell->ctype() == nullptr) {
+            return -1;
         }
-        if (name.size() >= 3 && name.compare(name.size() - 3, 3, ":HI") == 0) {
-            return 1;
+        LibertyCell* liberty_cell = dbcell->ctype()->liberty_cell;
+        if (liberty_cell == nullptr) {
+            return -1;
         }
-        return -1;
+        const int port_id = liberty_cell->get_port(gpdb.getPins()[pin_id].getMacroName());
+        if (port_id < 0 || port_id >= static_cast<int>(liberty_cell->ports_.size())) {
+            return -1;
+        }
+        LibertyPort* port = liberty_cell->ports_[port_id];
+        if (port == nullptr || !port->has_function_) {
+            return -1;
+        }
+        LibertyFuncExpr expr;
+        if (!expr.compile(port->function_expr_, liberty_cell)) {
+            return -1;
+        }
+        vector<int8_t> port_values(liberty_cell->ports_.size(), -1);
+        const int8_t value = expr.eval(port_values);
+        return value == 0 || value == 1 ? value : -1;
     };
     auto constant_driven_pin_value = [&](int pin_id) -> int {
         if (!pin_has_net_fanin(pin_id)) {
@@ -590,6 +717,83 @@ void GTDatabase::ExtractTimingGraph() {
         }
         const int net_id = static_cast<int>(gpdb.getPins()[pin_id].getParNetId());
         return constant_driver_value(net_driver_pin[net_id]);
+    };
+    auto known_pin_logic_value = [&](int pin_id) -> int {
+        if (pin_id >= 0 && pin_id < static_cast<int>(pin_case_values.size()) &&
+            pin_case_values[pin_id] >= 0) {
+            return pin_case_values[pin_id];
+        }
+        return constant_driven_pin_value(pin_id);
+    };
+    auto is_functional_combinational_timing = [](const TimingArc* timing_arc) {
+        return timing_arc->timing_type_ == TimingType::combinational ||
+               timing_arc->timing_type_ == TimingType::combinational_rise ||
+               timing_arc->timing_type_ == TimingType::combinational_fall;
+    };
+    auto output_function_allows_timing_arc = [&](const TimingArc* timing_arc,
+                                                 int gpdb_id) -> bool {
+        if (!is_functional_combinational_timing(timing_arc) ||
+            timing_arc->from_port_ == nullptr ||
+            timing_arc->to_port_ == nullptr ||
+            !timing_arc->to_port_->has_function_) {
+            return true;
+        }
+        const LibertyCell* liberty_cell = timing_arc->to_port_->cell_;
+        if (liberty_cell == nullptr) {
+            return true;
+        }
+        const int from_port_id = liberty_cell->get_port(timing_arc->from_port_->name);
+        if (from_port_id < 0 ||
+            from_port_id >= static_cast<int>(liberty_cell->ports_.size())) {
+            return true;
+        }
+        LibertyFuncExpr expr;
+        if (!expr.compile(timing_arc->to_port_->function_expr_, liberty_cell)) {
+            return true;
+        }
+
+        vector<int8_t> port_values(liberty_cell->ports_.size(), -1);
+        vector<int> unknown_ports;
+        for (const LibertyFuncExprOp& op : expr.ops()) {
+            if (op.opcode != LibertyFuncExprOpcode::port ||
+                op.port_id < 0 ||
+                op.port_id >= static_cast<int>(liberty_cell->ports_.size()) ||
+                op.port_id == from_port_id) {
+                continue;
+            }
+            if (port_values[op.port_id] < 0) {
+                const int pin_id = gpdb.getNodes()[gpdb_id].getPinbyPortName(
+                    liberty_cell->ports_[op.port_id]->name);
+                const int logic_value = known_pin_logic_value(pin_id);
+                if (logic_value >= 0) {
+                    port_values[op.port_id] = static_cast<int8_t>(logic_value);
+                } else if (!contains_int(unknown_ports, op.port_id)) {
+                    unknown_ports.push_back(op.port_id);
+                }
+            }
+        }
+
+        constexpr int kMaxFunctionArcUnknownPorts = 16;
+        if (unknown_ports.size() > kMaxFunctionArcUnknownPorts) {
+            return true;
+        }
+        const uint64_t assignment_count = uint64_t{1} << unknown_ports.size();
+        for (uint64_t assignment = 0; assignment < assignment_count; ++assignment) {
+            for (size_t i = 0; i < unknown_ports.size(); ++i) {
+                port_values[unknown_ports[i]] =
+                    static_cast<int8_t>((assignment >> i) & uint64_t{1});
+            }
+            port_values[from_port_id] = 0;
+            const int8_t out_when_from_zero = expr.eval(port_values);
+            port_values[from_port_id] = 1;
+            const int8_t out_when_from_one = expr.eval(port_values);
+            if (timing_sense_transition_possible(timing_arc->timing_sense_,
+                                                 out_when_from_zero,
+                                                 out_when_from_one)) {
+                return true;
+            }
+        }
+        return false;
     };
     auto valid_cell_timing_arc = [&](db::Cell* dbcell,
                                      int gpdb_id,
@@ -608,23 +812,11 @@ void GTDatabase::ExtractTimingGraph() {
         if (from_pin_id < 0 || to_pin_id < 0) {
             return false;
         }
-        if (timing_arc->from_port_->name == "S" &&
-            timing_arc->to_port_->name == "X" &&
-            dbcell->ctype()->liberty_cell->name.find("__mux2_") != std::string::npos) {
-            const int a0_pin_id = gpdb.getNodes()[gpdb_id].getPinbyPortName("A0");
-            const int a1_pin_id = gpdb.getNodes()[gpdb_id].getPinbyPortName("A1");
-            const int a0_const = constant_driven_pin_value(a0_pin_id);
-            const int a1_const = constant_driven_pin_value(a1_pin_id);
-            if (is_undriven_non_pi_pin(a0_pin_id) ||
-                is_undriven_non_pi_pin(a1_pin_id) ||
-                (timing_arc->timing_sense_ == TimingSense::positive_unate &&
-                 (a0_const == 1 || a1_const == 0)) ||
-                (timing_arc->timing_sense_ == TimingSense::negative_unate &&
-                 (a0_const == 0 || a1_const == 1))) {
-                return false;
-            }
+        if (!output_function_allows_timing_arc(timing_arc, gpdb_id)) {
+            return false;
         }
         is_test = timing_arc->is_constraint() && !is_clock_gating_check(timing_arc);
+        (void) dbcell;
         (void) libcell_id;
         return true;
     };
@@ -676,8 +868,8 @@ void GTDatabase::ExtractTimingGraph() {
         cell_arc_start[cell_idx] = arc_count;
         cell_test_start[cell_idx] = test_count;
     }
-    const int num_cell_arcs = prefix_sum_counts(cell_arc_start, "cell arcs");
-    num_tests = prefix_sum_counts(cell_test_start, "test arcs");
+    const int num_cell_arcs = prefix_sum_counts(cell_arc_start, "cell arcs", graph_threads);
+    num_tests = prefix_sum_counts(cell_test_start, "test arcs", graph_threads);
     num_arcs = num_net_arcs + num_cell_arcs;
 
     timing_arc_from_pin_id.assign(num_arcs, -1);

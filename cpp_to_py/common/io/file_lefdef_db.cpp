@@ -1266,31 +1266,86 @@ void fastDefMaterializeNets(Database& db,
         profile_last = now;
     };
 
+    num_threads = std::max(1, num_threads);
     std::vector<int> out_index(parsed_nets.size(), -1);
-    std::size_t valid_count = 0;
-    for (std::size_t i = 0; i < parsed_nets.size(); ++i) {
-        const FastDefNet& parsed = parsed_nets[i];
+    std::vector<unsigned char> output_keep(parsed_nets.size(), 0);
+    std::vector<std::size_t> output_counts(static_cast<std::size_t>(num_threads), 0);
+
+    auto is_output_net = [](const FastDefNet& parsed) {
         if (parsed.skip || parsed.connections.empty()) {
-            continue;
+            return false;
         }
         if (parsed.name.equals("VDD") || parsed.name.equals("VSS")) {
-            continue;
+            return false;
         }
         if (fastDefTokenNeedsValidation(parsed.name)) {
             std::string net_name(parsed.name.begin, parsed.name.end);
             validate_token(net_name);
             if (net_name == "VDD" || net_name == "VSS") {
-                continue;
+                return false;
             }
         }
-        out_index[i] = static_cast<int>(valid_count++);
+        return true;
+    };
+
+    auto count_output_chunk = [&](int tid) {
+        const std::size_t begin = (parsed_nets.size() * static_cast<std::size_t>(tid)) /
+                                  static_cast<std::size_t>(num_threads);
+        const std::size_t end = (parsed_nets.size() * static_cast<std::size_t>(tid + 1)) /
+                                static_cast<std::size_t>(num_threads);
+        std::size_t count = 0;
+        for (std::size_t i = begin; i < end; ++i) {
+            if (is_output_net(parsed_nets[i])) {
+                output_keep[i] = 1;
+                ++count;
+            }
+        }
+        output_counts[static_cast<std::size_t>(tid)] = count;
+    };
+
+    std::vector<std::thread> workers;
+    workers.reserve(num_threads > 1 ? static_cast<std::size_t>(num_threads - 1) : 0);
+    for (int tid = 1; tid < num_threads; ++tid) {
+        workers.emplace_back(count_output_chunk, tid);
+    }
+    count_output_chunk(0);
+    for (std::thread& worker : workers) {
+        worker.join();
+    }
+
+    std::vector<std::size_t> output_offsets(static_cast<std::size_t>(num_threads) + 1, 0);
+    for (int tid = 0; tid < num_threads; ++tid) {
+        output_offsets[static_cast<std::size_t>(tid + 1)] =
+            output_offsets[static_cast<std::size_t>(tid)] + output_counts[static_cast<std::size_t>(tid)];
+    }
+    const std::size_t valid_count = output_offsets.back();
+
+    auto index_output_chunk = [&](int tid) {
+        const std::size_t begin = (parsed_nets.size() * static_cast<std::size_t>(tid)) /
+                                  static_cast<std::size_t>(num_threads);
+        const std::size_t end = (parsed_nets.size() * static_cast<std::size_t>(tid + 1)) /
+                                static_cast<std::size_t>(num_threads);
+        std::size_t out = output_offsets[static_cast<std::size_t>(tid)];
+        for (std::size_t i = begin; i < end; ++i) {
+            if (output_keep[i] != 0) {
+                out_index[i] = static_cast<int>(out++);
+            }
+        }
+    };
+
+    workers.clear();
+    for (int tid = 1; tid < num_threads; ++tid) {
+        workers.emplace_back(index_output_chunk, tid);
+    }
+    index_output_chunk(0);
+    for (std::thread& worker : workers) {
+        worker.join();
     }
     profile_log("net_output_index");
 
     const std::size_t base = db.nets.size();
     db.nets.resize(base + valid_count, nullptr);
     db.name_nets.reserve(base + valid_count);
-    num_threads = std::max(1, num_threads);
     profile_log("resize");
 
     std::vector<FastDefNameIndexEntry> cell_entries;
@@ -1372,8 +1427,7 @@ void fastDefMaterializeNets(Database& db,
         }
     };
 
-    std::vector<std::thread> workers;
-    workers.reserve(num_threads > 1 ? static_cast<std::size_t>(num_threads - 1) : 0);
+    workers.clear();
     for (int tid = 1; tid < num_threads; ++tid) {
         workers.emplace_back(build_chunk, tid);
     }

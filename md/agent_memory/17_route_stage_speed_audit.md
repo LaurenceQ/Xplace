@@ -254,3 +254,75 @@ Fast DEF name-index materialization optimization:
 - Added a local `FastDefNameIndex` helper in the fast DEF path. It builds an open-address table from existing object names with relaxed atomic CAS and then performs read-only char-buffer lookup. The component materializer uses it for `CellType` lookup; the net materializer uses it for cells and IO pins, with a validated-string fallback only for escaped DEF tokens. The original DEF file remains mmap-read only.
 - Validation after build/install/import passed no-cache `visible_ariane` and `visible_mempool_group` with fast DEF components+nets enabled. `visible_mempool_group` timing, power, and group checks passed with `wns_err=9.77207e-05` and `ptotal_err=0.0001035`.
 - On `visible_mempool_group`, compared with `result/codex_atomic_route_net_index_mempool_group`, read-side profile improved: `materialize_components 2.683 -> 2.117`, DEF stub pins parse `2.487 -> 2.071`, `read_def 10.984 -> 10.154`, GPDB `setup_nets 8.495 -> 6.451`, and total `read_input 23.674 -> 19.710`. The new net-materialize subprofile was `net_output_index=0.612`, `cell_name_index=0.145`, `parallel_build=1.031`, and `name_map=1.114`; net materialization is now mostly map/name construction rather than connection string lookup.
+
+
+Parse-time route grid inference optimization:
+
+- Replaced the route-grid inference re-scan of every `LocalSpefNetRc::route_points`
+  with per-parse-thread `OpenroadRouteGridStats`. Each route segment parse worker
+  now accumulates the gcd/origin input points while it is already reading the mmap
+  route char buffer. The final grid is inferred by merging the thread-local stats;
+  there is no mutex and no shared write in the hot path.
+- The existing `infer_openroad_route_grid()` helper remains for other callers, but
+  `build_openroad_route_segments_rc()` now calls `infer_openroad_route_grid_from_stats()`
+  using stats produced during parse. This preserves no-cache behavior and does not
+  modify or write any `.def` file.
+- Validation after build/install/import passed no-cache `visible_ariane` with fast
+  DEF enabled, no-cache `visible_ariane` with fast DEF disabled, and no-cache
+  `visible_mempool_group` with fast DEF enabled. `visible_mempool_group` passed
+  timing/power/group checks with `wns_err=9.77207e-05`, `ptotal_err=0.0001035`,
+  worst group `clock.internal=0.000613238`.
+- On `visible_mempool_group` (`result/codex_parse_grid_stats_mempool_group`),
+  route profile showed parse cumulative `1.960s`, `infer_route_grid` immediately
+  at `1.960s` (no extra re-scan wall), finalize wall `0.824s`, append `1.223s`,
+  `finalize_done=4.033s`, and total `build_rc=5.292s`. Compared with the prior
+  committed route-net-index/fast-DEF profile around `build_route_segments_graph`
+  `4.999s` and `build_rc` `6.351s`, this removes a real route-grid wall-time pass.
+
+Rejected GPDB pin-name memcpy experiment:
+
+- Tried replacing `GPPin::setNameFromNodePortTo()` append/reserve construction with
+  one `resize()` plus two `memcpy()` calls. Correctness passed, but the large
+  no-cache profile did not improve: `setup_nets=7.039s`, `read_input=21.250s`
+  in `result/codex_gpdb_pin_name_memcpy_mempool_group`, worse than the current
+  fast-DEF/name-index baseline. The source and installed binary were restored
+  before continuing.
+
+
+Parallel fast DEF net output indexing:
+
+- Parallelized the `fastDefMaterializeNets()` output-index pass. The old code
+  serially scanned all parsed DEF nets, filtered skipped/empty/PG nets, and assigned
+  `out_index`. The new path uses per-thread counts over the read-only parsed net
+  vector, a small serial prefix over thread counts, and then per-thread writes into
+  disjoint `out_index` ranges. It preserves DEF net order and uses no mutexes or
+  shared hot writes.
+- `validate_token()` only mutates the local string passed to it, so calling it from
+  worker threads during escaped-token filtering has no shared-state race.
+- Validation after build/install/import passed no-cache `visible_ariane` and
+  `visible_mempool_group` with fast DEF components+nets enabled. `visible_mempool_group`
+  passed timing/power/group checks with `wns_err=9.77207e-05`, `ptotal_err=0.0001035`,
+  worst group `clock.internal=0.000613238`.
+- On `visible_mempool_group` (`result/codex_parallel_fast_net_index_mempool_group`),
+  `net_output_index` improved to `0.076s` versus previous typical `~0.5-0.7s`,
+  and `materialize_nets=4.756s`. Total `read_input=21.933s` was dominated by noisy
+  GPDB `setup_nets=8.325s`, so judge this change by its targeted fast-DEF substage.
+
+
+GPDB net pin vector reservation:
+
+- Added `GPNet::reservePins()` and call it from both `addNet()` and the parallel
+  `setupNets()` path using the already-known raw DB net fanout. This only reserves
+  the per-net `pins_id` vector before the owning net worker appends pins; each worker
+  still writes a disjoint `GPNet`, so there is no mutex or atomic on the hot path.
+- This is intentionally narrower than the earlier rejected GPNet name-ref experiment:
+  GPNet names still use the original copied string behavior, avoiding the prior
+  object/name lifetime and layout side effects.
+- Validation after build/install/import passed no-cache `visible_ariane` and
+  `visible_mempool_group` with fast DEF components+nets enabled. `visible_mempool_group`
+  passed timing/power/group checks with `wns_err=9.77207e-05`, `ptotal_err=0.0001035`,
+  worst group `clock.internal=0.000613238`.
+- On `visible_mempool_group` (`result/codex_gpnet_reserve_mempool_group`), GPDB
+  `setup_nets=6.874s`, with `pin_fill=4.099s` and `node_pin_rebuild=1.478s`.
+  Total `read_input=19.883s`; route-grid optimization remained active with no
+  extra `infer_route_grid` pass and `build_rc=6.101s`.

@@ -412,6 +412,35 @@ public:
     void init_dmp_rc_spef();
     void init_dmp_rc_gr(const std::string& file);
     void init_dmp_rc_route_segments(const std::string& file);
+    tuple<torch::Tensor, vector<std::string>> debug_dmp_route_segment_fd_grad(
+                  const std::string& route_segments_file,
+                  const std::string& kind,
+                  const std::vector<int64_t>& ids,
+                  int sample_count,
+                  int seed,
+                  double eps_rel,
+                  double eps_abs,
+                  double tau_ns);
+    tuple<torch::Tensor, torch::Tensor, torch::Tensor> compute_dmp_route_segment_soft_timing_grad(
+                  const std::string& route_segments_file,
+                  double tau_ns);
+    tuple<torch::Tensor, vector<std::string>> debug_dmp_route_segment_grad_fd_validate(
+                  const std::string& route_segments_file,
+                  int sample_net_count,
+                  int seed,
+                  double eps_rel,
+                  double eps_abs_edge,
+                  double eps_abs_node,
+                  double tau_ns);
+    tuple<torch::Tensor, vector<std::string>> debug_dmp_route_segment_primitive_slope_stats(
+                  const std::string& route_segments_file);
+    tuple<torch::Tensor, vector<std::string>> debug_dmp_route_segment_rc_tree_gradcheck(
+                  const std::string& route_segments_file,
+                  int sample_net_count,
+                  int seed,
+                  double eps_rel,
+                  double eps_abs_edge,
+                  double eps_abs_node);
     void debug_dump_dmp_rc_net(const std::string& net_name);
     void print_pinLoad();
     DmpModel* dmp_db = nullptr;

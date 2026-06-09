@@ -155,6 +155,15 @@ struct OpenroadInferredGrid {
     bool valid = false;
 };
 
+struct OpenroadRouteGridStats {
+    bool have_x = false;
+    bool have_y = false;
+    int first_x = 0;
+    int first_y = 0;
+    int x_step = 0;
+    int y_step = 0;
+};
+
 struct NangateLayerRc {
     float res_ohm_per_um = 0.0f;
     float cap_f_per_um = 0.0f;
@@ -271,6 +280,11 @@ int infer_openroad_grid_origin_from_first(int first_coord,
                                           bool have_coord,
                                           int tile_size,
                                           int fallback_origin);
+void add_openroad_route_grid_point(OpenroadRouteGridStats& stats, int x, int y);
+OpenroadInferredGrid infer_openroad_route_grid_from_stats(
+    const std::vector<OpenroadRouteGridStats>& thread_stats,
+    const db::Database& rawdb,
+    int fallback_tile_size);
 OpenroadInferredGrid infer_openroad_route_grid(
     const std::vector<std::unique_ptr<LocalSpefNetRc>>& local_nets,
     const db::Database& rawdb,

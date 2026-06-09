@@ -132,6 +132,7 @@ void GPDatabase::addNet(index_type dbnet_id) {
     GPNet& net = nets.back();
     net.setId(nets.size() - 1);
     net.setName(dbnet->name);
+    net.reservePins(dbnet->pins.size());
     net.setOriDBId(dbnet_id);
     dbnet->gpdb_id = nets.size() - 1;
     for (auto dbpin : dbnet->pins) {
@@ -368,6 +369,7 @@ void GPDatabase::setupNets() {
         GPNet& net = nets[dbnet_id];
         net.setId(dbnet_id);
         net.setName(dbnet->name);
+        net.reservePins(dbnet->pins.size());
         net.setOriDBId(dbnet_id);
         dbnet->gpdb_id = dbnet_id;
         net_names[dbnet_id] = dbnet->name;

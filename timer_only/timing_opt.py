@@ -271,6 +271,95 @@ class GPUTimer():
         self.timer.update_states()
         self.timer.debug_compare_openroad_route_segments_rc(gr_rc_file, route_segments_file, top_n)
 
+    def debug_route_segment_fd_grad(
+        self,
+        route_segments_file=None,
+        kind="edge_res",
+        ids=None,
+        sample_count=0,
+        seed=1,
+        eps_rel=1e-3,
+        eps_abs=0.0,
+        tau_ns=0.02,
+    ):
+        route_segments_file = route_segments_file or self.params.get("route_segments")
+        if not route_segments_file:
+            raise ValueError("OpenROAD route segment path is required.")
+        ids = [] if ids is None else [int(i) for i in ids]
+        return self.timer.debug_dmp_route_segment_fd_grad(
+            route_segments_file,
+            kind,
+            ids,
+            int(sample_count),
+            int(seed),
+            float(eps_rel),
+            float(eps_abs),
+            float(tau_ns),
+        )
+
+    def compute_route_segment_soft_timing_grad(
+        self,
+        route_segments_file=None,
+        tau_ns=0.02,
+    ):
+        route_segments_file = route_segments_file or self.params.get("route_segments")
+        if not route_segments_file:
+            raise ValueError("OpenROAD route segment path is required.")
+        return self.timer.compute_dmp_route_segment_soft_timing_grad(
+            route_segments_file,
+            float(tau_ns),
+        )
+
+    def debug_route_segment_grad_fd_validate(
+        self,
+        route_segments_file=None,
+        sample_net_count=10000,
+        seed=1,
+        eps_rel=1e-3,
+        eps_abs_edge=0.0,
+        eps_abs_node=1e-4,
+        tau_ns=0.02,
+    ):
+        route_segments_file = route_segments_file or self.params.get("route_segments")
+        if not route_segments_file:
+            raise ValueError("OpenROAD route segment path is required.")
+        return self.timer.debug_dmp_route_segment_grad_fd_validate(
+            route_segments_file,
+            int(sample_net_count),
+            int(seed),
+            float(eps_rel),
+            float(eps_abs_edge),
+            float(eps_abs_node),
+            float(tau_ns),
+        )
+
+    def debug_route_segment_primitive_slope_stats(self, route_segments_file=None):
+        route_segments_file = route_segments_file or self.params.get("route_segments")
+        if not route_segments_file:
+            raise ValueError("OpenROAD route segment path is required.")
+        return self.timer.debug_dmp_route_segment_primitive_slope_stats(route_segments_file)
+
+    def debug_route_segment_rc_tree_gradcheck(
+        self,
+        route_segments_file=None,
+        sample_net_count=10000,
+        seed=1,
+        eps_rel=1e-4,
+        eps_abs_edge=1e-6,
+        eps_abs_node=1e-8,
+    ):
+        route_segments_file = route_segments_file or self.params.get("route_segments")
+        if not route_segments_file:
+            raise ValueError("OpenROAD route segment path is required.")
+        return self.timer.debug_dmp_route_segment_rc_tree_gradcheck(
+            route_segments_file,
+            int(sample_net_count),
+            int(seed),
+            float(eps_rel),
+            float(eps_abs_edge),
+            float(eps_abs_node),
+        )
+
     def update_timing_calibrated(self, node_pos, record=False):
         node_lpos = (node_pos.detach() - self.node_size / 2).to(self.data.device)
         self.conn_node_lpos = torch.cat([

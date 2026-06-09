@@ -43,3 +43,8 @@ _backup/
 run_timer_all.log
 lefRWarning.log
 log.log
+
+
+md/agent_memory/*.txt
+md/agent_memory/*.tsv
+md/agent_memory/*.csv

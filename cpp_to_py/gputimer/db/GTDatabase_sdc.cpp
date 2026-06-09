@@ -58,6 +58,9 @@ void GTDatabase::preparePinNameMapForSdc(const sdc::SDC& sdc) {
         if (const auto* clock_latency = std::get_if<sdc::SetClockLatency>(&command);
             clock_latency != nullptr && clock_latency->object_list) {
             collect_object_pin_targets(*clock_latency->object_list);
+        } else if (const auto* case_analysis = std::get_if<sdc::SetCaseAnalysis>(&command);
+                   case_analysis != nullptr && case_analysis->port_pin_list) {
+            collect_object_pin_targets(*case_analysis->port_pin_list);
         } else if (const auto* propagated_clock = std::get_if<sdc::SetPropagatedClock>(&command);
                    propagated_clock != nullptr && propagated_clock->object_list) {
             collect_object_pin_targets(*propagated_clock->object_list);

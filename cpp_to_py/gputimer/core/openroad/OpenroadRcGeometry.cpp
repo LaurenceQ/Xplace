@@ -170,63 +170,34 @@ int infer_openroad_grid_origin_from_first(int first_coord,
     return best_origin;
 }
 
-OpenroadInferredGrid infer_openroad_route_grid(
-    const std::vector<std::unique_ptr<LocalSpefNetRc>>& local_nets,
-    const db::Database& rawdb,
-    int fallback_tile_size,
-    int threads)
+void add_openroad_route_grid_point(OpenroadRouteGridStats& stats, int x, int y)
 {
-    struct GridThreadStats {
-        bool have_x = false;
-        bool have_y = false;
-        int first_x = 0;
-        int first_y = 0;
-        int x_step = 0;
-        int y_step = 0;
-    };
-
-    const int worker_count = std::max(1, threads);
-    std::vector<GridThreadStats> thread_stats(worker_count);
-
-#pragma omp parallel for num_threads(worker_count) schedule(static)
-    for (int tid = 0; tid < worker_count; ++tid) {
-        GridThreadStats& stats = thread_stats[tid];
-        const std::size_t net_begin =
-            (local_nets.size() * static_cast<std::size_t>(tid)) / static_cast<std::size_t>(worker_count);
-        const std::size_t net_end =
-            (local_nets.size() * static_cast<std::size_t>(tid + 1)) / static_cast<std::size_t>(worker_count);
-        for (std::size_t net_idx = net_begin; net_idx < net_end; ++net_idx) {
-            const auto& local_ptr = local_nets[net_idx];
-            if (!local_ptr) {
-                continue;
-            }
-            for (const OpenroadRoutePt& pt : local_ptr->route_points) {
-                if (!pt.valid) {
-                    continue;
-                }
-                if (!stats.have_x) {
-                    stats.have_x = true;
-                    stats.first_x = pt.x;
-                } else {
-                    stats.x_step = std::gcd(stats.x_step, std::abs(pt.x - stats.first_x));
-                }
-                if (!stats.have_y) {
-                    stats.have_y = true;
-                    stats.first_y = pt.y;
-                } else {
-                    stats.y_step = std::gcd(stats.y_step, std::abs(pt.y - stats.first_y));
-                }
-            }
-        }
+    if (!stats.have_x) {
+        stats.have_x = true;
+        stats.first_x = x;
+    } else {
+        stats.x_step = std::gcd(stats.x_step, std::abs(x - stats.first_x));
     }
+    if (!stats.have_y) {
+        stats.have_y = true;
+        stats.first_y = y;
+    } else {
+        stats.y_step = std::gcd(stats.y_step, std::abs(y - stats.first_y));
+    }
+}
 
+OpenroadInferredGrid infer_openroad_route_grid_from_stats(
+    const std::vector<OpenroadRouteGridStats>& thread_stats,
+    const db::Database& rawdb,
+    int fallback_tile_size)
+{
     bool have_x = false;
     bool have_y = false;
     int first_x = 0;
     int first_y = 0;
     int x_step = 0;
     int y_step = 0;
-    for (const GridThreadStats& stats : thread_stats) {
+    for (const OpenroadRouteGridStats& stats : thread_stats) {
         if (stats.have_x) {
             if (!have_x) {
                 have_x = true;
@@ -263,6 +234,38 @@ OpenroadInferredGrid infer_openroad_route_grid(
     grid.origin_y = infer_openroad_grid_origin_from_first(first_y, have_y, tile_size, rawdb.dieLY);
     grid.valid = tile_size > 0;
     return grid;
+}
+
+OpenroadInferredGrid infer_openroad_route_grid(
+    const std::vector<std::unique_ptr<LocalSpefNetRc>>& local_nets,
+    const db::Database& rawdb,
+    int fallback_tile_size,
+    int threads)
+{
+    const int worker_count = std::max(1, threads);
+    std::vector<OpenroadRouteGridStats> thread_stats(worker_count);
+
+#pragma omp parallel for num_threads(worker_count) schedule(static)
+    for (int tid = 0; tid < worker_count; ++tid) {
+        OpenroadRouteGridStats& stats = thread_stats[tid];
+        const std::size_t net_begin =
+            (local_nets.size() * static_cast<std::size_t>(tid)) / static_cast<std::size_t>(worker_count);
+        const std::size_t net_end =
+            (local_nets.size() * static_cast<std::size_t>(tid + 1)) / static_cast<std::size_t>(worker_count);
+        for (std::size_t net_idx = net_begin; net_idx < net_end; ++net_idx) {
+            const auto& local_ptr = local_nets[net_idx];
+            if (!local_ptr) {
+                continue;
+            }
+            for (const OpenroadRoutePt& pt : local_ptr->route_points) {
+                if (pt.valid) {
+                    add_openroad_route_grid_point(stats, pt.x, pt.y);
+                }
+            }
+        }
+    }
+
+    return infer_openroad_route_grid_from_stats(thread_stats, rawdb, fallback_tile_size);
 }
 
 std::pair<int, int> openroad_position_on_inferred_grid(

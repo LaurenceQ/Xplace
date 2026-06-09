@@ -1,5 +1,6 @@
 #include "gputimer/core/GPUTimer.h"
 #include "gputimer/db/GTDatabase.h"
+#include "gputimer/db/sdc/SdcUtils.h"
 #include "common/lib/Timing.h"
 #include "gputimer/core/gputiming.h"
 #include "gputimer/core/utils.cuh"
@@ -263,7 +264,8 @@ void GPUTimer::debug_dump_endpoint_tests(const std::string& outfile,
                                          const vector<std::string>& endpoint_pin_names) {
     std::unordered_set<int> endpoint_filter;
     for (const auto& pin_name : endpoint_pin_names) {
-        auto iter = gtdb.pin_name2pin_id.find(pin_name);
+        const std::string lookup_key = pin_name_colon_to_slash(pin_name);
+        auto iter = gtdb.pin_name2pin_id.find(lookup_key);
         if (iter != gtdb.pin_name2pin_id.end()) {
             endpoint_filter.insert(iter->second);
         }

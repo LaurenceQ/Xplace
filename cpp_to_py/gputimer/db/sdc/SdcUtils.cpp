@@ -24,6 +24,15 @@ void warn_missing_sdc_object(const char* command, const char* kind, const std::s
     std::fprintf(stderr, "%s: %s \"%s\" not found\n", command, kind, name.c_str());
 }
 
+std::string pin_name_colon_to_slash(const std::string& name) {
+    std::string key = name;
+    const auto colon_pos = key.rfind(':');
+    if (colon_pos != std::string::npos) {
+        key[colon_pos] = '/';
+    }
+    return key;
+}
+
 void add_pin_name_target_variants(std::unordered_set<std::string>& targets, const std::string& name) {
     if (name.empty()) {
         return;
@@ -34,12 +43,6 @@ void add_pin_name_target_variants(std::unordered_set<std::string>& targets, cons
         std::string gp_pin_name = name;
         gp_pin_name[slash_pos] = ':';
         targets.insert(std::move(gp_pin_name));
-    }
-    const auto colon_pos = name.rfind(':');
-    if (colon_pos != std::string::npos) {
-        std::string sdc_pin_name = name;
-        sdc_pin_name[colon_pos] = '/';
-        targets.insert(std::move(sdc_pin_name));
     }
 }
 

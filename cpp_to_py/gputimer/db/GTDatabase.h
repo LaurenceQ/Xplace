@@ -5,7 +5,9 @@
 #include <cstdint>
 
 #include <cmath>
+#include <functional>
 #include <memory>
+#include <unordered_map>
 #include <unordered_set>
 
 #include "common/common.h"
@@ -98,6 +100,8 @@ public:
 
 public:
     void ExtractTimingGraph();
+    void SetupThresholdAndFlattenLib(const std::function<void(const char*)>& log_phase);
+    vector<uint8_t> SetPinMapAndTag(int graph_threads, const std::function<void(const char*)>& log_phase);
     void preparePinNameMapForSdc(const sdc::SDC& sdc);
     void readSpef(const std::string& file);
     void readSdc(sdc::SDC& sdc);
