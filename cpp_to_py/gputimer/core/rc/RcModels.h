@@ -5,7 +5,7 @@
 
 namespace gt {
 
-struct RcStarModel {
+struct RcStarNet {
     float* x = nullptr;
     float* y = nullptr;
     const float* pin_offset_x = nullptr;
@@ -27,7 +27,7 @@ struct RcStarModel {
     float rf = 0.0f;
 };
 
-struct RcGraphDeviceView {
+struct RcTreeDeviceGraph {
     int* edge_from = nullptr;
     int* edge_to = nullptr;
     int* flat_net2node_start_map = nullptr;
@@ -39,7 +39,7 @@ struct RcGraphDeviceView {
     int num_edges = 0;
 };
 
-struct RcPropagateScratch {
+struct RcTreePropagation {
     float* node_load = nullptr;
     float* node_delay = nullptr;
     float* node_ldelay = nullptr;
@@ -47,7 +47,7 @@ struct RcPropagateScratch {
     float* node_beta = nullptr;
 };
 
-struct RcExplicitTreeModel {
+struct RcTreeHost {
     const std::vector<int>* edge_from = nullptr;
     const std::vector<int>* edge_to = nullptr;
     const std::vector<int>* flat_net2node_start_map = nullptr;
@@ -75,8 +75,8 @@ struct RcExplicitTreeModel {
     float unit_to_micron = 1.0f;
     float rf = 0.0f;
     float cf = 0.0f;
-    RcExplicitTreeModel() = default;
-    RcExplicitTreeModel(
+    RcTreeHost() = default;
+    RcTreeHost(
         const std::vector<int>* edge_from_,
         const std::vector<int>* edge_to_,
         const std::vector<int>* flat_net2node_start_map_,
@@ -123,9 +123,9 @@ struct RcExplicitTreeModel {
         num_edges(num_edges_) {}
 };
 
-struct RcExplicitDeviceModel {
-    RcGraphDeviceView graph;
-    RcPropagateScratch scratch;
+struct RcTreeDevice {
+    RcTreeDeviceGraph graph;
+    RcTreePropagation propagation;
     int* root_dist = nullptr;
     int* cnts = nullptr;
     int* edge_cnts = nullptr;
@@ -148,9 +148,9 @@ struct RcExplicitDeviceModel {
     float cf = 0.0f;
 };
 
-void update_rc_timing_cuda(const RcStarModel& model);
-void calc_res_cap(const RcExplicitTreeModel& model);
-void flatten_rc_tree(const RcExplicitTreeModel& model);
-void propagate_rc_tree(const RcExplicitTreeModel& model);
+void update_rc_timing_cuda(const RcStarNet& star_net);
+void calc_res_cap(const RcTreeHost& rc_host);
+void flatten_rc_tree(const RcTreeHost& rc_host);
+void propagate_rc_tree(const RcTreeHost& rc_host);
 
 }  // namespace gt

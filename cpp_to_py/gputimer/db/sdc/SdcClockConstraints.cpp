@@ -65,7 +65,7 @@ void GTDatabase::_read_sdc(sdc::SetClockUncertainty& obj) {
         uncertainty = uncertainty * *sdc_time_unit / time_unit;
     }
 
-    const bool applies_to_hold = obj.hold.has_value();
+    const bool applies_to_hold = obj.hold.has_value() || !obj.setup.has_value();
     const bool applies_to_setup = obj.setup.has_value() || !obj.hold.has_value();
 
     auto apply_clock = [&](const std::string& clock_name) {
@@ -185,6 +185,10 @@ void GTDatabase::_read_sdc(sdc::SetClockLatency& obj) {
     if (!obj.delay || !obj.object_list) {
         return;
     }
+    if (SetClockLatencyHasUnsupportedMask(obj)) {
+        logger.warning("Skipping masked set_clock_latency; first sparse-clock implementation only supports scalar pin/clock latency");
+        return;
+    }
 
     float delay = *obj.delay;
     if (sdc_time_unit.has_value()) {
@@ -198,9 +202,9 @@ void GTDatabase::_read_sdc(sdc::SetClockLatency& obj) {
     };
     auto apply_pin = [&](const std::string& pin_name) {
         if (auto itr = pin_name2pin_id.find(pin_name); itr != pin_name2pin_id.end()) {
-            pin_clock_latency_overrides[itr->second] = delay;
+            ApplyScalarPinClockLatencyOverride(itr->second, delay);
         } else if (auto pi_itr = primary_input2pin_id.find(pin_name); pi_itr != primary_input2pin_id.end()) {
-            pin_clock_latency_overrides[pi_itr->second] = delay;
+            ApplyScalarPinClockLatencyOverride(pi_itr->second, delay);
         }
     };
 

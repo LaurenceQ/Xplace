@@ -108,19 +108,9 @@ void run_route_segment_dmp_for_route_grad(GPUTimer& timer, HostRcGraph& graph)
 {
     release_route_grad_dmp_state(timer);
     timer.update_states();
-    timer.initialize_dmp_rc_explicit(graph.edge_from,
-                                     graph.edge_to,
-                                     graph.net2node_start,
-                                     graph.net2edge_start,
-                                     graph.node2pin,
-                                     graph.edge_res,
-                                     graph.node_cap,
-                                     graph.includes_pin_caps,
-                                     timer.num_nets,
-                                     graph.num_nodes,
-                                     graph.num_edges);
-    calc_res_cap_dmp(timer.dmp_db, timer.num_nets);
-    propagate_rc_tree_dmp(timer.dmp_db, timer.num_nets);
+    timer.initialize_dmp_rc_explicit(graph);
+    calc_res_cap_dmp(timer.dmp_db, graph.num_nets);
+    propagate_rc_tree_dmp(timer.dmp_db, graph.num_nets);
     dmp_prepare_timing_after_rc(timer.h_dmp_db, timer.dmp_db);
     timer.update_timing_dmp();
     route_grad_cuda_check(cudaDeviceSynchronize(), "route segment gradient baseline timing");
@@ -160,8 +150,8 @@ GPUTimer::compute_dmp_route_segment_soft_timing_grad(const std::string& route_se
     if (graph.node_cap.size() != static_cast<size_t>(graph.num_nodes) * NUM_ATTR) {
         throw std::runtime_error("Route-segment RC graph has invalid node_cap shape.");
     }
-    if (graph.net2node_start.size() < static_cast<size_t>(num_nets + 1) ||
-        graph.net2edge_start.size() < static_cast<size_t>(num_nets + 1)) {
+    if (graph.net2node_start.size() < static_cast<size_t>(graph.num_nets + 1) ||
+        graph.net2edge_start.size() < static_cast<size_t>(graph.num_nets + 1)) {
         throw std::runtime_error("Route-segment RC graph has invalid net start arrays.");
     }
 
@@ -314,8 +304,8 @@ GPUTimer::debug_dmp_route_segment_primitive_slope_stats(const std::string& route
     if (graph.node_cap.size() != static_cast<size_t>(graph.num_nodes) * NUM_ATTR) {
         throw std::runtime_error("Route-segment RC graph has invalid node_cap shape.");
     }
-    if (graph.net2node_start.size() < static_cast<size_t>(num_nets + 1) ||
-        graph.net2edge_start.size() < static_cast<size_t>(num_nets + 1)) {
+    if (graph.net2node_start.size() < static_cast<size_t>(graph.num_nets + 1) ||
+        graph.net2edge_start.size() < static_cast<size_t>(graph.num_nets + 1)) {
         throw std::runtime_error("Route-segment RC graph has invalid net start arrays.");
     }
 
@@ -374,8 +364,8 @@ GPUTimer::debug_dmp_route_segment_rc_tree_gradcheck(const std::string& route_seg
     if (graph.node_cap.size() != static_cast<size_t>(graph.num_nodes) * NUM_ATTR) {
         throw std::runtime_error("Route-segment RC graph has invalid node_cap shape.");
     }
-    if (graph.net2node_start.size() < static_cast<size_t>(num_nets + 1) ||
-        graph.net2edge_start.size() < static_cast<size_t>(num_nets + 1)) {
+    if (graph.net2node_start.size() < static_cast<size_t>(graph.num_nets + 1) ||
+        graph.net2edge_start.size() < static_cast<size_t>(graph.num_nets + 1)) {
         throw std::runtime_error("Route-segment RC graph has invalid net start arrays.");
     }
 
@@ -548,7 +538,7 @@ GPUTimer::debug_dmp_route_segment_rc_tree_gradcheck(const std::string& route_seg
 // Device kernels first emit compact local primitive slopes; the host then walks
 // the timing graph backward from the soft endpoint objective.
 RouteGradNetSlopesHost compute_net_primitive_slopes(GPUTimer& timer,
-                                               unsigned long long* primitive_stats = nullptr)
+                                               unsigned long long* primitive_stats)
 {
     const size_t pin_slots = static_cast<size_t>(timer.num_pins) * NUM_ATTR;
     RouteGradNetSlopesHost host;
@@ -726,7 +716,7 @@ RouteGradNetSlopesHost compute_net_primitive_slopes(GPUTimer& timer,
 }
 
 RouteGradActiveGateSlopesHost compute_active_gate_primitive_slopes(GPUTimer& timer,
-                                                             unsigned long long* primitive_stats = nullptr)
+                                                             unsigned long long* primitive_stats)
 {
     const size_t pin_slots = static_cast<size_t>(timer.num_pins) * NUM_ATTR;
     RouteGradActiveGateSlopesHost host;
@@ -845,7 +835,7 @@ RouteGradActiveGateSlopesHost compute_active_gate_primitive_slopes(GPUTimer& tim
 }
 
 RouteGradGateSlewWinnerSlopesHost compute_gate_slew_winner_slopes(GPUTimer& timer,
-                                                           unsigned long long* primitive_stats = nullptr)
+                                                           unsigned long long* primitive_stats)
 {
     const size_t pin_slots = static_cast<size_t>(timer.num_pins) * NUM_ATTR;
     RouteGradGateSlewWinnerSlopesHost host;

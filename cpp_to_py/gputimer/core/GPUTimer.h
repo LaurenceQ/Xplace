@@ -140,8 +140,11 @@ struct HostRcGraph {
     std::vector<uint8_t> includes_pin_caps;
     int skipped_loop_edges = 0;
     int repaired_edges = 0;
+    int num_nets = 0;
     int num_nodes = 0;
     int num_edges = 0;
+
+    void release_storage();
 };
 
 class GPUTimer {
@@ -287,10 +290,6 @@ public:
     float *arcDelay;
     float *pinCap, *pinWireCap;
     float *testRelatedAT, *testConstraint, *testRAT;
-    float *test_clock_periods, *test_setup_uncertainties, *test_hold_uncertainties;
-    float *pin_clock_periods;
-    float *pin_clock_rise_edges, *pin_clock_fall_edges;
-    float *pin_clock_slews;
 
     float *__pinSlew__, *__pinLoad__, *__pinRAT__, *__pinAT__;
     float *pinImpulse_ref, *pinLoad_ref, *pinRootDelay_ref;
@@ -393,22 +392,12 @@ public:
                   float unit_to_micron,
                   float rf,
                   float cf);
-    void initialize_dmp_rc_explicit(
-                  const std::vector<int>& host_edge_from,
-                  const std::vector<int>& host_edge_to,
-                  const std::vector<int>& host_flat_net2node_start_map,
-                  const std::vector<int>& host_flat_net2edge_start_map,
-                  const std::vector<int>& host_node2pin_map,
-                  std::vector<float>& host_edge_res,
-                  const std::vector<float>& host_node_cap,
-                  const std::vector<uint8_t>& host_includes_pin_caps,
-                  int num_nets,
-                  int num_nodes,
-                  int num_edges);
+    void initialize_dmp_rc_explicit(HostRcGraph& graph);
     void update_timing_dmp();
     void print_pin_id_name();
     void get_units();
     void update_rc_timing_flute_dmp(torch::Tensor node_lpos, bool record = false);
+    void run_dmp_rc(int num_nets, bool update_timing_after_rc);
     void init_dmp_rc_spef();
     void init_dmp_rc_gr(const std::string& file);
     void init_dmp_rc_route_segments(const std::string& file);

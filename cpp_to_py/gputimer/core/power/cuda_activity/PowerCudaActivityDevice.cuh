@@ -68,11 +68,11 @@ struct PowerActivityValue {
 };
 
 struct PowerActivityOps {
-    const PowerActivityCudaModel* model = nullptr;
-    PowerActivityScratchView* scratch = nullptr;
+    const PowerActivityDevice* model = nullptr;
+    PowerActivityPropDevice* scratch = nullptr;
 
-    __device__ __forceinline__ PowerActivityOps(const PowerActivityCudaModel* model_,
-                                                PowerActivityScratchView* scratch_)
+    __device__ __forceinline__ PowerActivityOps(const PowerActivityDevice* model_,
+                                                PowerActivityPropDevice* scratch_)
         : model(model_), scratch(scratch_) {}
 
     __device__ static float percentChange(float value, float prev);
@@ -94,11 +94,11 @@ struct PowerActivityOps {
 };
 
 struct PowerLevelQueueOps : PowerActivityOps {
-    PowerActivityQueueView* queue = nullptr;
+    PowerActivityLevelQueueDevice* queue = nullptr;
 
-    __device__ __forceinline__ PowerLevelQueueOps(const PowerActivityCudaModel* model_,
-                                                  PowerActivityScratchView* scratch_,
-                                                  PowerActivityQueueView* queue_)
+    __device__ __forceinline__ PowerLevelQueueOps(const PowerActivityDevice* model_,
+                                                  PowerActivityPropDevice* scratch_,
+                                                  PowerActivityLevelQueueDevice* queue_)
         : PowerActivityOps(model_, scratch_), queue(queue_) {}
 
     __device__ bool processPinFrontier(int pin) const;
@@ -109,7 +109,7 @@ struct PowerLevelQueueOps : PowerActivityOps {
     __device__ void seedFrontierSeq(int seq_id) const;
 };
 
-struct PowerExprView {
+struct PowerExprEval {
     const GpuPowerExprOpHost* ops = nullptr;
     const int* expr_start = nullptr;
     const int* expr_count = nullptr;
@@ -119,8 +119,8 @@ struct PowerExprView {
     const int* node_port_pin_list = nullptr;
     int node_id = -1;
 
-    PowerExprView() = default;
-    __host__ __device__ __forceinline__ PowerExprView(const GpuPowerExprOpHost* ops_,
+    PowerExprEval() = default;
+    __host__ __device__ __forceinline__ PowerExprEval(const GpuPowerExprOpHost* ops_,
                                                       const int* expr_start_,
                                                       const int* expr_count_,
                                                       const float* pin_density_,
@@ -136,12 +136,12 @@ struct PowerExprView {
           node_port_pin_start(node_port_pin_start_),
           node_port_pin_list(node_port_pin_list_),
           node_id(node_id_) {}
-    __host__ __device__ __forceinline__ PowerExprView withDensity(const float* pin_density_) const {
-        return PowerExprView(ops, expr_start, expr_count, pin_density_, pin_duty,
+    __host__ __device__ __forceinline__ PowerExprEval withDensity(const float* pin_density_) const {
+        return PowerExprEval(ops, expr_start, expr_count, pin_density_, pin_duty,
                              node_port_pin_start, node_port_pin_list, node_id);
     }
-    __host__ __device__ __forceinline__ PowerExprView withNode(int node_id_) const {
-        return PowerExprView(ops, expr_start, expr_count, pin_density, pin_duty,
+    __host__ __device__ __forceinline__ PowerExprEval withNode(int node_id_) const {
+        return PowerExprEval(ops, expr_start, expr_count, pin_density, pin_duty,
                              node_port_pin_start, node_port_pin_list, node_id_);
     }
 

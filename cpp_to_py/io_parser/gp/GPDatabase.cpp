@@ -10,6 +10,7 @@
 #include "common/db/Row.h"
 #include "common/db/SNet.h"
 #include "common/db/Via.h"
+#include "common/StageProfiler.h"
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -17,8 +18,6 @@
 
 #include <algorithm>
 #include <array>
-#include <chrono>
-#include <cstdio>
 #include <cstdlib>
 
 namespace gp {
@@ -39,11 +38,7 @@ int gpdbThreadCount(const char* env_name)
 
 bool gpdbProfileEnabled()
 {
-    const char* profile_env = std::getenv("XPLACE_IO_PROFILE");
-    return profile_env != nullptr && profile_env[0] != '\0' &&
-           profile_env[0] != '0' &&
-           profile_env[0] != 'f' && profile_env[0] != 'F' &&
-           profile_env[0] != 'n' && profile_env[0] != 'N';
+    return xplace_env_enabled("XPLACE_IO_PROFILE");
 }
 
 }  // namespace
@@ -328,22 +323,7 @@ void GPDatabase::setupNodes() {
 
 void GPDatabase::setupNets() {
     const int setup_threads = gpdbThreadCount("XPLACE_GPDB_SETUP_THREADS");
-    const bool profile = gpdbProfileEnabled();
-    const auto profile_start = std::chrono::steady_clock::now();
-    auto profile_last = profile_start;
-    auto profile_log = [&](const char* phase) {
-        if (!profile) {
-            return;
-        }
-        const auto now = std::chrono::steady_clock::now();
-        const double elapsed = std::chrono::duration<double>(now - profile_last).count();
-        const double total = std::chrono::duration<double>(now - profile_start).count();
-        std::fprintf(stdout,
-                     "[XPLACE_GPDB_SETUP_NETS_PROFILE] phase=%s elapsed=%.3f total=%.3f threads=%d\n",
-                     phase, elapsed, total, setup_threads);
-        std::fflush(stdout);
-        profile_last = now;
-    };
+    StageProfiler profile("XPLACE_GPDB_SETUP_NETS_PROFILE", gpdbProfileEnabled(), stdout);
 
     std::vector<index_type> net_pin_start(num_nets + 1, 0);
     for (index_type dbnet_id = 0; dbnet_id < static_cast<index_type>(database.nets.size()); ++dbnet_id) {
@@ -353,7 +333,7 @@ void GPDatabase::setupNets() {
     assert_msg(net_pin_start[num_nets] == static_cast<index_type>(num_pins),
                "GPDB pin prefix mismatch: prefix=%ld num_pins=%u",
                net_pin_start[num_nets], num_pins);
-    profile_log("net_pin_prefix");
+    profile.markf("net_pin_prefix", "threads=%d", setup_threads);
 
     nets.resize(num_nets);
     pins.resize(num_pins);
@@ -361,7 +341,7 @@ void GPDatabase::setupNets() {
     pin_id2node_id.resize(num_pins);
     pin_id2net_id.resize(num_pins);
     pin_names.resize(num_pins);
-    profile_log("resize");
+    profile.markf("resize", "threads=%d", setup_threads);
 
 #pragma omp parallel for num_threads(setup_threads) schedule(dynamic, 1024)
     for (index_type dbnet_id = 0; dbnet_id < static_cast<index_type>(database.nets.size()); ++dbnet_id) {
@@ -411,19 +391,19 @@ void GPDatabase::setupNets() {
             dbpin->gpdb_id = pin.getId();
         }
     }
-    profile_log("pin_fill");
+    profile.markf("pin_fill", "threads=%d", setup_threads);
 
     std::vector<index_type> node_pin_counts(num_nodes, 0);
     for (index_type pin_id = 0; pin_id < static_cast<index_type>(num_pins); ++pin_id) {
         ++node_pin_counts[pin_id2node_id[pin_id]];
     }
-    profile_log("node_pin_count");
+    profile.markf("node_pin_count", "threads=%d", setup_threads);
 
     std::vector<index_type> node_pin_start(num_nodes + 1, 0);
     for (index_type node_id = 0; node_id < static_cast<index_type>(num_nodes); ++node_id) {
         node_pin_start[node_id + 1] = node_pin_start[node_id] + node_pin_counts[node_id];
     }
-    profile_log("node_pin_prefix");
+    profile.markf("node_pin_prefix", "threads=%d", setup_threads);
 
     std::vector<index_type> node_pin_cursor = node_pin_start;
     std::vector<index_type> flat_node_pins(num_pins);
@@ -431,7 +411,7 @@ void GPDatabase::setupNets() {
         const index_type node_id = pin_id2node_id[pin_id];
         flat_node_pins[node_pin_cursor[node_id]++] = pin_id;
     }
-    profile_log("node_pin_flatten");
+    profile.markf("node_pin_flatten", "threads=%d", setup_threads);
 
 #pragma omp parallel for num_threads(setup_threads) schedule(static)
     for (index_type node_id = 0; node_id < static_cast<index_type>(num_nodes); ++node_id) {
@@ -445,7 +425,7 @@ void GPDatabase::setupNets() {
             node.addPin(pin_id, pins[pin_id].getMacroName());
         }
     }
-    profile_log("node_pin_rebuild");
+    profile.markf("node_pin_rebuild", "threads=%d", setup_threads);
 }
 
 void GPDatabase::setupRegions() {
@@ -738,41 +718,27 @@ void GPDatabase::transferOrient() {
 }
 
 bool GPDatabase::setup() {
-    const bool profile = gpdbProfileEnabled();
-    auto profile_start = std::chrono::steady_clock::now();
-    auto profile_last = profile_start;
-    auto profile_log = [&](const char* phase) {
-        if (!profile) {
-            return;
-        }
-        const auto now = std::chrono::steady_clock::now();
-        const double elapsed = std::chrono::duration<double>(now - profile_last).count();
-        const double total = std::chrono::duration<double>(now - profile_start).count();
-        std::fprintf(stdout, "[XPLACE_GPDB_PROFILE] phase=%s elapsed=%.3f total=%.3f\n",
-                     phase, elapsed, total);
-        std::fflush(stdout);
-        profile_last = now;
-    };
+    StageProfiler profile("XPLACE_GPDB_PROFILE", gpdbProfileEnabled(), stdout);
 
     if (db::setting.random_place) {
         setup_random_place();
         logger.info("random place db done");
-        profile_log("setup_random_place");
+        profile.mark("setup_random_place");
     }
     setupNum();
-    profile_log("setup_num");
+    profile.mark("setup_num");
     setupRegions();
-    profile_log("setup_regions");
+    profile.mark("setup_regions");
     setupNodes();
-    profile_log("setup_nodes");
+    profile.mark("setup_nodes");
     setupNets();
-    profile_log("setup_nets");
+    profile.mark("setup_nets");
     setupIndexMap();
-    profile_log("setup_index_map");
+    profile.mark("setup_index_map");
     setupCheckVar();
-    profile_log("setup_check_var");
+    profile.mark("setup_check_var");
     transferOrient();
-    profile_log("transfer_orient");
+    profile.mark("transfer_orient");
     logger.info("Finish initializing global placement database");
     return true;
 }

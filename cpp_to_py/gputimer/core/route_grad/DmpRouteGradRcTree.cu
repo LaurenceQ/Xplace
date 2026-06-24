@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <queue>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -227,15 +228,13 @@ void reverse_one_net_rc_tree(const GPUTimer& timer,
 }
 
 
-constexpr int kRouteGradRcTreeCheckColumns = 13;
-
 std::vector<RouteGradRcTreeCheckSample>
 sample_rc_tree_check_nets(const HostRcGraph& graph, int sample_net_count, int seed)
 {
     if (sample_net_count <= 0) {
         throw std::runtime_error("sample_net_count must be positive for RC-tree gradcheck.");
     }
-    const int num_nets = static_cast<int>(graph.net2edge_start.size()) - 1;
+    const int num_nets = graph.num_nets;
     std::vector<int> candidate_nets;
     candidate_nets.reserve(std::max(0, num_nets));
     for (int net = 0; net < num_nets; ++net) {
@@ -534,9 +533,6 @@ make_route_grad_tensors(const HostRcGraph& graph,
     return {edge_res_tensor, node_cap_tensor, edge_cap_tensor};
 }
 
-}  // namespace
-
-
 namespace {
 
 constexpr int kValidateColumns = 13;
@@ -549,8 +545,8 @@ std::vector<RouteGradFdSample> sample_one_edge_node_per_net(const HostRcGraph& g
         throw std::runtime_error("sample_net_count must be positive.");
     }
     std::vector<int> candidate_nets;
-    candidate_nets.reserve(std::max(0, static_cast<int>(graph.net2edge_start.size()) - 1));
-    const int num_nets = static_cast<int>(graph.net2edge_start.size()) - 1;
+    candidate_nets.reserve(std::max(0, graph.num_nets));
+    const int num_nets = graph.num_nets;
     for (int net = 0; net < num_nets; ++net) {
         const int est = graph.net2edge_start[net];
         const int eend = graph.net2edge_start[net + 1];

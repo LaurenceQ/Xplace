@@ -4,6 +4,7 @@
 #include "gputimer/core/power/common/PowerHostCommon.h"
 #include "gputimer/core/power/common/PowerActivityHostUtils.h"
 #include "gputimer/core/power/cuda_input/PowerCudaInputBuildInternal.h"
+#include "common/XplaceLog.h"
 #include "common/db/Cell.h"
 #include "common/db/Database.h"
 #include "common/db/Net.h"
@@ -206,8 +207,7 @@ PowerCudaRunBuffers preparePowerCudaRunBuffers(GPUTimer& timer,
                                                bool output_leakage_row_power,
                                                size_t internal_row_count,
                                                size_t leakage_row_count,
-                                               const torch::TensorOptions& fopt_cuda,
-                                               PowerStageProfiler& profile) {
+                                               const torch::TensorOptions& fopt_cuda) {
     torch::Tensor out_gpu;
     float* out_gpu_ptr = nullptr;
     float* activity_density_ptr = nullptr;
@@ -233,8 +233,6 @@ PowerCudaRunBuffers preparePowerCudaRunBuffers(GPUTimer& timer,
     const float* precomputed_activity_ptr = nullptr;
     if (use_cpu_activity_for_power) {
         precomputed_activity_cpu = timer.report_power_activity_cpu();
-        profile.mark(force_cpu_activity_for_power ? "cpu_activity_for_power"
-                                                  : "auto_cpu_activity_for_power");
         if (precomputed_activity_cpu.dim() != 2 || precomputed_activity_cpu.size(0) != n ||
             precomputed_activity_cpu.size(1) != 3) {
             throw std::runtime_error("report_power_activity_cpu returned an unexpected activity tensor shape");
@@ -301,6 +299,22 @@ PowerCudaRunBuffers preparePowerCudaRunBuffers(GPUTimer& timer,
                                out_activity_fields);
 }
 
+const char* powerCpuActivityProfilePhase(int n)
+{
+    constexpr int64_t default_cpu_activity_pin_limit = 0;
+    const int64_t auto_cpu_activity_pin_limit =
+        readPowerEnvInt64("XPLACE_POWER_AUTO_CPU_ACTIVITY_PIN_LIMIT", default_cpu_activity_pin_limit);
+    const bool force_cpu_activity_for_power =
+        readPowerEnvFlag("XPLACE_POWER_USE_CPU_ACTIVITY_FOR_POWER", false);
+    if (force_cpu_activity_for_power) {
+        return "cpu_activity_for_power";
+    }
+    if (auto_cpu_activity_pin_limit > 0 && n <= auto_cpu_activity_pin_limit) {
+        return "auto_cpu_activity_for_power";
+    }
+    return nullptr;
+}
+
 PowerDmpLoadPointers choosePowerDmpLoadPointers(const DmpModel* h_dmp_db) {
     bool use_dmp_power_load = true;
     if (const char* env = std::getenv("XPLACE_POWER_USE_DMP_LOAD")) {
@@ -333,7 +347,9 @@ void runPowerChunkedComponents(int n,
                                const torch::Tensor& d_node_port_pin_start,
                                const torch::Tensor& d_node_port_pin_list,
                                const float* pinSlew,
-                               const float* pin_clock_slews,
+                               const uint16_t* pin_clock_ids,
+                               const float* clock_slews,
+                               int clock_count,
                                const int* d_power_clock_slew_pins_ptr,
                                int num_power_clock_slew_pins,
                                const float* power_clock_slew_fallback,
@@ -365,14 +381,14 @@ void runPowerChunkedComponents(int n,
         const size_t denom_count = std::max<size_t>(1, internal_denom_group.size());
         torch::Tensor internal_denom_gpu = torch::zeros({static_cast<long>(denom_count)}, fopt_cuda);
         const size_t chunk_rows = powerRowsPerChunk(internal_chunk_bytes, sizeof(GpuPowerInternalHost));
-        std::fprintf(stderr,
-                     "[power_row_chunk] component=internal phase=denom rows=%zu chunk_rows=%zu chunks=%zu\n",
-                     internal_rows.size(), chunk_rows,
-                     (internal_rows.size() + chunk_rows - 1) / chunk_rows);
+        XPLACE_DEBUGF("XPLACE_POWER_DEBUG",
+                      "power_row_chunk component=internal phase=denom rows=%zu chunk_rows=%zu chunks=%zu",
+                      internal_rows.size(), chunk_rows,
+                      (internal_rows.size() + chunk_rows - 1) / chunk_rows);
         for (size_t begin = 0; begin < internal_rows.size(); begin += chunk_rows) {
             const size_t count = std::min(chunk_rows, internal_rows.size() - begin);
             auto d_rows_chunk = powerCudaBytesTensorRange(internal_rows, begin, count);
-            PowerInternalDenomModel denom_model(
+            PowerInternalDenomDevice denom_device(
                 n,
                 chunk_activity_ptr,
                 chunk_activity_density,
@@ -385,19 +401,19 @@ void runPowerChunkedComponents(int n,
                 d_node_port_pin_start.data_ptr<int>(),
                 d_node_port_pin_list.data_ptr<int>(),
                 internal_denom_gpu.data_ptr<float>());
-            run_power_internal_denom_chunk_cuda_launcher(denom_model);
+            run_power_internal_denom_chunk_cuda_launcher(denom_device);
         }
-        std::fprintf(stderr,
-                     "[power_row_chunk] component=internal phase=contrib rows=%zu chunk_rows=%zu chunks=%zu\n",
-                     internal_rows.size(), chunk_rows,
-                     (internal_rows.size() + chunk_rows - 1) / chunk_rows);
+        XPLACE_DEBUGF("XPLACE_POWER_DEBUG",
+                      "power_row_chunk component=internal phase=contrib rows=%zu chunk_rows=%zu chunks=%zu",
+                      internal_rows.size(), chunk_rows,
+                      (internal_rows.size() + chunk_rows - 1) / chunk_rows);
         for (size_t begin = 0; begin < internal_rows.size(); begin += chunk_rows) {
             const size_t count = std::min(chunk_rows, internal_rows.size() - begin);
             auto d_rows_chunk = powerCudaBytesTensorRange(internal_rows, begin, count);
             float* row_power_ptr = buffers.internal_row_power_ptr
                 ? buffers.internal_row_power_ptr + begin
                 : nullptr;
-            PowerInternalContribModel contrib_model(
+            PowerInternalInstDevice internal_inst_device(
                 n,
                 num_nodes,
                 chunk_activity_ptr,
@@ -411,7 +427,9 @@ void runPowerChunkedComponents(int n,
                 d_node_port_pin_start.data_ptr<int>(),
                 d_node_port_pin_list.data_ptr<int>(),
                 pinSlew,
-                pin_clock_slews,
+                pin_clock_ids,
+                clock_slews,
+                clock_count,
                 d_power_clock_slew_pins_ptr,
                 num_power_clock_slew_pins,
                 power_clock_slew_fallback,
@@ -422,7 +440,7 @@ void runPowerChunkedComponents(int n,
                 cap_unit,
                 buffers.inst_internal_ptr,
                 row_power_ptr);
-            run_power_internal_contrib_chunk_cuda_launcher(contrib_model);
+            run_power_internal_contrib_chunk_cuda_launcher(internal_inst_device);
         }
     }
 
@@ -435,17 +453,17 @@ void runPowerChunkedComponents(int n,
         torch::Tensor group_cond_count_gpu =
             torch::zeros({static_cast<long>(group_count)}, iopt_cuda);
         const size_t chunk_rows = powerRowsPerChunk(leakage_chunk_bytes, sizeof(GpuPowerLeakageRowHost));
-        std::fprintf(stderr,
-                     "[power_row_chunk] component=leakage phase=rows rows=%zu chunk_rows=%zu chunks=%zu\n",
-                     leakage_rows.size(), chunk_rows,
-                     (leakage_rows.size() + chunk_rows - 1) / chunk_rows);
+        XPLACE_DEBUGF("XPLACE_POWER_DEBUG",
+                      "power_row_chunk component=leakage phase=rows rows=%zu chunk_rows=%zu chunks=%zu",
+                      leakage_rows.size(), chunk_rows,
+                      (leakage_rows.size() + chunk_rows - 1) / chunk_rows);
         for (size_t begin = 0; begin < leakage_rows.size(); begin += chunk_rows) {
             const size_t count = std::min(chunk_rows, leakage_rows.size() - begin);
             auto d_rows_chunk = powerCudaBytesTensorRange(leakage_rows, begin, count);
             float* row_power_ptr = buffers.leakage_row_power_ptr
                 ? buffers.leakage_row_power_ptr + begin
                 : nullptr;
-            PowerLeakageRowsModel rows_model(
+            PowerLeakageCondDevice leakage_cond_device(
                 n,
                 chunk_activity_ptr,
                 chunk_activity_density,
@@ -461,9 +479,9 @@ void runPowerChunkedComponents(int n,
                 group_cond_duty_sum_gpu.data_ptr<float>(),
                 group_cond_count_gpu.data_ptr<int>(),
                 row_power_ptr);
-            run_power_leakage_rows_chunk_cuda_launcher(rows_model);
+            run_power_leakage_rows_chunk_cuda_launcher(leakage_cond_device);
         }
-        PowerLeakageSummaryModel summary_model(
+        PowerLeakageInstDevice leakage_inst_device(
             d_leakage_groups_ptr,
             static_cast<int>(leakage_groups.size()),
             group_cond_leakage_gpu.data_ptr<float>(),
@@ -471,7 +489,7 @@ void runPowerChunkedComponents(int n,
             group_cond_count_gpu.data_ptr<int>(),
             num_nodes,
             buffers.inst_leakage_ptr);
-        run_power_leakage_summary_chunk_cuda_launcher(summary_model);
+        run_power_leakage_summary_chunk_cuda_launcher(leakage_inst_device);
     }
     free_power_chunk_activity_storage(&chunk_activity_storage);
 }
@@ -484,8 +502,7 @@ torch::Tensor finishPowerActivityOutputs(torch::Tensor* inst_switching_cpu,
                                          torch::Tensor* leakage_row_power_cpu,
                                          bool output_power_tensors_cuda,
                                          bool want_activity_cpu,
-                                         const PowerCudaRunBuffers& buffers,
-                                         PowerStageProfiler& profile) {
+                                         const PowerCudaRunBuffers& buffers) {
     if (inst_switching_cpu)
         *inst_switching_cpu = outputPowerTensorForRequest(buffers.inst_switching_gpu, output_power_tensors_cuda);
     if (pin_switching_cpu)
@@ -498,7 +515,6 @@ torch::Tensor finishPowerActivityOutputs(torch::Tensor* inst_switching_cpu,
         *inst_leakage_cpu = outputPowerTensorForRequest(buffers.inst_leakage_gpu, output_power_tensors_cuda);
     if (leakage_row_power_cpu)
         *leakage_row_power_cpu = outputPowerTensorForRequest(buffers.leakage_row_power_gpu, output_power_tensors_cuda);
-    profile.mark("downloads");
     if (want_activity_cpu) {
         auto activity_cpu = buffers.out_gpu.to(torch::kCPU);
         return activity_cpu.transpose(0, 1).contiguous();
@@ -685,7 +701,7 @@ torch::Tensor GPUTimer::compute_power_activity_cuda(torch::Tensor* inst_switchin
     auto d_expr_count = uploader.uploadInt("expr_count", expr_inputs.count);
     auto d_node_port_pin_start = uploader.uploadInt("node_port_pin_start", h_node_port_pin_start);
     auto d_node_port_pin_list = uploader.uploadInt("node_port_pin_list", h_node_port_pin_list);
-    auto d_pin_func_expr_id = uploader.uploadInt("pin_func_expr_id", expr_inputs.pin_func_expr_id);
+    auto d_pin_expr_id = uploader.uploadInt("pin_expr_id", expr_inputs.pin_expr_id);
     auto d_missing_func_out_start = uploader.uploadInt("missing_func_out_start", expr_inputs.missing_func_out_start);
     auto d_missing_func_out_list = uploader.uploadInt("missing_func_out_list", expr_inputs.missing_func_out_list);
     auto d_seqs = uploader.uploadBytes("seqs", seq_inputs.seqs);
@@ -758,9 +774,15 @@ torch::Tensor GPUTimer::compute_power_activity_cuda(torch::Tensor* inst_switchin
                                    inst_internal_cpu != nullptr, internal_row_power_cpu != nullptr,
                                    inst_leakage_cpu != nullptr, leakage_row_power_cpu != nullptr,
                                    h_internal_rows.size(), h_leakage_rows.size(),
-                                   fopt_cuda, profile);
+                                   fopt_cuda);
+    if (const char* cpu_activity_phase = powerCpuActivityProfilePhase(n)) {
+        profile.mark(cpu_activity_phase);
+    }
     const float power_voltage = powerVoltageForReport(gtdb);
     const PowerDmpLoadPointers dmp_load = choosePowerDmpLoadPointers(h_dmp_db);
+    const uint16_t* d_pin_clock_ids = h_dmp_db ? h_dmp_db->pin_clock_ids : nullptr;
+    const float* d_clock_slews = h_dmp_db ? h_dmp_db->clock_slews : nullptr;
+    const int sparse_clock_count = h_dmp_db ? h_dmp_db->clock_count : 0;
 
     GpuPowerInternalHost* launcher_internal_rows_ptr =
         chunk_internal_rows ? nullptr : d_internal_rows_ptr;
@@ -783,7 +805,7 @@ torch::Tensor GPUTimer::compute_power_activity_cuda(torch::Tensor* inst_switchin
     float* launcher_leakage_row_power_ptr =
         chunk_leakage_rows ? nullptr : run_buffers.leakage_row_power_ptr;
 
-    PowerGraphDeviceView graph_view(
+    PowerGraphDevice graph_device(
         activity_levels.level_list,
         d_pin_power_level.data_ptr<int>(),
         pin_forward_arc_list_end,
@@ -809,21 +831,23 @@ torch::Tensor GPUTimer::compute_power_activity_cuda(torch::Tensor* inst_switchin
         dmp_load.C1,
         dmp_load.C2,
         pinSlew,
-        pin_clock_slews,
+        d_pin_clock_ids,
+        d_clock_slews,
+        sparse_clock_count,
         d_power_clock_slew_pins_ptr,
         static_cast<int>(h_power_clock_slews.pins.size()),
         h_power_clock_slews.fallback.data(),
         num_nodes);
-    PowerExprDeviceView expr_view(
+    PowerExprDevice expr_device(
         reinterpret_cast<GpuPowerExprOpHost*>(d_expr_ops.data_ptr<uint8_t>()),
         d_expr_start.data_ptr<int>(),
         d_expr_count.data_ptr<int>(),
         d_node_port_pin_start.data_ptr<int>(),
         d_node_port_pin_list.data_ptr<int>(),
-        d_pin_func_expr_id.data_ptr<int>(),
+        d_pin_expr_id.data_ptr<int>(),
         d_missing_func_out_start.data_ptr<int>(),
         d_missing_func_out_list.data_ptr<int>());
-    PowerActivityState activity_state(
+    PowerActivitySeedDevice activity_seed(
         d_primary_inputs.data_ptr<int>(),
         static_cast<int>(roots.primary_inputs.size()),
         nullptr,
@@ -850,7 +874,7 @@ torch::Tensor GPUTimer::compute_power_activity_cuda(torch::Tensor* inst_switchin
         run_buffers.precomputed_activity_ptr,
         readPowerBoolEnv("XPLACE_POWER_ALLOW_CLOCK_ACTIVITY_OVERRIDE", false),
         min_activity_density);
-    PowerComponentDeviceView component_view(
+    PowerComponentDevice component_device(
         launcher_internal_rows_ptr,
         launcher_internal_row_count,
         static_cast<int>(internal_denom_group.size()),
@@ -867,17 +891,17 @@ torch::Tensor GPUTimer::compute_power_activity_cuda(torch::Tensor* inst_switchin
         launcher_leakage_group_count,
         launcher_inst_leakage_ptr,
         launcher_leakage_row_power_ptr);
-    PowerActivityCudaModel activity_model(n,
+    PowerActivityDevice activity_device(n,
                                           activity_levels.levelListEnd(),
-                                          graph_view,
-                                          expr_view,
-                                          activity_state,
+                                          graph_device,
+                                          expr_device,
+                                          activity_seed,
                                           activity_config,
-                                          component_view,
+                                          component_device,
                                           run_buffers.out_gpu_ptr,
                                           run_buffers.out_activity_fields);
     profile.mark("launcher_prepare");
-    run_power_activity_cuda_launcher(activity_model);
+    run_power_activity_cuda_launcher(activity_device);
     profile.mark("launcher");
 
     runPowerChunkedComponents(n,
@@ -898,7 +922,9 @@ torch::Tensor GPUTimer::compute_power_activity_cuda(torch::Tensor* inst_switchin
                                d_node_port_pin_start,
                                d_node_port_pin_list,
                                pinSlew,
-                               pin_clock_slews,
+                               d_pin_clock_ids,
+                               d_clock_slews,
+                               sparse_clock_count,
                                d_power_clock_slew_pins_ptr,
                                static_cast<int>(h_power_clock_slews.pins.size()),
                                h_power_clock_slews.fallback.data(),
@@ -909,16 +935,17 @@ torch::Tensor GPUTimer::compute_power_activity_cuda(torch::Tensor* inst_switchin
                                iopt_cuda);
     profile.mark("chunk_components");
 
-    return finishPowerActivityOutputs(inst_switching_cpu,
-                                      pin_switching_cpu,
-                                      inst_internal_cpu,
-                                      internal_row_power_cpu,
-                                      inst_leakage_cpu,
-                                      leakage_row_power_cpu,
-                                      output_power_tensors_cuda,
-                                      want_activity_cpu,
-                                      run_buffers,
-                                      profile);
+    torch::Tensor activity_cpu = finishPowerActivityOutputs(inst_switching_cpu,
+                                                            pin_switching_cpu,
+                                                            inst_internal_cpu,
+                                                            internal_row_power_cpu,
+                                                            inst_leakage_cpu,
+                                                            leakage_row_power_cpu,
+                                                            output_power_tensors_cuda,
+                                                            want_activity_cpu,
+                                                            run_buffers);
+    profile.mark("downloads");
+    return activity_cpu;
 }
 
 

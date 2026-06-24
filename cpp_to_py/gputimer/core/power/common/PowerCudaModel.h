@@ -7,7 +7,7 @@
 
 namespace gt {
 
-struct PowerGraphDeviceView {
+struct PowerGraphDevice {
     index_type* level_list = nullptr;
     const int* pin_power_level = nullptr;
     index_type* pin_forward_arc_list_end = nullptr;
@@ -33,14 +33,16 @@ struct PowerGraphDeviceView {
     const float* dmp_C1 = nullptr;
     const float* dmp_C2 = nullptr;
     const float* pinSlew = nullptr;
-    const float* pin_clock_slews = nullptr;
+    const uint16_t* pin_clock_ids = nullptr;
+    const float* clock_slews = nullptr;
+    int clock_count = 0;
     const int* power_clock_slew_pins = nullptr;
     int num_power_clock_slew_pins = 0;
     float power_clock_slew_fallback[NUM_ATTR] = {0.0f, 0.0f, 0.0f, 0.0f};
     int num_nodes = 0;
 
-    PowerGraphDeviceView() = default;
-    PowerGraphDeviceView(index_type* level_list_,
+    PowerGraphDevice() = default;
+    PowerGraphDevice(index_type* level_list_,
                          const int* pin_power_level_,
                          index_type* pin_forward_arc_list_end_,
                          index_type* pin_forward_arc_list_,
@@ -65,7 +67,9 @@ struct PowerGraphDeviceView {
                          const float* dmp_C1_,
                          const float* dmp_C2_,
                          const float* pinSlew_,
-                         const float* pin_clock_slews_,
+                         const uint16_t* pin_clock_ids_,
+                         const float* clock_slews_,
+                         int clock_count_,
                          const int* power_clock_slew_pins_,
                          int num_power_clock_slew_pins_,
                          const float* power_clock_slew_fallback_,
@@ -95,7 +99,9 @@ struct PowerGraphDeviceView {
           dmp_C1(dmp_C1_),
           dmp_C2(dmp_C2_),
           pinSlew(pinSlew_),
-          pin_clock_slews(pin_clock_slews_),
+          pin_clock_ids(pin_clock_ids_),
+          clock_slews(clock_slews_),
+          clock_count(clock_count_),
           power_clock_slew_pins(power_clock_slew_pins_),
           num_power_clock_slew_pins(num_power_clock_slew_pins_),
           num_nodes(num_nodes_) {
@@ -105,23 +111,23 @@ struct PowerGraphDeviceView {
     }
 };
 
-struct PowerExprDeviceView {
+struct PowerExprDevice {
     GpuPowerExprOpHost* expr_ops = nullptr;
     int* expr_start = nullptr;
     int* expr_count = nullptr;
     int* node_port_pin_start = nullptr;
     int* node_port_pin_list = nullptr;
-    int* pin_func_expr_id = nullptr;
+    int* pin_expr_id = nullptr;
     int* missing_func_out_start = nullptr;
     int* missing_func_out_list = nullptr;
 
-    PowerExprDeviceView() = default;
-    PowerExprDeviceView(GpuPowerExprOpHost* expr_ops_,
+    PowerExprDevice() = default;
+    PowerExprDevice(GpuPowerExprOpHost* expr_ops_,
                         int* expr_start_,
                         int* expr_count_,
                         int* node_port_pin_start_,
                         int* node_port_pin_list_,
-                        int* pin_func_expr_id_,
+                        int* pin_expr_id_,
                         int* missing_func_out_start_,
                         int* missing_func_out_list_)
         : expr_ops(expr_ops_),
@@ -129,12 +135,12 @@ struct PowerExprDeviceView {
           expr_count(expr_count_),
           node_port_pin_start(node_port_pin_start_),
           node_port_pin_list(node_port_pin_list_),
-          pin_func_expr_id(pin_func_expr_id_),
+          pin_expr_id(pin_expr_id_),
           missing_func_out_start(missing_func_out_start_),
           missing_func_out_list(missing_func_out_list_) {}
 };
 
-struct PowerActivityState {
+struct PowerActivitySeedDevice {
     int* primary_inputs = nullptr;
     int num_primary_inputs = 0;
     int* case_values = nullptr;
@@ -152,8 +158,8 @@ struct PowerActivityState {
     int* feedback_seed_seqs = nullptr;
     int num_feedback_seed_seqs = 0;
 
-    PowerActivityState() = default;
-    PowerActivityState(int* primary_inputs_,
+    PowerActivitySeedDevice() = default;
+    PowerActivitySeedDevice(int* primary_inputs_,
                        int num_primary_inputs_,
                        int* case_values_,
                        int* clock_pins_,
@@ -219,7 +225,7 @@ struct PowerActivityConfig {
           min_activity_density(min_activity_density_) {}
 };
 
-struct PowerComponentDeviceView {
+struct PowerComponentDevice {
     GpuPowerInternalHost* internal_rows = nullptr;
     int num_internal_rows = 0;
     int num_internal_denom_groups = 0;
@@ -237,8 +243,8 @@ struct PowerComponentDeviceView {
     float* inst_leakage = nullptr;
     float* leakage_row_power = nullptr;
 
-    PowerComponentDeviceView() = default;
-    PowerComponentDeviceView(GpuPowerInternalHost* internal_rows_,
+    PowerComponentDevice() = default;
+    PowerComponentDevice(GpuPowerInternalHost* internal_rows_,
                              int num_internal_rows_,
                              int num_internal_denom_groups_,
                              GPUPowerLutAllocator* power_allocator_,
@@ -272,39 +278,39 @@ struct PowerComponentDeviceView {
           leakage_row_power(leakage_row_power_) {}
 };
 
-struct PowerActivityCudaModel {
+struct PowerActivityDevice {
     int n = 0;
     const std::vector<int>* level_list_end_cpu = nullptr;
-    PowerGraphDeviceView graph;
-    PowerExprDeviceView expr;
-    PowerActivityState state;
+    PowerGraphDevice graph;
+    PowerExprDevice expr;
+    PowerActivitySeedDevice seed;
     PowerActivityConfig config;
-    PowerComponentDeviceView components;
+    PowerComponentDevice components;
     float* out = nullptr;
     int out_activity_fields = 0;
 
-    PowerActivityCudaModel() = default;
-    PowerActivityCudaModel(int n_,
+    PowerActivityDevice() = default;
+    PowerActivityDevice(int n_,
                            const std::vector<int>* level_list_end_cpu_,
-                           const PowerGraphDeviceView& graph_,
-                           const PowerExprDeviceView& expr_,
-                           const PowerActivityState& state_,
+                           const PowerGraphDevice& graph_,
+                           const PowerExprDevice& expr_,
+                           const PowerActivitySeedDevice& seed_,
                            const PowerActivityConfig& config_,
-                           const PowerComponentDeviceView& components_,
+                           const PowerComponentDevice& components_,
                            float* out_,
                            int out_activity_fields_)
         : n(n_),
           level_list_end_cpu(level_list_end_cpu_),
           graph(graph_),
           expr(expr_),
-          state(state_),
+          seed(seed_),
           config(config_),
           components(components_),
           out(out_),
           out_activity_fields(out_activity_fields_) {}
 };
 
-struct PowerActivityScratchView {
+struct PowerActivityPropDevice {
     float* density = nullptr;
     float* duty = nullptr;
     float* prev_density = nullptr;
@@ -321,10 +327,10 @@ struct PowerActivityScratchView {
     int* pending_seq_count = nullptr;
     int num_power_levels = 0;
 
-    PowerActivityScratchView() = default;
-    PowerActivityScratchView(float* density_, float* duty_)
+    PowerActivityPropDevice() = default;
+    PowerActivityPropDevice(float* density_, float* duty_)
         : density(density_), duty(duty_) {}
-    PowerActivityScratchView(float* density_,
+    PowerActivityPropDevice(float* density_,
                              float* duty_,
                              float* prev_density_,
                              float* prev_duty_,
@@ -356,7 +362,7 @@ struct PowerActivityScratchView {
           num_power_levels(num_power_levels_) {}
 };
 
-struct PowerActivityQueueView {
+struct PowerActivityLevelQueueDevice {
     const int* level_offsets = nullptr;
     int* level_queue = nullptr;
     int* level_counts = nullptr;
@@ -365,8 +371,8 @@ struct PowerActivityQueueView {
     int* pending_seq_list = nullptr;
     int* pending_seq_list_count = nullptr;
 
-    PowerActivityQueueView() = default;
-    PowerActivityQueueView(const int* level_offsets_,
+    PowerActivityLevelQueueDevice() = default;
+    PowerActivityLevelQueueDevice(const int* level_offsets_,
                            int* level_queue_,
                            int* level_counts_,
                            uint32_t* queued_,
@@ -382,7 +388,7 @@ struct PowerActivityQueueView {
           pending_seq_list_count(pending_seq_list_count_) {}
 };
 
-struct PowerInternalDenomModel {
+struct PowerInternalDenomDevice {
     int n = 0;
     const float* precomputed_activity = nullptr;
     const float* activity_density = nullptr;
@@ -396,8 +402,8 @@ struct PowerInternalDenomModel {
     int* node_port_pin_list = nullptr;
     float* denom = nullptr;
 
-    PowerInternalDenomModel() = default;
-    PowerInternalDenomModel(int n_,
+    PowerInternalDenomDevice() = default;
+    PowerInternalDenomDevice(int n_,
                             const float* precomputed_activity_,
                             const float* activity_density_,
                             const float* activity_duty_,
@@ -423,7 +429,7 @@ struct PowerInternalDenomModel {
           denom(denom_) {}
 };
 
-struct PowerInternalContribModel {
+struct PowerInternalInstDevice {
     int n = 0;
     int num_nodes = 0;
     const float* precomputed_activity = nullptr;
@@ -437,7 +443,9 @@ struct PowerInternalContribModel {
     int* node_port_pin_start = nullptr;
     int* node_port_pin_list = nullptr;
     const float* pinSlew = nullptr;
-    const float* pin_clock_slews = nullptr;
+    const uint16_t* pin_clock_ids = nullptr;
+    const float* clock_slews = nullptr;
+    int clock_count = 0;
     const int* power_clock_slew_pins = nullptr;
     int num_power_clock_slew_pins = 0;
     float power_clock_slew_fallback[NUM_ATTR] = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -449,8 +457,8 @@ struct PowerInternalContribModel {
     float* inst_internal = nullptr;
     float* internal_row_power = nullptr;
 
-    PowerInternalContribModel() = default;
-    PowerInternalContribModel(int n_,
+    PowerInternalInstDevice() = default;
+    PowerInternalInstDevice(int n_,
                               int num_nodes_,
                               const float* precomputed_activity_,
                               const float* activity_density_,
@@ -463,7 +471,9 @@ struct PowerInternalContribModel {
                               int* node_port_pin_start_,
                               int* node_port_pin_list_,
                               const float* pinSlew_,
-                              const float* pin_clock_slews_,
+                              const uint16_t* pin_clock_ids_,
+                              const float* clock_slews_,
+                              int clock_count_,
                               const int* power_clock_slew_pins_,
                               int num_power_clock_slew_pins_,
                               const float* power_clock_slew_fallback_,
@@ -487,7 +497,9 @@ struct PowerInternalContribModel {
           node_port_pin_start(node_port_pin_start_),
           node_port_pin_list(node_port_pin_list_),
           pinSlew(pinSlew_),
-          pin_clock_slews(pin_clock_slews_),
+          pin_clock_ids(pin_clock_ids_),
+          clock_slews(clock_slews_),
+          clock_count(clock_count_),
           power_clock_slew_pins(power_clock_slew_pins_),
           num_power_clock_slew_pins(num_power_clock_slew_pins_),
           dmp_C1(dmp_C1_),
@@ -503,7 +515,7 @@ struct PowerInternalContribModel {
     }
 };
 
-struct PowerLeakageRowsModel {
+struct PowerLeakageCondDevice {
     int n = 0;
     const float* precomputed_activity = nullptr;
     const float* activity_density = nullptr;
@@ -520,8 +532,8 @@ struct PowerLeakageRowsModel {
     int* group_cond_count = nullptr;
     float* leakage_row_power = nullptr;
 
-    PowerLeakageRowsModel() = default;
-    PowerLeakageRowsModel(int n_,
+    PowerLeakageCondDevice() = default;
+    PowerLeakageCondDevice(int n_,
                           const float* precomputed_activity_,
                           const float* activity_density_,
                           const float* activity_duty_,
@@ -553,7 +565,7 @@ struct PowerLeakageRowsModel {
           leakage_row_power(leakage_row_power_) {}
 };
 
-struct PowerLeakageSummaryModel {
+struct PowerLeakageInstDevice {
     GpuPowerLeakageGroupHost* leakage_groups = nullptr;
     int num_leakage_groups = 0;
     float* group_cond_leakage = nullptr;
@@ -562,8 +574,8 @@ struct PowerLeakageSummaryModel {
     int num_nodes = 0;
     float* inst_leakage = nullptr;
 
-    PowerLeakageSummaryModel() = default;
-    PowerLeakageSummaryModel(GpuPowerLeakageGroupHost* leakage_groups_,
+    PowerLeakageInstDevice() = default;
+    PowerLeakageInstDevice(GpuPowerLeakageGroupHost* leakage_groups_,
                              int num_leakage_groups_,
                              float* group_cond_leakage_,
                              float* group_cond_duty_sum_,
@@ -590,14 +602,14 @@ struct PowerChunkActivityStorage {
 
 void clear_power_cuda_error();
 void check_power_cuda_error(const char* label);
-void run_power_activity_cuda_launcher(const PowerActivityCudaModel& model);
+void run_power_activity_cuda_launcher(const PowerActivityDevice& model);
 void init_power_chunk_activity_storage(int n,
                                        const float* packed_activity,
                                        PowerChunkActivityStorage* storage);
 void free_power_chunk_activity_storage(PowerChunkActivityStorage* storage);
-void run_power_internal_denom_chunk_cuda_launcher(const PowerInternalDenomModel& model);
-void run_power_internal_contrib_chunk_cuda_launcher(const PowerInternalContribModel& model);
-void run_power_leakage_rows_chunk_cuda_launcher(const PowerLeakageRowsModel& model);
-void run_power_leakage_summary_chunk_cuda_launcher(const PowerLeakageSummaryModel& model);
+void run_power_internal_denom_chunk_cuda_launcher(const PowerInternalDenomDevice& model);
+void run_power_internal_contrib_chunk_cuda_launcher(const PowerInternalInstDevice& model);
+void run_power_leakage_rows_chunk_cuda_launcher(const PowerLeakageCondDevice& model);
+void run_power_leakage_summary_chunk_cuda_launcher(const PowerLeakageInstDevice& model);
 
 }  // namespace gt

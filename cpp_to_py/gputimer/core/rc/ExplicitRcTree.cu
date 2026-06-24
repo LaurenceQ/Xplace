@@ -8,10 +8,10 @@
 
 namespace gt {
 
-__global__ void flatten_rc_kernel(RcExplicitDeviceModel *model) {
+__global__ void flatten_rc_kernel(RcTreeDevice *rc_device_ptr) {
     const int idx = blockIdx.x;
-    RcExplicitDeviceModel& m = *model;
-    const RcGraphDeviceView& g = m.graph;
+    RcTreeDevice& m = *rc_device_ptr;
+    const RcTreeDeviceGraph& g = m.graph;
     if (idx < g.num_nets) {
         int nst = g.flat_net2node_start_map[idx];
         int nend = g.flat_net2node_start_map[idx + 1];
@@ -100,12 +100,12 @@ __global__ void flatten_rc_kernel(RcExplicitDeviceModel *model) {
     }
 }
 
-__global__ void propagate_rc_kernel(RcExplicitDeviceModel *model) {
+__global__ void propagate_rc_kernel(RcTreeDevice *rc_device_ptr) {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int cond = threadIdx.y;
-    RcExplicitDeviceModel& m = *model;
-    const RcGraphDeviceView& g = m.graph;
-    RcPropagateScratch& s = m.scratch;
+    RcTreeDevice& m = *rc_device_ptr;
+    const RcTreeDeviceGraph& g = m.graph;
+    RcTreePropagation& s = m.propagation;
     if (idx < g.num_nets) {
         int nst = g.flat_net2node_start_map[idx];
         int nend = g.flat_net2node_start_map[idx + 1];
@@ -158,12 +158,12 @@ __global__ void propagate_rc_kernel(RcExplicitDeviceModel *model) {
     }
 }
 
-__global__ void move_to_timing_graph(RcExplicitDeviceModel *model) {
+__global__ void move_to_timing_graph(RcTreeDevice *rc_device_ptr) {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int cond = threadIdx.y;
-    RcExplicitDeviceModel& m = *model;
-    const RcGraphDeviceView& g = m.graph;
-    const RcPropagateScratch& s = m.scratch;
+    RcTreeDevice& m = *rc_device_ptr;
+    const RcTreeDeviceGraph& g = m.graph;
+    const RcTreePropagation& s = m.propagation;
     if (idx < g.num_nets) {
         int nst = g.flat_net2node_start_map[idx];
         int nend = g.flat_net2node_start_map[idx + 1];
@@ -179,33 +179,33 @@ __global__ void move_to_timing_graph(RcExplicitDeviceModel *model) {
     }
 }
 
-static void copy_rc_vectors_to_device(const RcExplicitTreeModel& model,
-                                      RcGraphDeviceView& graph,
-                                      float** edge_wl) {
-    graph.num_nets = model.num_nets;
-    graph.num_nodes = model.num_nodes;
-    graph.num_edges = model.num_edges;
-    cudaMalloc(&graph.edge_from, model.edge_from->size() * sizeof(int));
-    cudaMalloc(&graph.edge_to, model.edge_to->size() * sizeof(int));
-    cudaMalloc(&graph.flat_net2node_start_map, model.flat_net2node_start_map->size() * sizeof(int));
-    cudaMalloc(&graph.flat_net2edge_start_map, model.flat_net2edge_start_map->size() * sizeof(int));
-    cudaMalloc(&graph.node2pin_map, model.node2pin_map->size() * sizeof(int));
-    cudaMemcpy(graph.edge_from, model.edge_from->data(), model.edge_from->size() * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(graph.edge_to, model.edge_to->data(), model.edge_to->size() * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(graph.flat_net2node_start_map, model.flat_net2node_start_map->data(), model.flat_net2node_start_map->size() * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(graph.flat_net2edge_start_map, model.flat_net2edge_start_map->data(), model.flat_net2edge_start_map->size() * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(graph.node2pin_map, model.node2pin_map->data(), model.node2pin_map->size() * sizeof(int), cudaMemcpyHostToDevice);
-    if (model.includes_pin_caps && !model.includes_pin_caps->empty()) {
-        cudaMalloc(&graph.includes_pin_caps, model.includes_pin_caps->size() * sizeof(uint8_t));
-        cudaMemcpy(graph.includes_pin_caps, model.includes_pin_caps->data(), model.includes_pin_caps->size() * sizeof(uint8_t), cudaMemcpyHostToDevice);
+static void copy_rc_tree_graph_to_device(const RcTreeHost& rc_host,
+                                         RcTreeDeviceGraph& graph,
+                                         float** edge_wl) {
+    graph.num_nets = rc_host.num_nets;
+    graph.num_nodes = rc_host.num_nodes;
+    graph.num_edges = rc_host.num_edges;
+    cudaMalloc(&graph.edge_from, rc_host.edge_from->size() * sizeof(int));
+    cudaMalloc(&graph.edge_to, rc_host.edge_to->size() * sizeof(int));
+    cudaMalloc(&graph.flat_net2node_start_map, rc_host.flat_net2node_start_map->size() * sizeof(int));
+    cudaMalloc(&graph.flat_net2edge_start_map, rc_host.flat_net2edge_start_map->size() * sizeof(int));
+    cudaMalloc(&graph.node2pin_map, rc_host.node2pin_map->size() * sizeof(int));
+    cudaMemcpy(graph.edge_from, rc_host.edge_from->data(), rc_host.edge_from->size() * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(graph.edge_to, rc_host.edge_to->data(), rc_host.edge_to->size() * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(graph.flat_net2node_start_map, rc_host.flat_net2node_start_map->data(), rc_host.flat_net2node_start_map->size() * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(graph.flat_net2edge_start_map, rc_host.flat_net2edge_start_map->data(), rc_host.flat_net2edge_start_map->size() * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(graph.node2pin_map, rc_host.node2pin_map->data(), rc_host.node2pin_map->size() * sizeof(int), cudaMemcpyHostToDevice);
+    if (rc_host.includes_pin_caps && !rc_host.includes_pin_caps->empty()) {
+        cudaMalloc(&graph.includes_pin_caps, rc_host.includes_pin_caps->size() * sizeof(uint8_t));
+        cudaMemcpy(graph.includes_pin_caps, rc_host.includes_pin_caps->data(), rc_host.includes_pin_caps->size() * sizeof(uint8_t), cudaMemcpyHostToDevice);
     }
-    if (edge_wl && model.edge_wl) {
-        cudaMalloc(edge_wl, model.edge_wl->size() * sizeof(float));
-        cudaMemcpy(*edge_wl, model.edge_wl->data(), model.edge_wl->size() * sizeof(float), cudaMemcpyHostToDevice);
+    if (edge_wl && rc_host.edge_wl) {
+        cudaMalloc(edge_wl, rc_host.edge_wl->size() * sizeof(float));
+        cudaMemcpy(*edge_wl, rc_host.edge_wl->data(), rc_host.edge_wl->size() * sizeof(float), cudaMemcpyHostToDevice);
     }
 }
 
-static void free_rc_graph_device_view(RcGraphDeviceView& graph) {
+static void free_rc_tree_device_graph(RcTreeDeviceGraph& graph) {
     cudaFree(graph.edge_from);
     cudaFree(graph.edge_to);
     cudaFree(graph.flat_net2node_start_map);
@@ -214,41 +214,41 @@ static void free_rc_graph_device_view(RcGraphDeviceView& graph) {
     if (graph.includes_pin_caps) cudaFree(graph.includes_pin_caps);
 }
 
-static RcExplicitDeviceModel* copy_rc_device_model_to_gpu(const RcExplicitDeviceModel& model) {
-    RcExplicitDeviceModel* d_model = nullptr;
-    cudaMalloc(&d_model, sizeof(RcExplicitDeviceModel));
-    cudaMemcpy(d_model, &model, sizeof(RcExplicitDeviceModel), cudaMemcpyHostToDevice);
-    return d_model;
+static RcTreeDevice* copy_rc_tree_device_to_gpu(const RcTreeDevice& rc_device) {
+    RcTreeDevice* d_rc_device = nullptr;
+    cudaMalloc(&d_rc_device, sizeof(RcTreeDevice));
+    cudaMemcpy(d_rc_device, &rc_device, sizeof(RcTreeDevice), cudaMemcpyHostToDevice);
+    return d_rc_device;
 }
 
-void flatten_rc_tree(const RcExplicitTreeModel& model) {
+void flatten_rc_tree(const RcTreeHost& rc_host) {
     int *root_dist, *cnts;
     int *edge_cnts;
-    cudaMalloc(&root_dist, model.num_nodes * sizeof(int));
-    cudaMalloc(&cnts, model.num_nodes * sizeof(int));
-    cudaMalloc(&edge_cnts, model.num_edges * sizeof(int));
+    cudaMalloc(&root_dist, rc_host.num_nodes * sizeof(int));
+    cudaMalloc(&cnts, rc_host.num_nodes * sizeof(int));
+    cudaMalloc(&edge_cnts, rc_host.num_edges * sizeof(int));
 
-    reset_val<int><<<BLOCK_NUMBER(model.num_nodes), BLOCK_SIZE>>>(root_dist, model.num_nodes);
-    cudaMemset(cnts, 0, model.num_nodes * sizeof(int));
-    cudaMemset(edge_cnts, 0, model.num_edges * sizeof(int));
+    reset_val<int><<<BLOCK_NUMBER(rc_host.num_nodes), BLOCK_SIZE>>>(root_dist, rc_host.num_nodes);
+    cudaMemset(cnts, 0, rc_host.num_nodes * sizeof(int));
+    cudaMemset(edge_cnts, 0, rc_host.num_edges * sizeof(int));
 
-    RcExplicitDeviceModel device_model;
-    copy_rc_vectors_to_device(model, device_model.graph, nullptr);
-    device_model.root_dist = root_dist;
-    device_model.cnts = cnts;
-    device_model.edge_cnts = edge_cnts;
-    device_model.node_order = model.node_order;
-    device_model.edge_order = model.edge_order;
-    device_model.parent_node = model.parent_node;
-    device_model.edge_res = model.edge_res;
-    device_model.res_parent = model.res_parent;
-    RcExplicitDeviceModel* d_model = copy_rc_device_model_to_gpu(device_model);
+    RcTreeDevice rc_device;
+    copy_rc_tree_graph_to_device(rc_host, rc_device.graph, nullptr);
+    rc_device.root_dist = root_dist;
+    rc_device.cnts = cnts;
+    rc_device.edge_cnts = edge_cnts;
+    rc_device.node_order = rc_host.node_order;
+    rc_device.edge_order = rc_host.edge_order;
+    rc_device.parent_node = rc_host.parent_node;
+    rc_device.edge_res = rc_host.edge_res;
+    rc_device.res_parent = rc_host.res_parent;
+    RcTreeDevice* d_rc_device = copy_rc_tree_device_to_gpu(rc_device);
 
     int thread_count = 64;
-    int numBlocks = model.num_nets;
-    flatten_rc_kernel<<<numBlocks, thread_count>>>(d_model);
-    cudaFree(d_model);
-    free_rc_graph_device_view(device_model.graph);
+    int numBlocks = rc_host.num_nets;
+    flatten_rc_kernel<<<numBlocks, thread_count>>>(d_rc_device);
+    cudaFree(d_rc_device);
+    free_rc_tree_device_graph(rc_device.graph);
     cudaFree(root_dist);
     cudaFree(cnts);
     cudaFree(edge_cnts);
@@ -257,50 +257,50 @@ void flatten_rc_tree(const RcExplicitTreeModel& model) {
     cudaDeviceSynchronize();
 }
 
-void propagate_rc_tree(const RcExplicitTreeModel& model) {
-    RcExplicitDeviceModel device_model;
-    copy_rc_vectors_to_device(model, device_model.graph, nullptr);
+void propagate_rc_tree(const RcTreeHost& rc_host) {
+    RcTreeDevice rc_device;
+    copy_rc_tree_graph_to_device(rc_host, rc_device.graph, nullptr);
 
     float *node_load, *node_delay, *node_ldelay, *node_impulse, *node_beta;
 
-    cudaMalloc(&node_load, model.num_nodes * NUM_ATTR * sizeof(float));
-    cudaMalloc(&node_delay, model.num_nodes * NUM_ATTR * sizeof(float));
-    cudaMalloc(&node_ldelay, model.num_nodes * NUM_ATTR * sizeof(float));
-    cudaMalloc(&node_impulse, model.num_nodes * NUM_ATTR * sizeof(float));
-    cudaMalloc(&node_beta, model.num_nodes * NUM_ATTR * sizeof(float));
+    cudaMalloc(&node_load, rc_host.num_nodes * NUM_ATTR * sizeof(float));
+    cudaMalloc(&node_delay, rc_host.num_nodes * NUM_ATTR * sizeof(float));
+    cudaMalloc(&node_ldelay, rc_host.num_nodes * NUM_ATTR * sizeof(float));
+    cudaMalloc(&node_impulse, rc_host.num_nodes * NUM_ATTR * sizeof(float));
+    cudaMalloc(&node_beta, rc_host.num_nodes * NUM_ATTR * sizeof(float));
 
-    cudaMemset(node_load, 0, model.num_nodes * NUM_ATTR * sizeof(float));
-    cudaMemset(node_delay, 0, model.num_nodes * NUM_ATTR * sizeof(float));
-    cudaMemset(node_ldelay, 0, model.num_nodes * NUM_ATTR * sizeof(float));
-    cudaMemset(node_impulse, 0, model.num_nodes * NUM_ATTR * sizeof(float));
-    cudaMemset(node_beta, 0, model.num_nodes * NUM_ATTR * sizeof(float));
+    cudaMemset(node_load, 0, rc_host.num_nodes * NUM_ATTR * sizeof(float));
+    cudaMemset(node_delay, 0, rc_host.num_nodes * NUM_ATTR * sizeof(float));
+    cudaMemset(node_ldelay, 0, rc_host.num_nodes * NUM_ATTR * sizeof(float));
+    cudaMemset(node_impulse, 0, rc_host.num_nodes * NUM_ATTR * sizeof(float));
+    cudaMemset(node_beta, 0, rc_host.num_nodes * NUM_ATTR * sizeof(float));
 
-    device_model.scratch.node_load = node_load;
-    device_model.scratch.node_delay = node_delay;
-    device_model.scratch.node_ldelay = node_ldelay;
-    device_model.scratch.node_impulse = node_impulse;
-    device_model.scratch.node_beta = node_beta;
-    device_model.node_order = model.node_order;
-    device_model.parent_node = model.parent_node;
-    device_model.res_parent = model.res_parent;
-    device_model.node_cap = model.node_cap;
-    device_model.pinLoad = model.pinLoad;
-    device_model.pinImpulse = model.pinImpulse;
-    device_model.pinCap = model.pinCap;
-    device_model.pinWireCap = model.pinWireCap;
-    device_model.pinRootDelay = model.pinRootDelay;
-    device_model.pinRootRes = model.pinRootRes;
-    RcExplicitDeviceModel* d_model = copy_rc_device_model_to_gpu(device_model);
+    rc_device.propagation.node_load = node_load;
+    rc_device.propagation.node_delay = node_delay;
+    rc_device.propagation.node_ldelay = node_ldelay;
+    rc_device.propagation.node_impulse = node_impulse;
+    rc_device.propagation.node_beta = node_beta;
+    rc_device.node_order = rc_host.node_order;
+    rc_device.parent_node = rc_host.parent_node;
+    rc_device.res_parent = rc_host.res_parent;
+    rc_device.node_cap = rc_host.node_cap;
+    rc_device.pinLoad = rc_host.pinLoad;
+    rc_device.pinImpulse = rc_host.pinImpulse;
+    rc_device.pinCap = rc_host.pinCap;
+    rc_device.pinWireCap = rc_host.pinWireCap;
+    rc_device.pinRootDelay = rc_host.pinRootDelay;
+    rc_device.pinRootRes = rc_host.pinRootRes;
+    RcTreeDevice* d_rc_device = copy_rc_tree_device_to_gpu(rc_device);
 
     int thread_count2 = 64;
     dim3 block_size(thread_count2, NUM_ATTR);
-    int numBlocks2 = model.num_nets - 1 + thread_count2 / thread_count2;
+    int numBlocks2 = rc_host.num_nets - 1 + thread_count2 / thread_count2;
 
-    propagate_rc_kernel<<<numBlocks2, block_size>>>(d_model);
-    move_to_timing_graph<<<numBlocks2, block_size>>>(d_model);
+    propagate_rc_kernel<<<numBlocks2, block_size>>>(d_rc_device);
+    move_to_timing_graph<<<numBlocks2, block_size>>>(d_rc_device);
 
-    cudaFree(d_model);
-    free_rc_graph_device_view(device_model.graph);
+    cudaFree(d_rc_device);
+    free_rc_tree_device_graph(rc_device.graph);
     cudaFree(node_load);
     cudaFree(node_delay);
     cudaFree(node_ldelay);
@@ -309,10 +309,10 @@ void propagate_rc_tree(const RcExplicitTreeModel& model) {
     cudaDeviceSynchronize();
 }
 
-__global__ void calc_rc_kernel(RcExplicitDeviceModel *model) {
+__global__ void calc_rc_kernel(RcTreeDevice *rc_device_ptr) {
     const int idx = blockIdx.x;
-    RcExplicitDeviceModel& m = *model;
-    const RcGraphDeviceView& g = m.graph;
+    RcTreeDevice& m = *rc_device_ptr;
+    const RcTreeDeviceGraph& g = m.graph;
     if (idx < g.num_nets) {
         int nst = g.flat_net2node_start_map[idx];
         int nend = g.flat_net2node_start_map[idx + 1];
@@ -358,36 +358,36 @@ __global__ void calc_rc_kernel(RcExplicitDeviceModel *model) {
     }
 }
 
-void calc_res_cap(const RcExplicitTreeModel& model) {
+void calc_res_cap(const RcTreeHost& rc_host) {
     int *root_dist, *cnts;
-    cudaMalloc(&root_dist, model.num_nodes * sizeof(int));
-    cudaMalloc(&cnts, model.num_nodes * sizeof(int));
+    cudaMalloc(&root_dist, rc_host.num_nodes * sizeof(int));
+    cudaMalloc(&cnts, rc_host.num_nodes * sizeof(int));
 
-    reset_val<int><<<BLOCK_NUMBER(model.num_nodes), BLOCK_SIZE>>>(root_dist, model.num_nodes);
-    cudaMemset(cnts, 0, model.num_nodes * sizeof(int));
+    reset_val<int><<<BLOCK_NUMBER(rc_host.num_nodes), BLOCK_SIZE>>>(root_dist, rc_host.num_nodes);
+    cudaMemset(cnts, 0, rc_host.num_nodes * sizeof(int));
 
-    RcExplicitDeviceModel device_model;
-    copy_rc_vectors_to_device(model, device_model.graph, &device_model.edge_wl);
-    device_model.root_dist = root_dist;
-    device_model.cnts = cnts;
-    device_model.edge_order = model.edge_order;
-    device_model.edge_res = model.edge_res;
-    device_model.node_cap = model.node_cap;
-    device_model.net_is_clock = model.net_is_clock;
-    device_model.unit_to_micron = model.unit_to_micron;
-    device_model.rf = model.rf;
-    device_model.cf = model.cf;
-    RcExplicitDeviceModel* d_model = copy_rc_device_model_to_gpu(device_model);
+    RcTreeDevice rc_device;
+    copy_rc_tree_graph_to_device(rc_host, rc_device.graph, &rc_device.edge_wl);
+    rc_device.root_dist = root_dist;
+    rc_device.cnts = cnts;
+    rc_device.edge_order = rc_host.edge_order;
+    rc_device.edge_res = rc_host.edge_res;
+    rc_device.node_cap = rc_host.node_cap;
+    rc_device.net_is_clock = rc_host.net_is_clock;
+    rc_device.unit_to_micron = rc_host.unit_to_micron;
+    rc_device.rf = rc_host.rf;
+    rc_device.cf = rc_host.cf;
+    RcTreeDevice* d_rc_device = copy_rc_tree_device_to_gpu(rc_device);
 
     int thread_count = 64;
-    int numBlocks = model.num_nets;
-    calc_rc_kernel<<<numBlocks, thread_count>>>(d_model);
+    int numBlocks = rc_host.num_nets;
+    calc_rc_kernel<<<numBlocks, thread_count>>>(d_rc_device);
 
-    cudaFree(d_model);
-    free_rc_graph_device_view(device_model.graph);
+    cudaFree(d_rc_device);
+    free_rc_tree_device_graph(rc_device.graph);
     cudaFree(root_dist);
     cudaFree(cnts);
-    cudaFree(device_model.edge_wl);
+    cudaFree(rc_device.edge_wl);
 }
 
 }  // namespace gt

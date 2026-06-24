@@ -32,6 +32,8 @@
 #include "common/db/Region.h"
 #include "common/db/Row.h"
 #include "common/db/SNet.h"
+#include "common/StageProfiler.h"
+#include "common/XplaceLog.h"
 #include "common/db/Site.h"
 #include "common/db/SiteMap.h"
 #include "common/db/Via.h"
@@ -62,8 +64,7 @@ bool defProfileEnabled()
 
 struct DefReadProfile {
     bool enabled = false;
-    std::chrono::steady_clock::time_point start;
-    std::chrono::steady_clock::time_point last;
+    StageProfiler profiler{"XPLACE_DEF_PROFILE", false, stdout};
     const char* phase = "setup";
     long long rows = 0;
     long long tracks = 0;
@@ -81,8 +82,7 @@ struct DefReadProfile {
     void begin()
     {
         enabled = defProfileEnabled();
-        start = std::chrono::steady_clock::now();
-        last = start;
+        profiler = StageProfiler("XPLACE_DEF_PROFILE", enabled, stdout);
         phase = "setup";
         rows = tracks = gcells = vias = ndrs = components = pins = 0;
         blockages = snets = nets = net_connections = regions = 0;
@@ -94,14 +94,7 @@ struct DefReadProfile {
             phase = next;
             return;
         }
-        const auto now = std::chrono::steady_clock::now();
-        const double elapsed = std::chrono::duration<double>(now - last).count();
-        const double total = std::chrono::duration<double>(now - start).count();
-        std::fprintf(stdout,
-                     "[XPLACE_DEF_PROFILE] phase=%s elapsed=%.3f total=%.3f\n",
-                     phase, elapsed, total);
-        std::fflush(stdout);
-        last = now;
+        profiler.mark(phase);
         phase = next;
     }
 
@@ -111,13 +104,10 @@ struct DefReadProfile {
             return;
         }
         switchPhase(phase);
-        const auto now = std::chrono::steady_clock::now();
-        const double total = std::chrono::duration<double>(now - start).count();
-        std::fprintf(stdout,
-                     "[XPLACE_DEF_PROFILE] phase=summary status=%s total=%.3f rows=%lld tracks=%lld gcells=%lld vias=%lld ndrs=%lld components=%lld pins=%lld blockages=%lld snets=%lld nets=%lld net_connections=%lld regions=%lld\n",
-                     status, total, rows, tracks, gcells, vias, ndrs,
-                     components, pins, blockages, snets, nets, net_connections, regions);
-        std::fflush(stdout);
+        profiler.markf("summary",
+                       "status=%s rows=%lld tracks=%lld gcells=%lld vias=%lld ndrs=%lld components=%lld pins=%lld blockages=%lld snets=%lld nets=%lld net_connections=%lld regions=%lld",
+                       status, rows, tracks, gcells, vias, ndrs,
+                       components, pins, blockages, snets, nets, net_connections, regions);
     }
 };
 
@@ -144,17 +134,17 @@ struct DefMappedFile {
     {
         fd = ::open(file.c_str(), O_RDONLY);
         if (fd < 0) {
-            std::fprintf(stderr,
-                         "[XPLACE_DEF_BUFFER_PROFILE] open failed file=%s error=%s\n",
-                         file.c_str(), std::strerror(errno));
+            XPLACE_DEBUGF("XPLACE_DEF_BUFFER_PROFILE",
+                          "open failed file=%s error=%s",
+                          file.c_str(), std::strerror(errno));
             return;
         }
 
         struct stat st;
         if (::fstat(fd, &st) != 0) {
-            std::fprintf(stderr,
-                         "[XPLACE_DEF_BUFFER_PROFILE] stat failed file=%s error=%s\n",
-                         file.c_str(), std::strerror(errno));
+            XPLACE_DEBUGF("XPLACE_DEF_BUFFER_PROFILE",
+                          "stat failed file=%s error=%s",
+                          file.c_str(), std::strerror(errno));
             ::close(fd);
             fd = -1;
             return;
@@ -165,9 +155,9 @@ struct DefMappedFile {
         size = static_cast<std::size_t>(st.st_size);
         void* mapped = ::mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
         if (mapped == MAP_FAILED) {
-            std::fprintf(stderr,
-                         "[XPLACE_DEF_BUFFER_PROFILE] mmap failed file=%s size=%zu error=%s\n",
-                         file.c_str(), size, std::strerror(errno));
+            XPLACE_DEBUGF("XPLACE_DEF_BUFFER_PROFILE",
+                          "mmap failed file=%s size=%zu error=%s",
+                          file.c_str(), size, std::strerror(errno));
             data = nullptr;
             size = 0;
             return;
@@ -381,29 +371,20 @@ void profileDefBufferScan(const std::string& file, int requested_threads)
     if (!defBufferProfileEnabled()) {
         return;
     }
-    const auto start = std::chrono::steady_clock::now();
-    auto seconds_since = [](std::chrono::steady_clock::time_point t) {
-        return std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count();
-    };
+    StageProfiler profile("XPLACE_DEF_BUFFER_PROFILE", true, stdout);
 
     DefMappedFile mapped(file);
     if (mapped.data == nullptr || mapped.size == 0) {
         return;
     }
-    std::fprintf(stdout,
-                 "[XPLACE_DEF_BUFFER_PROFILE] phase=mmap elapsed=%.3f size=%zu\n",
-                 seconds_since(start), mapped.size);
-    std::fflush(stdout);
+    profile.markf("mmap", "size=%zu", mapped.size);
 
     std::vector<DefBufferSection> sections(4);
     defFindSection(mapped.data, mapped.size, "COMPONENTS", sections[0]);
     defFindSection(mapped.data, mapped.size, "PINS", sections[1]);
     defFindSection(mapped.data, mapped.size, "SPECIALNETS", sections[2]);
     defFindSection(mapped.data, mapped.size, "NETS", sections[3]);
-    std::fprintf(stdout,
-                 "[XPLACE_DEF_BUFFER_PROFILE] phase=find_sections elapsed=%.3f\n",
-                 seconds_since(start));
-    std::fflush(stdout);
+    profile.mark("find_sections");
 
     int num_threads = std::max(1, requested_threads);
     if (const char* env_threads = std::getenv("XPLACE_DEF_BUFFER_THREADS")) {
@@ -415,19 +396,17 @@ void profileDefBufferScan(const std::string& file, int requested_threads)
     for (DefBufferSection& section : sections) {
         defCountSectionObjects(mapped.data, section, num_threads,
                                section.object_lines, section.connection_lines);
-        std::fprintf(stdout,
-                     "[XPLACE_DEF_BUFFER_PROFILE] section=%s found=%d declared=%lld object_lines=%lld connection_lines=%lld bytes=%zu body_begin=%zu end_begin=%zu threads=%d elapsed=%.3f\n",
-                     section.name,
-                     section.found ? 1 : 0,
-                     section.declared_count,
-                     section.object_lines,
-                     section.connection_lines,
-                     section.found ? section.end_begin - section.body_begin : 0,
-                     section.body_begin,
-                     section.end_begin,
-                     num_threads,
-                     seconds_since(start));
-        std::fflush(stdout);
+        profile.markf("section",
+                      "name=%s found=%d declared=%lld object_lines=%lld connection_lines=%lld bytes=%zu body_begin=%zu end_begin=%zu threads=%d",
+                      section.name,
+                      section.found ? 1 : 0,
+                      section.declared_count,
+                      section.object_lines,
+                      section.connection_lines,
+                      section.found ? section.end_begin - section.body_begin : 0,
+                      section.body_begin,
+                      section.end_begin,
+                      num_threads);
     }
 }
 
@@ -1009,9 +988,9 @@ bool fastDefParseComponents(const char* data,
     fastDefCollectObjectRanges(data, section, num_threads, ranges);
     if (section.declared_count >= 0 &&
         ranges.size() != static_cast<std::size_t>(section.declared_count)) {
-        std::fprintf(stderr,
-                     "[XPLACE_FAST_DEF_COMPONENTS] component count mismatch declared=%lld found=%zu\n",
-                     section.declared_count, ranges.size());
+        XPLACE_DEBUGF("XPLACE_FAST_DEF_COMPONENTS",
+                      "component count mismatch declared=%lld found=%zu",
+                      section.declared_count, ranges.size());
         return false;
     }
 
@@ -1208,9 +1187,9 @@ bool fastDefParseNets(const char* data,
     fastDefCollectObjectRanges(data, section, num_threads, ranges);
     if (section.declared_count >= 0 &&
         ranges.size() != static_cast<std::size_t>(section.declared_count)) {
-        std::fprintf(stderr,
-                     "[XPLACE_FAST_DEF_NETS] net count mismatch declared=%lld found=%zu\n",
-                     section.declared_count, ranges.size());
+        XPLACE_DEBUGF("XPLACE_FAST_DEF_NETS",
+                      "net count mismatch declared=%lld found=%zu",
+                      section.declared_count, ranges.size());
         return false;
     }
 
@@ -1246,25 +1225,7 @@ void fastDefMaterializeNets(Database& db,
                             const std::vector<FastDefNet>& parsed_nets,
                             int num_threads)
 {
-    const bool profile = defProfileEnabled();
-    const auto profile_start = std::chrono::steady_clock::now();
-    auto profile_last = profile_start;
-    auto profile_log = [&](const char* phase) {
-        if (!profile) {
-            return;
-        }
-        const auto now = std::chrono::steady_clock::now();
-        const double elapsed = std::chrono::duration<double>(now - profile_last).count();
-        const double total = std::chrono::duration<double>(now - profile_start).count();
-        std::fprintf(stdout,
-                     "[XPLACE_FAST_DEF_NETS_MATERIALIZE] phase=%s elapsed=%.3f total=%.3f threads=%d\n",
-                     phase,
-                     elapsed,
-                     total,
-                     num_threads);
-        std::fflush(stdout);
-        profile_last = now;
-    };
+    StageProfiler profile("XPLACE_FAST_DEF_NETS_MATERIALIZE", defProfileEnabled(), stdout);
 
     num_threads = std::max(1, num_threads);
     std::vector<int> out_index(parsed_nets.size(), -1);
@@ -1341,12 +1302,12 @@ void fastDefMaterializeNets(Database& db,
     for (std::thread& worker : workers) {
         worker.join();
     }
-    profile_log("net_output_index");
+    profile.markf("net_output_index", "threads=%d", num_threads);
 
     const std::size_t base = db.nets.size();
     db.nets.resize(base + valid_count, nullptr);
     db.name_nets.reserve(base + valid_count);
-    profile_log("resize");
+    profile.markf("resize", "threads=%d", num_threads);
 
     std::vector<FastDefNameIndexEntry> cell_entries;
     cell_entries.reserve(db.cells.size());
@@ -1357,7 +1318,7 @@ void fastDefMaterializeNets(Database& db,
     }
     FastDefNameIndex cell_index;
     cell_index.build(std::move(cell_entries), num_threads);
-    profile_log("cell_name_index");
+    profile.markf("cell_name_index", "threads=%d", num_threads);
 
     std::vector<FastDefNameIndexEntry> iopin_entries;
     iopin_entries.reserve(db.iopins.size());
@@ -1368,7 +1329,7 @@ void fastDefMaterializeNets(Database& db,
     }
     FastDefNameIndex iopin_index;
     iopin_index.build(std::move(iopin_entries), num_threads);
-    profile_log("iopin_name_index");
+    profile.markf("iopin_name_index", "threads=%d", num_threads);
 
     auto find_validated_cell = [&](const FastDefToken& token) -> Cell* {
         Cell* cell = static_cast<Cell*>(cell_index.find(token));
@@ -1435,7 +1396,7 @@ void fastDefMaterializeNets(Database& db,
     for (std::thread& worker : workers) {
         worker.join();
     }
-    profile_log("parallel_build");
+    profile.markf("parallel_build", "threads=%d", num_threads);
 
     for (std::size_t i = 0; i < valid_count; ++i) {
         Net* net = db.nets[base + i];
@@ -1447,7 +1408,7 @@ void fastDefMaterializeNets(Database& db,
             logger.warning("Net re-defined: %s", net->name.c_str());
         }
     }
-    profile_log("name_map");
+    profile.markf("name_map", "threads=%d", num_threads);
 }
 
 
@@ -1518,11 +1479,7 @@ bool readDEFWithFastComponents(Database& db, const std::string& file)
         return false;
     }
 
-    const auto start = std::chrono::steady_clock::now();
-    auto seconds_since = [](std::chrono::steady_clock::time_point t) {
-        return std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count();
-    };
-    auto last_phase = start;
+    StageProfiler profile("XPLACE_FAST_DEF_COMPONENTS", true, stdout);
 
     DefMappedFile mapped(file);
     if (mapped.data == nullptr || mapped.size == 0) {
@@ -1531,7 +1488,7 @@ bool readDEFWithFastComponents(Database& db, const std::string& file)
     DefBufferSection components_section;
     defFindSection(mapped.data, mapped.size, "COMPONENTS", components_section);
     if (!components_section.found) {
-        std::fprintf(stderr, "[XPLACE_FAST_DEF_COMPONENTS] COMPONENTS section not found; fallback\n");
+        XPLACE_DEBUGF("XPLACE_FAST_DEF_COMPONENTS", "COMPONENTS section not found; fallback");
         return false;
     }
 
@@ -1545,15 +1502,10 @@ bool readDEFWithFastComponents(Database& db, const std::string& file)
 
     std::vector<FastDefComponent> components;
     if (!fastDefParseComponents(mapped.data, components_section, num_threads, components)) {
-        std::fprintf(stderr, "[XPLACE_FAST_DEF_COMPONENTS] parse failed; fallback\n");
+        XPLACE_DEBUGF("XPLACE_FAST_DEF_COMPONENTS", "parse failed; fallback");
         return false;
     }
-    auto now = std::chrono::steady_clock::now();
-    std::fprintf(stdout,
-                 "[XPLACE_FAST_DEF_COMPONENTS] phase=parse_components elapsed=%.3f total=%.3f components=%zu threads=%d\n",
-                 seconds_since(last_phase), seconds_since(start), components.size(), num_threads);
-    std::fflush(stdout);
-    last_phase = now;
+    profile.markf("parse_components", "components=%zu threads=%d", components.size(), num_threads);
 
     const bool use_fast_nets = fastDefNetsEnabled();
     std::vector<FastDefNet> parsed_nets;
@@ -1561,26 +1513,16 @@ bool readDEFWithFastComponents(Database& db, const std::string& file)
     if (use_fast_nets) {
         defFindSection(mapped.data, mapped.size, "NETS", nets_section);
         if (!nets_section.found || !fastDefParseNets(mapped.data, nets_section, num_threads, parsed_nets)) {
-            std::fprintf(stderr, "[XPLACE_FAST_DEF_NETS] parse failed; fallback\n");
+            XPLACE_DEBUGF("XPLACE_FAST_DEF_NETS", "parse failed; fallback");
             return false;
         }
-        now = std::chrono::steady_clock::now();
-        std::fprintf(stdout,
-                     "[XPLACE_FAST_DEF_NETS] phase=parse_nets elapsed=%.3f total=%.3f nets=%zu threads=%d\n",
-                     seconds_since(last_phase), seconds_since(start), parsed_nets.size(), num_threads);
-        std::fflush(stdout);
-        last_phase = now;
+        profile.markf("parse_nets", "nets=%zu threads=%d", parsed_nets.size(), num_threads);
     }
 
     fastDefMaterializeComponents(db, components, num_threads);
     components.clear();
     components.shrink_to_fit();
-    now = std::chrono::steady_clock::now();
-    std::fprintf(stdout,
-                 "[XPLACE_FAST_DEF_COMPONENTS] phase=materialize_components elapsed=%.3f total=%.3f cells=%zu\n",
-                 seconds_since(last_phase), seconds_since(start), db.cells.size());
-    std::fflush(stdout);
-    last_phase = now;
+    profile.markf("materialize_components", "cells=%zu", db.cells.size());
 
     std::vector<char> defr_buffer;
     FILE* fp = nullptr;
@@ -1589,12 +1531,7 @@ bool readDEFWithFastComponents(Database& db, const std::string& file)
         fastDefAddStripRange(strip_ranges, components_section);
         fastDefAddStripRange(strip_ranges, nets_section);
         defr_buffer = fastDefBuildDefrStubBuffer(mapped.data, mapped.size, std::move(strip_ranges));
-        now = std::chrono::steady_clock::now();
-        std::fprintf(stdout,
-                     "[XPLACE_FAST_DEF_NETS] phase=build_defr_stub elapsed=%.3f total=%.3f bytes=%zu original_bytes=%zu\n",
-                     seconds_since(last_phase), seconds_since(start), defr_buffer.size(), mapped.size);
-        std::fflush(stdout);
-        last_phase = now;
+        profile.markf("build_defr_stub", "bytes=%zu original_bytes=%zu", defr_buffer.size(), mapped.size);
         fp = fmemopen(defr_buffer.data(), defr_buffer.size(), "r");
         if (!fp) {
             logger.error("Unable to open stripped DEF buffer: %s", std::strerror(errno));
@@ -1645,18 +1582,10 @@ bool readDEFWithFastComponents(Database& db, const std::string& file)
         fastDefMaterializeNets(db, parsed_nets, num_threads);
         parsed_nets.clear();
         parsed_nets.shrink_to_fit();
-        now = std::chrono::steady_clock::now();
-        std::fprintf(stdout,
-                     "[XPLACE_FAST_DEF_NETS] phase=materialize_nets elapsed=%.3f total=%.3f nets=%zu\n",
-                     seconds_since(last_phase), seconds_since(start), db.nets.size());
-        std::fflush(stdout);
-        last_phase = now;
+        profile.markf("materialize_nets", "nets=%zu", db.nets.size());
     }
 
-    std::fprintf(stdout,
-                 "[XPLACE_FAST_DEF_COMPONENTS] phase=total elapsed=%.3f\n",
-                 seconds_since(start));
-    std::fflush(stdout);
+    profile.mark("total");
     return true;
 }
 
@@ -2701,12 +2630,7 @@ int readLefPin(lefrCallbackType_e c, lefiPin* pin, lefiUserData ud) {
                     }
 
                     if (nodes.size() < 4) {
-                        std::cout << "Error when partitioning rectangles." << std::endl;
-                        std::cout << "Remaining points: ";
-                        for (const Point& p : nodes) {
-                            printf("(%d, %d), ", p.x, p.y);
-                        }
-                        std::cout << std::endl;
+                        logger.warning("Error when partitioning rectangles; remaining_points=%zu", nodes.size());
                         break;
                     }
 

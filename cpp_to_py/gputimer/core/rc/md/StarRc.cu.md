@@ -5,7 +5,7 @@ CUDA implementation for the simple star-RC timing update used by
 `GPUTimer::update_rc_timing()`.
 
 ## Main Entry Points
-- `update_rc_timing_cuda(const RcStarModel&)`
+- `update_rc_timing_cuda(const RcStarNet&)`
 
 ## Data Ownership
 All arrays are borrowed from `GPUTimer`; this file does not allocate persistent
@@ -16,7 +16,7 @@ Clock-net wirelength suppression, unit conversion, load accumulation, root
 delay, root resistance, and impulse formulas are preserved.
 
 ## CUDA/C++ Boundary Notes
-The `.cpp` caller passes `RcStarModel`; this `.cu` file launches the kernel.
+The `.cpp` caller passes `RcStarNet`; this `.cu` file launches the kernel.
 
 ## Acceptance Tests
 - Build/install.

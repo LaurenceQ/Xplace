@@ -338,12 +338,6 @@ void GPUTimer::debug_dump_endpoint_tests(const std::string& outfile,
             const float to_at = h_pinAT[to_pin_id * NUM_ATTR + attr];
             const float pin_rat = h_pinRAT[to_pin_id * NUM_ATTR + attr];
             const float slack = el == 0 ? (to_at - rat) : (rat - to_at);
-            auto pin_clock_value = [](const vector<float>& values, int pin_id) -> float {
-                return pin_id >= 0 && pin_id < static_cast<int>(values.size()) ? values[pin_id] : nanf("");
-            };
-            auto test_clock_value = [](const vector<float>& values, int test_id) -> float {
-                return test_id >= 0 && test_id < static_cast<int>(values.size()) ? values[test_id] : nanf("");
-            };
             out << test_id << ',' << arc_id << ',' << attr << ',' << attr_names[attr] << ','
                 << to_pin_id << ",\"" << gtdb.pin_names[to_pin_id] << "\","
                 << from_pin_id << ",\"" << gtdb.pin_names[from_pin_id] << "\","
@@ -363,13 +357,16 @@ void GPUTimer::debug_dump_endpoint_tests(const std::string& outfile,
                 << rat * time_to_ns << ','
                 << pin_rat * time_to_ns << ','
                 << slack * time_to_ns << ','
-                << pin_clock_value(gtdb.pin_clock_slews, from_pin_id * NUM_ATTR + attr) << ','
-                << pin_clock_value(gtdb.pin_clock_rise_edges, from_pin_id) << ','
-                << pin_clock_value(gtdb.pin_clock_fall_edges, from_pin_id) << ','
-                << pin_clock_value(gtdb.pin_clock_periods, from_pin_id) << ','
-                << test_clock_value(gtdb.test_clock_periods, test_id) << ','
-                << test_clock_value(gtdb.test_setup_uncertainties, test_id) << ','
-                << test_clock_value(gtdb.test_hold_uncertainties, test_id) << '\n';
+                << gtdb.ClockSlewForPin(from_pin_id, attr) << ','
+                << gtdb.ClockRiseEdgeForPin(from_pin_id) << ','
+                << gtdb.ClockFallEdgeForPin(from_pin_id) << ','
+                << gtdb.ClockPeriodForPin(from_pin_id) << ','
+                << (test_id >= 0 && test_id < static_cast<int>(gtdb.test_clock_ids.size()) &&
+                    gtdb.ClockIdValid(gtdb.test_clock_ids[test_id])
+                        ? gtdb.clock_periods[gtdb.test_clock_ids[test_id]]
+                        : nanf("")) << ','
+                << gtdb.ClockSetupUncertaintyForTest(test_id) << ','
+                << gtdb.ClockHoldUncertaintyForTest(test_id) << '\n';
             ++emitted;
         }
     }

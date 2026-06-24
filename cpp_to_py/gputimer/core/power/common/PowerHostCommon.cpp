@@ -15,7 +15,7 @@ namespace {
 thread_local double g_power_stage_profile_elapsed = 0.0;
 }
 
-bool PowerTracePathState::enabled() const {
+bool PowerTracePathWriter::enabled() const {
     return out.good();
 }
 
@@ -285,10 +285,10 @@ std::vector<int> resolvePowerPathTargetPins(const std::vector<std::string>& quer
     return pins;
 }
 
-PowerTracePathState loadPowerTracePathState(const char* trace_path_file,
+PowerTracePathWriter loadPowerTracePathWriter(const char* trace_path_file,
                                                    const char* out_file,
                                                    const std::vector<int>& pin_to_node) {
-    PowerTracePathState state;
+    PowerTracePathWriter state;
     if (!out_file || out_file[0] == '\0') return state;
     if (trace_path_file && trace_path_file[0] != '\0') {
         std::ifstream stream(trace_path_file);

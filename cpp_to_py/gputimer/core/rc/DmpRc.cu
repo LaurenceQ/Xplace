@@ -1,9 +1,9 @@
 #include "gputimer/core/DmpModel.h"
 #include "gputimer/core/GPUTimer.h"
 #include "gputimer/core/utils.cuh"
+#include "common/StageProfiler.h"
 
 #include <algorithm>
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
@@ -30,13 +30,7 @@ static void clear_stale_cuda_error(const char* label)
 namespace gt{
 static bool dmp_rc_env_enabled(const char* name)
 {
-    const char* value = std::getenv(name);
-    if (value == nullptr || value[0] == '\0') {
-        return false;
-    }
-    return !(value[0] == '0' ||
-             value[0] == 'f' || value[0] == 'F' ||
-             value[0] == 'n' || value[0] == 'N');
+    return xplace_env_enabled(name);
 }
 
 static bool dmp_rc_kernel_profile_enabled()
@@ -50,37 +44,6 @@ static bool dmp_rc_profile_enabled()
            dmp_rc_env_enabled("DMP_RC_PROFILE") ||
            dmp_rc_env_enabled("DMP_DEBUG_TIMING");
 }
-
-
-class DmpRcPhaseProfile {
-public:
-    DmpRcPhaseProfile(const char* tag, bool enabled)
-        : tag_(tag), enabled_(enabled), start_(std::chrono::steady_clock::now()), last_(start_) {}
-
-    void log(const char* phase)
-    {
-        if (!enabled_) {
-            return;
-        }
-        const auto now = std::chrono::steady_clock::now();
-        const double elapsed = std::chrono::duration<double>(now - last_).count();
-        const double total = std::chrono::duration<double>(now - start_).count();
-        std::fprintf(stderr,
-                     "[%s] phase=%s elapsed=%.3f total=%.3f\n",
-                     tag_,
-                     phase,
-                     elapsed,
-                     total);
-        std::fflush(stderr);
-        last_ = now;
-    }
-
-private:
-    const char* tag_;
-    bool enabled_;
-    std::chrono::steady_clock::time_point start_;
-    std::chrono::steady_clock::time_point last_;
-};
 
 __global__ void scale_explicit_edge_res_kernel(float* edge_res, int num_edges, float scale)
 {
@@ -375,73 +338,61 @@ __host__ void DmpModel::initialize_rc(const std::vector<int>& host_edge_from,
         cudaMemset(root_dist, -1, num_nodes * sizeof(int));
       }
 
-__host__ void DmpModel::initialize_rc_explicit(
-               const std::vector<int>& host_edge_from,
-               const std::vector<int>& host_edge_to,
-               const std::vector<int>& host_flat_net2node_start_map,
-               const std::vector<int>& host_flat_net2edge_start_map,
-               const std::vector<int>& host_node2pin_map,
-               const std::vector<float>& host_edge_res,
-               const std::vector<float>& host_node_cap,
-               const std::vector<uint8_t>& host_includes_pin_caps,
-               float *pinCap_,
-               int num_nets_,
-               int num_nodes_,
-               int num_edges_){
+__host__ void DmpModel::initialize_rc_explicit(const HostRcGraph& graph, float *pinCap_){
         const bool profile = dmp_rc_profile_enabled();
-        DmpRcPhaseProfile init_profile("DMP_RC_INIT_MODEL", profile);
+        StageProfiler init_profile("DMP_RC_INIT_MODEL", profile, stderr);
         if (profile) {
-            print_dmp_rc_parallel_stats(host_flat_net2node_start_map,
-                                        host_flat_net2edge_start_map,
-                                        num_nets_,
-                                        num_nodes_,
-                                        num_edges_);
+            print_dmp_rc_parallel_stats(graph.net2node_start,
+                                        graph.net2edge_start,
+                                        graph.num_nets,
+                                        graph.num_nodes,
+                                        graph.num_edges);
         }
-        init_profile.log("stats");
+        init_profile.mark("stats");
         pinCap = pinCap_;
-        num_nets = num_nets_;
-        num_nodes = num_nodes_;
-        num_edges = num_edges_;
+        num_nets = graph.num_nets;
+        num_nodes = graph.num_nodes;
+        num_edges = graph.num_edges;
         unit_to_micron = 1.0f;
         rf = 0.0f;
         cf = 0.0f;
         explicit_rc = true;
-        if (host_edge_res.size() != static_cast<size_t>(num_edges)) {
+        if (graph.edge_res.size() != static_cast<size_t>(num_edges)) {
             throw std::runtime_error("initialize_rc_explicit edge_res must have num_edges values.");
         }
-        dmp_rc_cuda_malloc_checked(&edge_from, host_edge_from.size(), "edge_from");
-        dmp_rc_cuda_malloc_checked(&edge_to, host_edge_to.size(), "edge_to");
-        dmp_rc_cuda_malloc_checked(&flat_net2node_start_map, host_flat_net2node_start_map.size(), "flat_net2node_start_map");
-        dmp_rc_cuda_malloc_checked(&flat_net2edge_start_map, host_flat_net2edge_start_map.size(), "flat_net2edge_start_map");
-        dmp_rc_cuda_malloc_checked(&node2pin_map, host_node2pin_map.size(), "node2pin_map");
-        dmp_rc_cuda_malloc_checked(&edge_res, host_edge_res.size(), "edge_res");
+        dmp_rc_cuda_malloc_checked(&edge_from, graph.edge_from.size(), "edge_from");
+        dmp_rc_cuda_malloc_checked(&edge_to, graph.edge_to.size(), "edge_to");
+        dmp_rc_cuda_malloc_checked(&flat_net2node_start_map, graph.net2node_start.size(), "flat_net2node_start_map");
+        dmp_rc_cuda_malloc_checked(&flat_net2edge_start_map, graph.net2edge_start.size(), "flat_net2edge_start_map");
+        dmp_rc_cuda_malloc_checked(&node2pin_map, graph.node2pin.size(), "node2pin_map");
+        dmp_rc_cuda_malloc_checked(&edge_res, graph.edge_res.size(), "edge_res");
         dmp_rc_cuda_malloc_checked(&node_cap, static_cast<size_t>(num_nodes) * NUM_ATTR, "node_cap");
         dmp_rc_cuda_malloc_checked(&includes_pin_caps, num_nets, "includes_pin_caps");
         edge_wl = nullptr;
-        init_profile.log("malloc_graph");
+        init_profile.mark("malloc_graph");
 
-        dmp_rc_cuda_memcpy_checked(edge_from, host_edge_from.data(), host_edge_from.size() * sizeof(int), cudaMemcpyHostToDevice, "edge_from");
-        dmp_rc_cuda_memcpy_checked(edge_to, host_edge_to.data(), host_edge_to.size() * sizeof(int), cudaMemcpyHostToDevice, "edge_to");
-        dmp_rc_cuda_memcpy_checked(flat_net2node_start_map, host_flat_net2node_start_map.data(), host_flat_net2node_start_map.size() * sizeof(int), cudaMemcpyHostToDevice, "flat_net2node_start_map");
-        dmp_rc_cuda_memcpy_checked(flat_net2edge_start_map, host_flat_net2edge_start_map.data(), host_flat_net2edge_start_map.size() * sizeof(int), cudaMemcpyHostToDevice, "flat_net2edge_start_map");
-        dmp_rc_cuda_memcpy_checked(node2pin_map, host_node2pin_map.data(), host_node2pin_map.size() * sizeof(int), cudaMemcpyHostToDevice, "node2pin_map");
-        dmp_rc_cuda_memcpy_checked(edge_res, host_edge_res.data(), host_edge_res.size() * sizeof(float), cudaMemcpyHostToDevice, "edge_res");
-        dmp_rc_cuda_memcpy_checked(node_cap, host_node_cap.data(), static_cast<size_t>(num_nodes) * NUM_ATTR * sizeof(float), cudaMemcpyHostToDevice, "node_cap");
-        dmp_rc_cuda_memcpy_checked(includes_pin_caps, host_includes_pin_caps.data(), static_cast<size_t>(num_nets) * sizeof(uint8_t), cudaMemcpyHostToDevice, "includes_pin_caps");
-        init_profile.log("copy_graph");
+        dmp_rc_cuda_memcpy_checked(edge_from, graph.edge_from.data(), graph.edge_from.size() * sizeof(int), cudaMemcpyHostToDevice, "edge_from");
+        dmp_rc_cuda_memcpy_checked(edge_to, graph.edge_to.data(), graph.edge_to.size() * sizeof(int), cudaMemcpyHostToDevice, "edge_to");
+        dmp_rc_cuda_memcpy_checked(flat_net2node_start_map, graph.net2node_start.data(), graph.net2node_start.size() * sizeof(int), cudaMemcpyHostToDevice, "flat_net2node_start_map");
+        dmp_rc_cuda_memcpy_checked(flat_net2edge_start_map, graph.net2edge_start.data(), graph.net2edge_start.size() * sizeof(int), cudaMemcpyHostToDevice, "flat_net2edge_start_map");
+        dmp_rc_cuda_memcpy_checked(node2pin_map, graph.node2pin.data(), graph.node2pin.size() * sizeof(int), cudaMemcpyHostToDevice, "node2pin_map");
+        dmp_rc_cuda_memcpy_checked(edge_res, graph.edge_res.data(), graph.edge_res.size() * sizeof(float), cudaMemcpyHostToDevice, "edge_res");
+        dmp_rc_cuda_memcpy_checked(node_cap, graph.node_cap.data(), static_cast<size_t>(num_nodes) * NUM_ATTR * sizeof(float), cudaMemcpyHostToDevice, "node_cap");
+        dmp_rc_cuda_memcpy_checked(includes_pin_caps, graph.includes_pin_caps.data(), static_cast<size_t>(num_nets) * sizeof(uint8_t), cudaMemcpyHostToDevice, "includes_pin_caps");
+        init_profile.mark("copy_graph");
 
         dmp_rc_cuda_malloc_checked(&root_dist, num_nodes, "root_dist");
         dmp_rc_cuda_malloc_checked(&cnts, num_nodes, "cnts");
         dmp_rc_cuda_malloc_checked(&node_order, num_nodes, "node_order");
         dmp_rc_cuda_malloc_checked(&parent_node, num_nodes, "parent_node");
         dmp_rc_cuda_malloc_checked(&res_parent, static_cast<size_t>(num_nodes), "res_parent");
-        init_profile.log("malloc_scratch");
+        init_profile.mark("malloc_scratch");
         dmp_rc_cuda_memset_checked(cnts, 0, static_cast<size_t>(num_nodes) * sizeof(int), "cnts");
         dmp_rc_cuda_memset_checked(node_order, 0, static_cast<size_t>(num_nodes) * sizeof(int), "node_order");
         dmp_rc_cuda_memset_checked(parent_node, -1, static_cast<size_t>(num_nodes) * sizeof(int), "parent_node");
         dmp_rc_cuda_memset_checked(res_parent, 0, static_cast<size_t>(num_nodes) * sizeof(float), "res_parent");
         dmp_rc_cuda_memset_checked(root_dist, -1, static_cast<size_t>(num_nodes) * sizeof(int), "root_dist");
-        init_profile.log("memset_scratch");
+        init_profile.mark("memset_scratch");
       }
 
 void GPUTimer::initialize_dmp_rc(
@@ -476,49 +427,27 @@ void GPUTimer::initialize_dmp_rc(
    
 }
 
-void GPUTimer::initialize_dmp_rc_explicit(
-                  const std::vector<int>& host_edge_from,
-                  const std::vector<int>& host_edge_to,
-                  const std::vector<int>& host_flat_net2node_start_map,
-                  const std::vector<int>& host_flat_net2edge_start_map,
-                  const std::vector<int>& host_node2pin_map,
-                  std::vector<float>& host_edge_res,
-                  const std::vector<float>& host_node_cap,
-                  const std::vector<uint8_t>& host_includes_pin_caps,
-                  int num_nets,
-                  int num_nodes,
-                  int num_edges){
+void GPUTimer::initialize_dmp_rc_explicit(HostRcGraph& graph){
     const bool profile = dmp_rc_profile_enabled();
-    DmpRcPhaseProfile init_profile("DMP_RC_INIT_WRAPPER", profile);
+    StageProfiler init_profile("DMP_RC_INIT_WRAPPER", profile, stderr);
     const float rc_time_factor = (res_unit * cap_unit) / time_unit();
     logger.info("DMP explicit RC time scale: res_unit=%.5E cap_unit=%.5E time_unit=%.5E factor=%.5E",
                 res_unit, cap_unit, time_unit(), rc_time_factor);
     h_dmp_db = new DmpModel(this);
-    h_dmp_db -> initialize_rc_explicit(host_edge_from,
-                                       host_edge_to,
-                                       host_flat_net2node_start_map,
-                                       host_flat_net2edge_start_map,
-                                       host_node2pin_map,
-                                       host_edge_res,
-                                       host_node_cap,
-                                       host_includes_pin_caps,
-                                       pinCap,
-                                       num_nets,
-                                       num_nodes,
-                                       num_edges);
-    init_profile.log("initialize_model");
-    if (num_edges > 0 && rc_time_factor != 1.0f) {
+    h_dmp_db -> initialize_rc_explicit(graph, pinCap);
+    init_profile.mark("initialize_model");
+    if (graph.num_edges > 0 && rc_time_factor != 1.0f) {
         constexpr int threads = 256;
-        const int blocks = (num_edges + threads - 1) / threads;
+        const int blocks = (graph.num_edges + threads - 1) / threads;
         clear_stale_cuda_error("scale_explicit_edge_res");
-        scale_explicit_edge_res_kernel<<<blocks, threads>>>(h_dmp_db->edge_res, num_edges, rc_time_factor);
+        scale_explicit_edge_res_kernel<<<blocks, threads>>>(h_dmp_db->edge_res, graph.num_edges, rc_time_factor);
         gpuErrchk(cudaPeekAtLastError());
         gpuErrchk(cudaDeviceSynchronize());
     }
-    init_profile.log("scale_edge_res");
+        init_profile.mark("scale_edge_res");
     dmp_rc_cuda_malloc_checked(&dmp_db, 1, "dmp_db");
     dmp_rc_cuda_memcpy_checked(dmp_db, h_dmp_db, sizeof(DmpModel), cudaMemcpyHostToDevice, "dmp_db");
-    init_profile.log("copy_model_descriptor");
+    init_profile.mark("copy_model_descriptor");
    
 }
 

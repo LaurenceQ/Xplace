@@ -1,6 +1,7 @@
 #include "gputimer/db/GTDatabase.h"
 #include "gputimer/db/sdc/SdcUtils.h"
 
+#include "common/XplaceLog.h"
 #include "common/common.h"
 #include "common/db/Cell.h"
 #include "common/db/Database.h"
@@ -50,9 +51,15 @@ void GTDatabase::_read_sdc(sdc::SetUnits& obj) {
         if (s == "MOhm") sdc_res_unit = 1e6;
     }
     if (gputimer_env_enabled("GPUTIMER_VERBOSE_SDC_UNITS")) {
-        if (sdc_time_unit.has_value()) printf("sdc time unit: %.2E\n", *sdc_time_unit);
-        if (sdc_cap_unit.has_value()) printf("sdc capacitance unit: %.2E\n", *sdc_cap_unit);
-        if (sdc_res_unit.has_value()) printf("sdc resistance unit: %.2E\n", *sdc_res_unit);
+        if (sdc_time_unit.has_value()) {
+            XPLACE_DEBUGF("GPUTIMER_VERBOSE_SDC_UNITS", "time_unit=%.2E", *sdc_time_unit);
+        }
+        if (sdc_cap_unit.has_value()) {
+            XPLACE_DEBUGF("GPUTIMER_VERBOSE_SDC_UNITS", "capacitance_unit=%.2E", *sdc_cap_unit);
+        }
+        if (sdc_res_unit.has_value()) {
+            XPLACE_DEBUGF("GPUTIMER_VERBOSE_SDC_UNITS", "resistance_unit=%.2E", *sdc_res_unit);
+        }
     }
 }
 
@@ -184,10 +191,9 @@ void GTDatabase::_read_sdc(sdc::SetDrivingCell& obj) {
 
             const int port_id = liberty_cell->get_port(*obj.pin);
             if (port_id < 0 || port_id >= static_cast<int>(liberty_cell->ports_.size())) {
-                if (gputimer_env_enabled("GPUTIMER_VERBOSE_SDC_WARNINGS")) {
-                    std::fprintf(stderr, "%s: pin %s not found in lib_cell %s\n",
-                                 obj.command, obj.pin->c_str(), obj.lib_cell->c_str());
-                }
+                XPLACE_DEBUGF("GPUTIMER_VERBOSE_SDC_WARNINGS",
+                              "%s: pin %s not found in lib_cell %s",
+                              obj.command, obj.pin->c_str(), obj.lib_cell->c_str());
                 continue;
             }
 
@@ -218,10 +224,9 @@ void GTDatabase::_read_sdc(sdc::SetDrivingCell& obj) {
             }
 
             if (!selected_arc) {
-                if (gputimer_env_enabled("GPUTIMER_VERBOSE_SDC_WARNINGS")) {
-                    std::fprintf(stderr, "%s: no transition arc found for %s/%s attr %d\n",
-                                 obj.command, obj.lib_cell->c_str(), obj.pin->c_str(), attr);
-                }
+                XPLACE_DEBUGF("GPUTIMER_VERBOSE_SDC_WARNINGS",
+                              "%s: no transition arc found for %s/%s attr %d",
+                              obj.command, obj.lib_cell->c_str(), obj.pin->c_str(), attr);
                 continue;
             }
 

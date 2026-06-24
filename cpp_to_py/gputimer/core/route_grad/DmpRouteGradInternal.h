@@ -86,6 +86,7 @@ void reverse_active_at_to_elmore(const GPUTimer& timer,
                                  std::vector<double>& bar_root_c1,
                                  std::vector<double>& bar_root_c2,
                                  std::vector<double>& bar_root_rpi);
+bool graph_includes_pin_caps(const HostRcGraph& graph, int net_id);
 
 double node_cap_with_optional_pin(const GPUTimer& timer,
                                   const HostRcGraph& graph,

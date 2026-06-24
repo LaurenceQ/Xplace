@@ -2,6 +2,7 @@
 
 #include "gputimer/core/GPUTimer.h"
 #include "common/utils/utils.h"
+#include "common/StageProfiler.h"
 #include "common/db/Cell.h"
 #include "common/db/Database.h"
 #include "common/db/Geometry.h"
@@ -85,7 +86,7 @@ struct RouteSegmentCacheMeta {
     std::int64_t source_mtime = 0;
 };
 
-struct LocalSpefNetRc {
+struct LocalRcNetGraph {
     std::vector<int> edge_from;
     std::vector<int> edge_to;
     std::vector<float> edge_res;
@@ -106,7 +107,7 @@ struct FlatLocalAdjacency {
 using OpenroadRouteNodeMap =
     std::unordered_map<OpenroadRoutePtKey, int, OpenroadRoutePtKeyHash>;
 
-struct OpenroadGrRcBuildStats {
+struct OpenroadGrRcBuildCounts {
     int parsed_nets = 0;
     int missing_nets = 0;
     int unknown_nets = 0;
@@ -125,7 +126,7 @@ struct OpenroadGrRcBuildStats {
     int pin_net_mismatches = 0;
 };
 
-struct OpenroadRouteSegmentsBuildStats {
+struct OpenroadRouteSegmentsBuildCounts {
     int parsed_nets = 0;
     int missing_nets = 0;
     int unknown_nets = 0;
@@ -146,6 +147,32 @@ struct OpenroadRouteSegmentsBuildStats {
     int skipped_loop_edges = 0;
     int skipped_missing_high_fanout_nets = 0;
     long long skipped_missing_high_fanout_pins = 0;
+
+    void mergeParseCounts(const OpenroadRouteSegmentsBuildCounts& other)
+    {
+        segment_rows += other.segment_rows;
+        wire_segments += other.wire_segments;
+        via_segments += other.via_segments;
+        malformed_rows += other.malformed_rows;
+        unknown_layers += other.unknown_layers;
+        non_manhattan_segments += other.non_manhattan_segments;
+        skipped_self_segments += other.skipped_self_segments;
+    }
+
+    void mergeFinalizeCounts(const OpenroadRouteSegmentsBuildCounts& other)
+    {
+        missing_nets += other.missing_nets;
+        missing_driver_nodes += other.missing_driver_nodes;
+        missing_net_pins += other.missing_net_pins;
+        fallback_net_pins += other.fallback_net_pins;
+        pin_stub_edges += other.pin_stub_edges;
+        skipped_missing_unconnected_nets += other.skipped_missing_unconnected_nets;
+        skipped_missing_unconnected_pins += other.skipped_missing_unconnected_pins;
+        skipped_missing_high_fanout_nets += other.skipped_missing_high_fanout_nets;
+        skipped_missing_high_fanout_pins += other.skipped_missing_high_fanout_pins;
+        repaired_edges += other.repaired_edges;
+        skipped_loop_edges += other.skipped_loop_edges;
+    }
 };
 
 struct OpenroadInferredGrid {
@@ -241,28 +268,28 @@ void set_attr_cap(std::vector<float>& node_cap, int node, float cap);
 void set_attr_cap(std::vector<float>& node_cap, int node, int attr, float cap);
 float pin_cap_attr_host(const GTDatabase& gtdb, int pin, int attr);
 std::string openroad_gr_edge_key(int from, int to, const std::string& res_id);
-void ensure_local_node(LocalSpefNetRc& local, int node_id);
+void ensure_local_node(LocalRcNetGraph& local, int node_id);
 std::string spef_upper(std::string value);
 bool spef_includes_pin_caps_from_design_flow(const std::string& design_flow);
-int count_tree_edges_from_root(const LocalSpefNetRc& local);
-FlatLocalAdjacency build_flat_local_adjacency(const LocalSpefNetRc& local);
-int prune_to_rooted_tree(LocalSpefNetRc& local);
-int append_blank_node(LocalSpefNetRc& local,
-                      int pin_id,
-                      const std::string& name,
-                      const OpenroadRoutePt& route_pt,
-                      bool keep_route_node_names);
-int append_pin_node(LocalSpefNetRc& local,
+int count_tree_edges_from_root(const LocalRcNetGraph& local);
+FlatLocalAdjacency build_flat_local_adjacency(const LocalRcNetGraph& local);
+int prune_to_rooted_tree(LocalRcNetGraph& local);
+int append_local_rc_node(LocalRcNetGraph& local,
+                         int pin_id,
+                         const std::string& name,
+                         const OpenroadRoutePt& route_pt,
+                         bool keep_route_node_names);
+int append_pin_node(LocalRcNetGraph& local,
                     int pin_id,
                     const std::vector<std::string>& pin_names,
                     bool keep_route_node_names);
 int append_route_node(int net_idx,
                       const OpenroadRoutePtKey& key,
-                      std::vector<std::unique_ptr<LocalSpefNetRc>>& local_nets,
+                      std::vector<std::unique_ptr<LocalRcNetGraph>>& local_nets,
                       std::vector<std::unique_ptr<OpenroadRouteNodeMap>>& route_node_maps,
                       bool keep_route_node_names);
-void add_edge(LocalSpefNetRc& local, int from, int to, float res);
-void reorder_root(LocalSpefNetRc& local, int root_node);
+void add_edge(LocalRcNetGraph& local, int from, int to, float res);
+void reorder_root(LocalRcNetGraph& local, int root_node);
 
 bool route_point_matches(const OpenroadRoutePt& pt, const OpenroadRoutePtKey& key);
 int openroad_layer_track_spacing(const db::Layer& layer);
@@ -286,7 +313,7 @@ OpenroadInferredGrid infer_openroad_route_grid_from_stats(
     const db::Database& rawdb,
     int fallback_tile_size);
 OpenroadInferredGrid infer_openroad_route_grid(
-    const std::vector<std::unique_ptr<LocalSpefNetRc>>& local_nets,
+    const std::vector<std::unique_ptr<LocalRcNetGraph>>& local_nets,
     const db::Database& rawdb,
     int fallback_tile_size,
     int threads);

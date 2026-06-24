@@ -4,6 +4,7 @@
 #include "gputimer/core/power/common/PowerHostCommon.h"
 #include "gputimer/core/power/common/PowerActivityHostUtils.h"
 #include "gputimer/core/power/activity_cpu/PowerActivityCpuDebug.h"
+#include "common/XplaceLog.h"
 #include "common/db/Cell.h"
 #include "common/db/Database.h"
 #include "common/db/Net.h"
@@ -73,8 +74,8 @@ torch::Tensor GPUTimer::report_power_activity_cpu() {
     const char* trace_path_file_env = std::getenv("XPLACE_POWER_TRACE_PATH_FILE");
     const char* trace_path_out_env = std::getenv("XPLACE_POWER_TRACE_PATH_OUT");
     const char* activity_path_trace_env = std::getenv("XPLACE_POWER_ACTIVITY_PATH_TRACE_FILE");
-    PowerTracePathState path_trace =
-        loadPowerTracePathState(trace_path_file_env, activity_path_trace_env, pin_to_node);
+    PowerTracePathWriter path_trace =
+        loadPowerTracePathWriter(trace_path_file_env, activity_path_trace_env, pin_to_node);
     int path_trace_pass = 0;
     std::string path_trace_level_tag = "seed";
     auto path_trace_hit = [&](int pin_id, int arc_id) -> bool {
@@ -183,14 +184,11 @@ torch::Tensor GPUTimer::report_power_activity_cpu() {
             return nanf("");
         LibertyPort* port = cell->ports_[port_offset];
         if (!port || !port->is_clock_) return nanf("");
-        const int idx = pin_id * NUM_ATTR + attr;
-        if (idx < 0 || idx >= static_cast<int>(gtdb.pin_clock_slews.size()))
-            return nanf("");
-        return gtdb.pin_clock_slews[idx];
+        return gtdb.ClockSlewForPin(pin_id, attr);
     };
     auto max_activity_density_for_pin = [&](int pin_id) -> float {
         float max_density = std::numeric_limits<float>::infinity();
-        if ((pin_slew_host || !gtdb.pin_clock_slews.empty()) && pin_id >= 0 && pin_id < n
+        if ((pin_slew_host || !gtdb.clock_slews.empty()) && pin_id >= 0 && pin_id < n
             && gtdb.time_unit > 0.0f) {
             float min_rf_slew = std::numeric_limits<float>::infinity();
             for (int attr = 0; attr + 1 < NUM_ATTR; attr += 2) {
@@ -252,16 +250,17 @@ torch::Tensor GPUTimer::report_power_activity_cpu() {
         act[pin_id].duty = duty_clamped;
         act[pin_id].origin = origin;
         if (trace_matches(pin_id)) {
-            std::cerr << "[power_activity_trace_set] pin=" << gtdb.pin_names[pin_id]
-                      << " level=" << pin_level[pin_id]
-                      << " prev_density=" << prev_density
-                      << " prev_duty=" << prev_duty
-                      << " density=" << density_clamped
-                      << " duty=" << duty_clamped
-                      << " origin=" << origin
-                      << " changed=" << changed
-                      << " enqueue=" << (changed && enqueue_on_change)
-                      << std::endl;
+            XPLACE_ERRORF("power_activity_trace_set",
+                          "pin=%s level=%d prev_density=%.9e prev_duty=%.9e density=%.9e duty=%.9e origin=%d changed=%d enqueue=%d",
+                          gtdb.pin_names[pin_id].c_str(),
+                          pin_level[pin_id],
+                          prev_density,
+                          prev_duty,
+                          density_clamped,
+                          duty_clamped,
+                          origin,
+                          changed ? 1 : 0,
+                          changed && enqueue_on_change ? 1 : 0);
         }
         emit_path_trace("set_activity", -1, -1, pin_id,
                         prev_density, prev_duty,
@@ -731,13 +730,14 @@ torch::Tensor GPUTimer::report_power_activity_cpu() {
                     if (driver_pin >= 0 && driver_pin < n && driver_pin != pin_id
                         && act[driver_pin].origin != 0) {
                         if (trace_matches(pin_id)) {
-                            std::cerr << "[power_activity_trace_net_sink] sink=" << gtdb.pin_names[pin_id]
-                                      << " from=" << gtdb.pin_names[driver_pin]
-                                      << " driver_level=" << pin_level[driver_pin]
-                                      << " sink_level=" << pin_level[pin_id]
-                                      << " density=" << act[driver_pin].density
-                                      << " duty=" << act[driver_pin].duty
-                                      << std::endl;
+                            XPLACE_ERRORF("power_activity_trace_net_sink",
+                                          "sink=%s from=%s driver_level=%d sink_level=%d density=%.9e duty=%.9e",
+                                          gtdb.pin_names[pin_id].c_str(),
+                                          gtdb.pin_names[driver_pin].c_str(),
+                                          pin_level[driver_pin],
+                                          pin_level[pin_id],
+                                          act[driver_pin].density,
+                                          act[driver_pin].duty);
                         }
                         emit_path_trace("net_sink", -1, driver_pin, pin_id,
                                         act[pin_id].density, act[pin_id].duty,
@@ -860,10 +860,9 @@ torch::Tensor GPUTimer::report_power_activity_cpu() {
         if (!std::getenv("XPLACE_POWER_ACTIVITY_TRACE_REGS")) return;
         for (int node_id : pending_regs) {
             if (node_id < 0 || node_id >= static_cast<int>(gtdb.gpdb.getNodes().size())) continue;
-            std::cerr << "[power_activity_reg] pass=" << pass
-                      << " node=" << node_id
-                      << " inst=" << gtdb.gpdb.getNodes()[node_id].getName()
-                      << std::endl;
+            XPLACE_ERRORF("power_activity_reg",
+                          "pass=%d node=%d inst=%s",
+                          pass, node_id, gtdb.gpdb.getNodes()[node_id].getName().c_str());
         }
     };
     auto emit_trace = [&](const char* tag, int pass, size_t pending_count) {
@@ -875,24 +874,27 @@ torch::Tensor GPUTimer::report_power_activity_cpu() {
             const bool node_pending = node_id >= 0 && node_id < static_cast<int>(pending_reg_flag.size()) &&
                                       pending_reg_flag[node_id];
             const bool cell_seq = get_cell(node_id) && !get_cell(node_id)->sequentials_.empty();
-            std::cerr << "[power_activity_trace_cpu] tag=" << tag
-                      << " pass=" << pass
-                      << " pending=" << pending_count
-                      << " pin_id=" << pin_id
-                      << " pin=" << gtdb.pin_names[pin_id]
-                      << " density=" << act[pin_id].density
-                      << " duty=" << act[pin_id].duty
-                      << " origin=" << act[pin_id].origin
-                      << " first_nonzero=" << (first_nonzero ? 1 : 0)
-                      << " is_load=" << static_cast<int>(is_load_pin[pin_id])
-                      << " is_driver=" << static_cast<int>(is_driver_pin[pin_id])
-                      << " node=" << node_id
-                      << " node_pending=" << (node_pending ? 1 : 0)
-                      << " cell_seq=" << (cell_seq ? 1 : 0);
-            if (node_id >= 0 && node_id < static_cast<int>(gtdb.gpdb.getNodes().size())) {
-                std::cerr << " inst=" << gtdb.gpdb.getNodes()[node_id].getName();
-            }
-            std::cerr << std::endl;
+            const std::string inst_name =
+                (node_id >= 0 && node_id < static_cast<int>(gtdb.gpdb.getNodes().size()))
+                    ? gtdb.gpdb.getNodes()[node_id].getName()
+                    : "";
+            XPLACE_ERRORF("power_activity_trace_cpu",
+                          "tag=%s pass=%d pending=%zu pin_id=%d pin=%s density=%.9e duty=%.9e origin=%d first_nonzero=%d is_load=%d is_driver=%d node=%d node_pending=%d cell_seq=%d inst=%s",
+                          tag,
+                          pass,
+                          pending_count,
+                          pin_id,
+                          gtdb.pin_names[pin_id].c_str(),
+                          act[pin_id].density,
+                          act[pin_id].duty,
+                          act[pin_id].origin,
+                          first_nonzero ? 1 : 0,
+                          static_cast<int>(is_load_pin[pin_id]),
+                          static_cast<int>(is_driver_pin[pin_id]),
+                          node_id,
+                          node_pending ? 1 : 0,
+                          cell_seq ? 1 : 0,
+                          inst_name.c_str());
         }
     };
     std::ofstream activity_snapshot_csv;

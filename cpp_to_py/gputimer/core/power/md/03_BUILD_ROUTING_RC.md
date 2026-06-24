@@ -67,7 +67,7 @@ Python worker
               build net name index
               resolve timer pins to rawdb pins
               scan route blocks
-              parse route rows into LocalSpefNetRc
+              parse route rows into LocalRcNetGraph
               infer route grid
               attach pins / stubs
               root by driver, repair disconnected nodes, prune to rooted tree
@@ -245,7 +245,7 @@ struct HostRcGraph {
 | `openroad/OpenroadRcCache.cpp` | route segment graph cache metadata、binary I/O、design signature。 |
 | `openroad/OpenroadRcParse.cpp` | name alias、token/int/layer/row parser。 |
 | `openroad/OpenroadRcGeometry.cpp` | route grid、track spacing、gcell tile、grid origin 推断。 |
-| `openroad/OpenroadRcGraphUtil.cpp` | LocalSpefNetRc node/edge helper、root reorder、repair/prune。 |
+| `openroad/OpenroadRcGraphUtil.cpp` | LocalRcNetGraph node/edge helper、root reorder、repair/prune。 |
 | `openroad/OpenroadRcPin.cpp` | timer pin 到 rawdb pin 解析，以及 pin route location。 |
 | `openroad/OpenroadRouteSegmentsBuilder.cpp` | saved route segment parser 和 HostRcGraph materialization。 |
 
@@ -507,7 +507,7 @@ materialize：
 prefix sum net_node_count -> graph.net2node_start
 prefix sum net_edge_count -> graph.net2edge_start
 resize graph edge/node vectors
-parallel copy each LocalSpefNetRc into global HostRcGraph
+parallel copy each LocalRcNetGraph into global HostRcGraph
   global edge node id = node_base + local node id
   graph.edge_res copies contiguous range
   graph.node2pin copies contiguous range

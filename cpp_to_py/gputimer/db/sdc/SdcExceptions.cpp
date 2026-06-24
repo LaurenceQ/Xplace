@@ -40,9 +40,10 @@ void GTDatabase::_read_sdc(sdc::SetCaseAnalysis& obj) {
             pin_case_values[pin_id] = case_value;
         }
     };
-    std::visit(Functors{[&](sdc::GetPorts& get_ports) {
-                            for (auto& port : get_ports.ports) {
-                                if (auto itr = primary_input2pin_id.find(port); itr != primary_input2pin_id.end()) {
+    std::visit(Functors{[&](const sdc::GetPorts& get_ports) {
+                            for (const auto& port : get_ports.ports) {
+                                if (auto itr = primary_input2pin_id.find(port);
+                                    itr != primary_input2pin_id.end()) {
                                     apply_pin(itr->second);
                                     for (int attr = 0; attr < NUM_ATTR; ++attr) {
                                         hostPinAT(itr->second, attr) = nanf("");
@@ -50,9 +51,10 @@ void GTDatabase::_read_sdc(sdc::SetCaseAnalysis& obj) {
                                 }
                             }
                         },
-                        [&](sdc::GetPins& get_pins) {
-                            for (auto& pin_name : get_pins.pins) {
-                                if (auto itr = pin_name2pin_id.find(pin_name); itr != pin_name2pin_id.end()) {
+                        [&](const sdc::GetPins& get_pins) {
+                            for (const auto& pin_name : get_pins.pins) {
+                                if (auto itr = pin_name2pin_id.find(pin_name);
+                                    itr != pin_name2pin_id.end()) {
                                     apply_pin(itr->second);
                                 }
                             }
@@ -60,6 +62,7 @@ void GTDatabase::_read_sdc(sdc::SetCaseAnalysis& obj) {
                         [](auto&&) {}},
                *obj.port_pin_list);
 }
+
 void GTDatabase::_read_sdc(sdc::SetFalsePath& obj) {
     if (!obj.from) {
         return;

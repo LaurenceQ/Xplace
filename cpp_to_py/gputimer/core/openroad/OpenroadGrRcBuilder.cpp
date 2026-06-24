@@ -30,10 +30,10 @@ HostRcGraph GPUTimer::build_openroad_gr_rc(const std::string& file) {
         add_gr_name_alias(global_pin_name_to_id, gtdb.pin_names[i], i);
     }
 
-    std::vector<LocalSpefNetRc> parsed_nets(num_nets);
+    std::vector<LocalRcNetGraph> parsed_nets(num_nets);
     std::vector<std::unordered_map<std::string, int>> edge_key_to_id(num_nets);
     std::vector<uint8_t> parsed_net(num_nets, 0);
-    OpenroadGrRcBuildStats stats;
+    OpenroadGrRcBuildCounts counts;
     std::vector<std::vector<std::string>> rows;
     std::vector<std::string> gr_corners;
     std::unordered_map<std::string, int> gr_corner_order;
@@ -91,14 +91,14 @@ HostRcGraph GPUTimer::build_openroad_gr_rc(const std::string& file) {
 
         const int net_idx = resolve_net(fields[2]);
         if (net_idx < 0 || net_idx >= num_nets) {
-            stats.unknown_nets++;
+            counts.unknown_nets++;
             continue;
         }
         if (!parsed_net[net_idx]) {
             parsed_net[net_idx] = 1;
-            stats.parsed_nets++;
+            counts.parsed_nets++;
         }
-        LocalSpefNetRc& local = parsed_nets[net_idx];
+        LocalRcNetGraph& local = parsed_nets[net_idx];
 
         if (tag == "NET") {
             continue;
@@ -106,14 +106,14 @@ HostRcGraph GPUTimer::build_openroad_gr_rc(const std::string& file) {
 
         if (tag == "NODE") {
             if (fields.size() < 10) {
-                stats.malformed_rows++;
+                counts.malformed_rows++;
                 continue;
             }
             int node_id = -1;
             float cap_f = 0.0f;
             if (!parse_int_field(fields[3], node_id) ||
                 !parse_float_field(fields[9], cap_f) || node_id < 0) {
-                stats.malformed_rows++;
+                counts.malformed_rows++;
                 continue;
             }
             ensure_local_node(local, node_id);
@@ -129,23 +129,23 @@ HostRcGraph GPUTimer::build_openroad_gr_rc(const std::string& file) {
                 if (pin_id >= 0 && pin2net_map[pin_id] == net_idx) {
                     local.node2pin[node_id] = pin_id;
                 } else if (pin_id >= 0) {
-                    stats.pin_net_mismatches++;
+                    counts.pin_net_mismatches++;
                 } else if (!fields[5].empty()) {
-                    stats.unresolved_pin_nodes++;
+                    counts.unresolved_pin_nodes++;
                 }
             }
-            stats.node_rows++;
+            counts.node_rows++;
             continue;
         }
 
         if (tag == "PIN") {
             if (fields.size() < 5) {
-                stats.malformed_rows++;
+                counts.malformed_rows++;
                 continue;
             }
             int node_id = -1;
             if (!parse_int_field(fields[3], node_id) || node_id < 0) {
-                stats.malformed_rows++;
+                counts.malformed_rows++;
                 continue;
             }
             ensure_local_node(local, node_id);
@@ -154,35 +154,35 @@ HostRcGraph GPUTimer::build_openroad_gr_rc(const std::string& file) {
             if (pin_id >= 0 && pin2net_map[pin_id] == net_idx) {
                 local.node2pin[node_id] = pin_id;
             } else if (pin_id >= 0) {
-                stats.pin_net_mismatches++;
+                counts.pin_net_mismatches++;
             } else if (!fields[4].empty()) {
-                stats.unresolved_pin_nodes++;
+                counts.unresolved_pin_nodes++;
             }
-            stats.pin_rows++;
+            counts.pin_rows++;
             continue;
         }
 
         if (tag == "CAP") {
             if (fields.size() < 5) {
-                stats.malformed_rows++;
+                counts.malformed_rows++;
                 continue;
             }
             int node_id = -1;
             float cap_f = 0.0f;
             if (!parse_int_field(fields[3], node_id) ||
                 !parse_float_field(fields[4], cap_f) || node_id < 0) {
-                stats.malformed_rows++;
+                counts.malformed_rows++;
                 continue;
             }
             ensure_local_node(local, node_id);
             set_attr_cap(local.node_cap, node_id, cap_f / gtdb.cap_unit);
-            stats.cap_rows++;
+            counts.cap_rows++;
             continue;
         }
 
         if (tag == "RES") {
             if (fields.size() < 8) {
-                stats.malformed_rows++;
+                counts.malformed_rows++;
                 continue;
             }
             int from = -1;
@@ -192,13 +192,13 @@ HostRcGraph GPUTimer::build_openroad_gr_rc(const std::string& file) {
                 !parse_int_field(fields[6], to) ||
                 !parse_float_field(fields[7], res_ohm) ||
                 from < 0 || to < 0) {
-                stats.malformed_rows++;
+                counts.malformed_rows++;
                 continue;
             }
             ensure_local_node(local, from);
             ensure_local_node(local, to);
             if (from == to) {
-                stats.skipped_self_resistors++;
+                counts.skipped_self_resistors++;
                 continue;
             }
             auto& edge_map = edge_key_to_id[net_idx];
@@ -215,17 +215,18 @@ HostRcGraph GPUTimer::build_openroad_gr_rc(const std::string& file) {
                 edge_id = edge_iter->second;
             }
             local.edge_res[edge_id] = res_ohm / gtdb.res_unit;
-            stats.resistors++;
+            counts.resistors++;
             continue;
         }
     }
 
     HostRcGraph graph;
+    graph.num_nets = num_nets;
     graph.includes_pin_caps.assign(num_nets, 0);
     graph.net2node_start.emplace_back(0);
     graph.net2edge_start.emplace_back(0);
 
-    auto append_pin_node = [&](LocalSpefNetRc& local, int pin_id) {
+    auto append_pin_node = [&](LocalRcNetGraph& local, int pin_id) {
         const int node_id = static_cast<int>(local.node2pin.size());
         local.node2pin.emplace_back(pin_id);
         local.node_names.emplace_back(pin_id >= 0 &&
@@ -239,13 +240,13 @@ HostRcGraph GPUTimer::build_openroad_gr_rc(const std::string& file) {
     };
 
     for (int net_idx = 0; net_idx < num_nets; ++net_idx) {
-        LocalSpefNetRc local;
+        LocalRcNetGraph local;
         const int pin_begin = flat_net2pin_start_map[net_idx];
         const int pin_end = flat_net2pin_start_map[net_idx + 1];
         const int driver_pin = pin_begin < pin_end ? flat_net2pin_map[pin_begin] : -1;
 
         if (parsed_net[net_idx] && driver_pin >= 0) {
-            const LocalSpefNetRc& source = parsed_nets[net_idx];
+            const LocalRcNetGraph& source = parsed_nets[net_idx];
             std::vector<int> old_to_new(source.node2pin.size(), -1);
             int driver_old_node = -1;
             for (int node = 0; node < static_cast<int>(source.node2pin.size()); ++node) {
@@ -269,7 +270,7 @@ HostRcGraph GPUTimer::build_openroad_gr_rc(const std::string& file) {
                 append_old_node(driver_old_node);
             } else {
                 append_pin_node(local, driver_pin);
-                stats.missing_driver_nodes++;
+                counts.missing_driver_nodes++;
             }
 
             for (int old_node = 0; old_node < static_cast<int>(source.node2pin.size()); ++old_node) {
@@ -289,7 +290,7 @@ HostRcGraph GPUTimer::build_openroad_gr_rc(const std::string& file) {
                 const int from = old_to_new[old_from];
                 const int to = old_to_new[old_to];
                 if (from < 0 || to < 0 || from == to) {
-                    stats.skipped_self_resistors++;
+                    counts.skipped_self_resistors++;
                     continue;
                 }
                 local.edge_from.emplace_back(from);
@@ -297,7 +298,7 @@ HostRcGraph GPUTimer::build_openroad_gr_rc(const std::string& file) {
                 local.edge_res.emplace_back(source.edge_res[edge]);
             }
         } else if (!parsed_net[net_idx]) {
-            stats.missing_nets++;
+            counts.missing_nets++;
         }
 
         if (local.node2pin.empty() && driver_pin >= 0) {
@@ -318,12 +319,12 @@ HostRcGraph GPUTimer::build_openroad_gr_rc(const std::string& file) {
                     local.edge_from.emplace_back(0);
                     local.edge_to.emplace_back(node);
                     local.edge_res.emplace_back(0.0f);
-                    stats.repaired_edges++;
+                    counts.repaired_edges++;
                 }
                 if (parsed_net[net_idx]) {
-                    stats.missing_net_pins++;
+                    counts.missing_net_pins++;
                 } else {
-                    stats.fallback_net_pins++;
+                    counts.fallback_net_pins++;
                 }
             }
         }
@@ -350,14 +351,14 @@ HostRcGraph GPUTimer::build_openroad_gr_rc(const std::string& file) {
                     local.edge_from.emplace_back(0);
                     local.edge_to.emplace_back(node);
                     local.edge_res.emplace_back(0.0f);
-                    stats.repaired_edges++;
+                    counts.repaired_edges++;
                 }
             }
         }
 
         const int skipped_loop_edges = prune_to_rooted_tree(local);
         if (skipped_loop_edges > 0) {
-            stats.skipped_loop_edges += skipped_loop_edges;
+            counts.skipped_loop_edges += skipped_loop_edges;
         }
 
         for (std::size_t edge = 0; edge < local.edge_from.size(); ++edge) {
@@ -378,38 +379,38 @@ HostRcGraph GPUTimer::build_openroad_gr_rc(const std::string& file) {
         graph.net2edge_start.emplace_back(graph.num_edges);
     }
 
-    graph.skipped_loop_edges = stats.skipped_loop_edges;
-    graph.repaired_edges = stats.repaired_edges;
+    graph.skipped_loop_edges = counts.skipped_loop_edges;
+    graph.repaired_edges = counts.repaired_edges;
 
     logger.info("OpenROAD GR RC graph: file=%s parsed_nets=%d missing_nets=%d unknown_nets=%d nodes=%d edges=%d",
-                file.c_str(), stats.parsed_nets,
-                stats.missing_nets, stats.unknown_nets, graph.num_nodes,
+                file.c_str(), counts.parsed_nets,
+                counts.missing_nets, counts.unknown_nets, graph.num_nodes,
                 graph.num_edges);
     logger.info("OpenROAD GR RC details: node_rows=%d pin_rows=%d cap_rows=%d resistors=%d self_res=%d unresolved_pin_nodes=%d pin_net_mismatches=%d missing_driver_nodes=%d missing_net_pins=%d fallback_net_pins=%d repaired_edges=%d loop_edges=%d malformed_rows=%d",
-                stats.node_rows, stats.pin_rows, stats.cap_rows, stats.resistors,
-                stats.skipped_self_resistors, stats.unresolved_pin_nodes,
-                stats.pin_net_mismatches, stats.missing_driver_nodes, stats.missing_net_pins,
-                stats.fallback_net_pins, stats.repaired_edges, stats.skipped_loop_edges,
-                stats.malformed_rows);
+                counts.node_rows, counts.pin_rows, counts.cap_rows, counts.resistors,
+                counts.skipped_self_resistors, counts.unresolved_pin_nodes,
+                counts.pin_net_mismatches, counts.missing_driver_nodes, counts.missing_net_pins,
+                counts.fallback_net_pins, counts.repaired_edges, counts.skipped_loop_edges,
+                counts.malformed_rows);
 
-    if (stats.unknown_nets > 0 || stats.malformed_rows > 0 ||
-        stats.skipped_self_resistors > 0 ||
-        stats.unresolved_pin_nodes > 0 || stats.pin_net_mismatches > 0 ||
-        stats.missing_driver_nodes > 0 || stats.missing_net_pins > 0) {
+    if (counts.unknown_nets > 0 || counts.malformed_rows > 0 ||
+        counts.skipped_self_resistors > 0 ||
+        counts.unresolved_pin_nodes > 0 || counts.pin_net_mismatches > 0 ||
+        counts.missing_driver_nodes > 0 || counts.missing_net_pins > 0) {
         std::ostringstream msg;
         msg << "OpenROAD GR RC dump cannot be used for semantic timing alignment: "
-            << "missing_nets=" << stats.missing_nets
-            << " unknown_nets=" << stats.unknown_nets
+            << "missing_nets=" << counts.missing_nets
+            << " unknown_nets=" << counts.unknown_nets
             << " "
-            << "malformed_rows=" << stats.malformed_rows
-            << " self_res=" << stats.skipped_self_resistors
-            << " unresolved_pin_nodes=" << stats.unresolved_pin_nodes
-            << " pin_net_mismatches=" << stats.pin_net_mismatches
-            << " missing_driver_nodes=" << stats.missing_driver_nodes
-            << " missing_net_pins=" << stats.missing_net_pins
-            << " fallback_net_pins=" << stats.fallback_net_pins
-            << " repaired_edges=" << stats.repaired_edges
-            << " loop_edges=" << stats.skipped_loop_edges
+            << "malformed_rows=" << counts.malformed_rows
+            << " self_res=" << counts.skipped_self_resistors
+            << " unresolved_pin_nodes=" << counts.unresolved_pin_nodes
+            << " pin_net_mismatches=" << counts.pin_net_mismatches
+            << " missing_driver_nodes=" << counts.missing_driver_nodes
+            << " missing_net_pins=" << counts.missing_net_pins
+            << " fallback_net_pins=" << counts.fallback_net_pins
+            << " repaired_edges=" << counts.repaired_edges
+            << " loop_edges=" << counts.skipped_loop_edges
             << ". Regenerate/check my_dump_gr_rc rather than accepting repaired RC.";
         throw std::runtime_error(msg.str());
     }

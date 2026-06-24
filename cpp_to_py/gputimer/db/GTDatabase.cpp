@@ -4,6 +4,7 @@
 #include "sdc/SdcUtils.h"
 
 #include "common/common.h"
+#include "common/StageProfiler.h"
 #include "common/db/Cell.h"
 #include "common/db/Database.h"
 #include "common/db/Pin.h"
@@ -15,9 +16,7 @@
 
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cmath>
-#include <cstdio>
 #include <cstdint>
 #include <cstdlib>
 #include <deque>
@@ -40,6 +39,13 @@ bool gputimer_env_enabled(const char* name);
 
 namespace {
 
+struct CellTimingArc {
+    int from_pin_id = -1;
+    int to_pin_id = -1;
+    int timing_id = -1;
+    bool el = false;
+    uint8_t is_test = 0;
+};
 
 bool is_clock_gating_check(const TimingArc* timing_arc) {
     if (timing_arc == nullptr || !timing_arc->is_constraint() ||
@@ -90,42 +96,8 @@ void release_sta_pin_storage(vector<STAPin*>& sta_pins) {
 
 bool extract_profile_enabled()
 {
-    const char* value = std::getenv("XPLACE_TIMER_PROFILE");
-    if (value == nullptr || value[0] == '\0') {
-        return false;
-    }
-    return !(value[0] == '0' ||
-             value[0] == 'f' || value[0] == 'F' ||
-             value[0] == 'n' || value[0] == 'N');
+    return xplace_env_enabled("XPLACE_TIMER_PROFILE");
 }
-
-
-class ExtractProfileTimer {
-public:
-    explicit ExtractProfileTimer(bool enabled)
-        : enabled_(enabled),
-          start_(std::chrono::steady_clock::now()),
-          last_(start_) {}
-
-    void log(const char* phase)
-    {
-        if (!enabled_) {
-            return;
-        }
-        auto now = std::chrono::steady_clock::now();
-        const double elapsed = std::chrono::duration<double>(now - last_).count();
-        const double total = std::chrono::duration<double>(now - start_).count();
-        std::fprintf(stdout, "[XPLACE_EXTRACT_PROFILE] phase=%s elapsed=%.3f total=%.3f\n",
-                     phase, elapsed, total);
-        std::fflush(stdout);
-        last_ = now;
-    }
-
-private:
-    bool enabled_ = false;
-    std::chrono::steady_clock::time_point start_;
-    std::chrono::steady_clock::time_point last_;
-};
 
 int positive_env_int(const char* name, int fallback)
 {
@@ -250,30 +222,358 @@ std::array<float, 18> dmp_library_threshold_key(const LibertyCell* min_cell,
     };
 }
 
-bool timing_sense_transition_possible(TimingSense sense, int8_t out_when_from_zero, int8_t out_when_from_one)
+std::pair<int, int> BuildNetCellArcAndTest(
+    GTDatabase& db,
+    int graph_threads,
+    vector<int>& net_arc_start,
+    vector<vector<CellTimingArc>>& local_cell_timing_arcs,
+    vector<int>& thread_cell_arc_start,
+    vector<int>& thread_cell_test_start)
 {
-    if (out_when_from_zero < 0 || out_when_from_one < 0) {
+    auto& rawdb = db.rawdb;
+    auto& gpdb = db.gpdb;
+    auto& pin_forward_arc_list_end = db.pin_forward_arc_list_end;
+    auto& pin_backward_arc_list_end = db.pin_backward_arc_list_end;
+    auto& cell_node_type_map = db.cell_node_type_map;
+    auto& liberty_timing_arcs = db.liberty_timing_arcs;
+    auto& liberty_cell_type2port_list_end = db.liberty_cell_type2port_list_end;
+    auto& pin_id2port_offset_id = db.pin_id2port_offset_id;
+    auto& liberty_port2timing_list_end = db.liberty_port2timing_list_end;
+    const int num_pins = db.num_pins;
+    const int num_nets = static_cast<int>(gpdb.getNets().size());
+    const int num_cells = static_cast<int>(rawdb.cells.size());
+
+    pin_forward_arc_list_end.assign(num_pins + 1, 0);
+    pin_backward_arc_list_end.assign(num_pins + 1, 0);
+    net_arc_start.assign(num_nets + 1, 0);
+#pragma omp parallel for num_threads(graph_threads) schedule(static)
+    for (int net_id = 0; net_id < num_nets; ++net_id) {
+        const auto& pins = gpdb.getNets()[net_id].pins();
+        if (pins.size() > 1) {
+            const int sink_count = static_cast<int>(pins.size()) - 1;
+            net_arc_start[net_id] = sink_count;
+            const int driver_pin_id = static_cast<int>(pins[0]);
+            if (driver_pin_id >= 0 && driver_pin_id < num_pins) {
+#pragma omp atomic update
+                pin_forward_arc_list_end[driver_pin_id] += sink_count;
+            }
+            for (index_type i = 1; i < static_cast<index_type>(pins.size()); ++i) {
+                const int sink_pin_id = static_cast<int>(pins[i]);
+                if (sink_pin_id >= 0 && sink_pin_id < num_pins) {
+#pragma omp atomic update
+                    pin_backward_arc_list_end[sink_pin_id]++;
+                }
+            }
+        }
+    }
+    const int num_net_arcs = prefix_sum_counts(net_arc_start, "net arcs", graph_threads);
+
+    auto valid_cell_timing_arc = [&](int gpdb_id,
+                                     Split el,
+                                     int timing_id,
+                                     int& from_pin_id,
+                                     int& to_pin_id,
+                                     bool& is_test) -> bool {
+        TimingArc* timing_arc = liberty_timing_arcs[timing_id];
+        if (db.is_redundant_timing(timing_arc, el)) {
+            return false;
+        }
+        from_pin_id = gpdb.getNodes()[gpdb_id].getPinbyPortName(timing_arc->from_port_->name);
+        to_pin_id = gpdb.getNodes()[gpdb_id].getPinbyPortName(timing_arc->to_port_->name);
+        if (from_pin_id < 0 || to_pin_id < 0) {
+            return false;
+        }
+        is_test = timing_arc->is_constraint() && !is_clock_gating_check(timing_arc);
         return true;
-    }
-    switch (sense) {
-        case TimingSense::positive_unate:
-            return out_when_from_zero == 0 && out_when_from_one == 1;
-        case TimingSense::negative_unate:
-            return out_when_from_zero == 1 && out_when_from_one == 0;
-        case TimingSense::non_unate:
-        case TimingSense::unknown:
-            return out_when_from_zero != out_when_from_one;
-    }
-    return true;
-}
+    };
 
-bool contains_int(const vector<int>& values, int target)
-{
-    return std::find(values.begin(), values.end(), target) != values.end();
+    cell_node_type_map.assign(gpdb.getNodes().size(), -1);
+    local_cell_timing_arcs.clear();
+    local_cell_timing_arcs.resize(graph_threads);
+    vector<int> local_cell_test_counts(graph_threads, 0);
+#pragma omp parallel num_threads(graph_threads)
+    {
+        const int tid = omp_get_thread_num();
+        const int start = (num_cells * tid) / graph_threads;
+        const int end = (num_cells * (tid + 1)) / graph_threads;
+        auto& thread_cell_timing_arcs = local_cell_timing_arcs[tid];
+        int thread_cell_test_count = 0;
+        for (int cell_idx = start; cell_idx < end; ++cell_idx) {
+            db::Cell* dbcell = rawdb.cells[cell_idx];
+            if (dbcell == nullptr || dbcell->ctype() == nullptr) continue;
+            const int gpdb_id = dbcell->gpdb_id;
+            const int libcell_id = dbcell->ctype()->libcell();
+            if (libcell_id < 0 || !dbcell->ctype()->liberty_cell ||
+                gpdb_id < 0 || gpdb_id >= static_cast<int>(gpdb.getNodes().size())) {
+                continue;
+            }
+            cell_node_type_map[gpdb_id] = libcell_id;
+            for_each_el(el) {
+                for (int pin_id : gpdb.getNodes()[gpdb_id].pins()) {
+                    int pin_id2port_start = liberty_cell_type2port_list_end[libcell_id];
+                    int pin_id2port_offset = pin_id2port_offset_id[pin_id];
+                    int port_id = pin_id2port_start + pin_id2port_offset;
+                    const int timing_start = liberty_port2timing_list_end[2 * port_id + el];
+                    const int timing_end = liberty_port2timing_list_end[2 * port_id + el + 1];
+                    for (int timing_id = timing_start; timing_id < timing_end; ++timing_id) {
+                        int from_pin_id = -1;
+                        int to_pin_id = -1;
+                        bool is_test = false;
+                        if (!valid_cell_timing_arc(gpdb_id, el, timing_id,
+                                                   from_pin_id, to_pin_id, is_test)) {
+                            continue;
+                        }
+                        thread_cell_timing_arcs.push_back(CellTimingArc{
+                            from_pin_id,
+                            to_pin_id,
+                            timing_id,
+                            el == MAX,
+                            static_cast<uint8_t>(is_test ? 1 : 0)});
+                        if (from_pin_id >= 0 && from_pin_id < num_pins) {
+#pragma omp atomic update
+                            pin_forward_arc_list_end[from_pin_id]++;
+                        }
+                        if (to_pin_id >= 0 && to_pin_id < num_pins) {
+#pragma omp atomic update
+                            pin_backward_arc_list_end[to_pin_id]++;
+                        }
+                        if (is_test) {
+                            ++thread_cell_test_count;
+                        }
+                    }
+                }
+            }
+        }
+        local_cell_test_counts[tid] = thread_cell_test_count;
+    }
+    thread_cell_arc_start.assign(graph_threads + 1, 0);
+    thread_cell_test_start.assign(graph_threads + 1, 0);
+    for (int tid = 0; tid < graph_threads; ++tid) {
+        if (local_cell_timing_arcs[tid].size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+            throw std::runtime_error("Timing graph cell arcs exceed int index range");
+        }
+        thread_cell_arc_start[tid] = static_cast<int>(local_cell_timing_arcs[tid].size());
+        thread_cell_test_start[tid] = local_cell_test_counts[tid];
+    }
+    const int num_cell_arcs = prefix_sum_counts(thread_cell_arc_start, "cell arcs", graph_threads);
+    const int num_tests = prefix_sum_counts(thread_cell_test_start, "test arcs", graph_threads);
+    return {num_net_arcs + num_cell_arcs, num_tests};
 }
-
 
 }  // namespace
+
+void GTDatabase::AllocatePinArcListStorage(
+    int graph_threads,
+    vector<index_type>& pin_forward_arc_cursor,
+    vector<index_type>& pin_backward_arc_cursor)
+{
+    timing_arc_from_pin_id.assign(num_arcs, -1);
+    timing_arc_to_pin_id.assign(num_arcs, -1);
+    timing_arc_id_map.assign(static_cast<size_t>(num_arcs) * 2u, -1);
+    arc_types.assign(num_arcs, 0);
+    arc_id2test_id.assign(num_arcs, -1);
+    test_id2_arc_id.assign(num_tests, -1);
+
+    const int fanout_total = prefix_sum_counts(pin_forward_arc_list_end, "pin forward arcs", graph_threads);
+    const int fanin_total = prefix_sum_counts(pin_backward_arc_list_end, "pin backward arcs", graph_threads);
+    pin_fanout_list_end = pin_forward_arc_list_end;
+    total_num_fanouts = fanout_total;
+    pin_fanout_list.resize(fanout_total);
+    pin_forward_arc_list.resize(fanout_total);
+    pin_backward_arc_list.resize(fanin_total);
+
+    pin_forward_arc_cursor = pin_forward_arc_list_end;
+    pin_backward_arc_cursor = pin_backward_arc_list_end;
+}
+
+void GTDatabase::WriteNetArcList(
+    int graph_threads,
+    vector<int>& net_arc_start,
+    vector<index_type>& pin_forward_arc_cursor,
+    vector<index_type>& pin_backward_arc_cursor)
+{
+    const int num_nets = static_cast<int>(gpdb.getNets().size());
+#pragma omp parallel for num_threads(graph_threads) schedule(static)
+    for (int net_id = 0; net_id < num_nets; ++net_id) {
+        const auto& pins = gpdb.getNets()[net_id].pins();
+        if (pins.size() <= 1) {
+            continue;
+        }
+        const int driver_pin_id = static_cast<int>(pins[0]);
+        int arc_id = net_arc_start[net_id];
+        for (index_type i = 1; i < static_cast<index_type>(pins.size()); ++i, ++arc_id) {
+            const int sink_pin_id = static_cast<int>(pins[i]);
+            timing_arc_from_pin_id[arc_id] = driver_pin_id;
+            timing_arc_to_pin_id[arc_id] = sink_pin_id;
+            if (driver_pin_id >= 0 && driver_pin_id < num_pins) {
+                int pos = -1;
+#pragma omp atomic capture
+                {
+                    pos = pin_forward_arc_cursor[driver_pin_id];
+                    pin_forward_arc_cursor[driver_pin_id]++;
+                }
+                pin_forward_arc_list[pos] = arc_id;
+                pin_fanout_list[pos] = sink_pin_id;
+            }
+            if (sink_pin_id >= 0 && sink_pin_id < num_pins) {
+                int pos = -1;
+#pragma omp atomic capture
+                {
+                    pos = pin_backward_arc_cursor[sink_pin_id];
+                    pin_backward_arc_cursor[sink_pin_id]++;
+                }
+                pin_backward_arc_list[pos] = arc_id;
+            }
+        }
+    }
+    release_vector_storage(net_arc_start);
+}
+
+namespace {
+
+void WriteCellArcListAndTest(
+    GTDatabase& db,
+    int graph_threads,
+    int num_net_arcs,
+    vector<vector<CellTimingArc>>& local_cell_timing_arcs,
+    vector<int>& thread_cell_arc_start,
+    vector<int>& thread_cell_test_start,
+    vector<index_type>& pin_forward_arc_cursor,
+    vector<index_type>& pin_backward_arc_cursor)
+{
+    auto& timing_arc_from_pin_id = db.timing_arc_from_pin_id;
+    auto& timing_arc_to_pin_id = db.timing_arc_to_pin_id;
+    auto& timing_arc_id_map = db.timing_arc_id_map;
+    auto& arc_types = db.arc_types;
+    auto& arc_id2test_id = db.arc_id2test_id;
+    auto& test_id2_arc_id = db.test_id2_arc_id;
+    auto& pin_forward_arc_list = db.pin_forward_arc_list;
+    auto& pin_fanout_list = db.pin_fanout_list;
+    auto& pin_backward_arc_list = db.pin_backward_arc_list;
+    auto& pin_is_clk = db.pin_is_clk;
+    const int num_pins = db.num_pins;
+#pragma omp parallel num_threads(graph_threads)
+    {
+        const int tid = omp_get_thread_num();
+        const auto& thread_cell_timing_arcs = local_cell_timing_arcs[tid];
+        const int arc_base = num_net_arcs + thread_cell_arc_start[tid];
+        const int test_base = thread_cell_test_start[tid];
+        int thread_test_offset = 0;
+        for (int local_arc = 0; local_arc < static_cast<int>(thread_cell_timing_arcs.size()); ++local_arc) {
+            const CellTimingArc& entry = thread_cell_timing_arcs[local_arc];
+            const int arc_id = arc_base + local_arc;
+            timing_arc_from_pin_id[arc_id] = entry.from_pin_id;
+            timing_arc_to_pin_id[arc_id] = entry.to_pin_id;
+            timing_arc_id_map[arc_id * 2 + static_cast<int>(entry.el)] = entry.timing_id;
+            arc_types[arc_id] = 1;
+            if (entry.from_pin_id >= 0 && entry.from_pin_id < num_pins) {
+                int pos = -1;
+#pragma omp atomic capture
+                {
+                    pos = pin_forward_arc_cursor[entry.from_pin_id];
+                    pin_forward_arc_cursor[entry.from_pin_id]++;
+                }
+                pin_forward_arc_list[pos] = arc_id;
+                pin_fanout_list[pos] = entry.to_pin_id;
+            }
+            if (entry.to_pin_id >= 0 && entry.to_pin_id < num_pins) {
+                int pos = -1;
+#pragma omp atomic capture
+                {
+                    pos = pin_backward_arc_cursor[entry.to_pin_id];
+                    pin_backward_arc_cursor[entry.to_pin_id]++;
+                }
+                pin_backward_arc_list[pos] = arc_id;
+            }
+            if (entry.is_test != 0) {
+                const int test_id = test_base + thread_test_offset++;
+                arc_id2test_id[arc_id] = test_id;
+                test_id2_arc_id[test_id] = arc_id;
+                if (entry.from_pin_id >= 0 && entry.from_pin_id < num_pins) {
+#pragma omp atomic write
+                    pin_is_clk[entry.from_pin_id] = 1;
+                }
+            }
+        }
+    }
+    release_vector_storage(local_cell_timing_arcs);
+    release_vector_storage(thread_cell_arc_start);
+    release_vector_storage(thread_cell_test_start);
+    release_vector_storage(pin_forward_arc_cursor);
+    release_vector_storage(pin_backward_arc_cursor);
+}
+
+}  // namespace
+
+void GTDatabase::AppendTestEndpoints()
+{
+    for (int test_id = 0; test_id < num_tests; ++test_id) {
+        const int arc_id = test_id2_arc_id[test_id];
+        if (arc_id >= 0 && arc_id < num_arcs) {
+            endpoints_id.push_back(timing_arc_to_pin_id[arc_id]);
+        }
+    }
+}
+
+void GTDatabase::BuildPinFrontiers(int graph_threads)
+{
+    pin_frontiers.clear();
+    pin_num_fanin.assign(num_pins, 0);
+    std::vector<std::vector<index_type>> local_frontiers(graph_threads);
+#pragma omp parallel num_threads(graph_threads)
+    {
+        const int tid = omp_get_thread_num();
+        const int start = (num_pins * tid) / graph_threads;
+        const int end = (num_pins * (tid + 1)) / graph_threads;
+        auto& frontiers = local_frontiers[tid];
+        for (int pin_id = start; pin_id < end; ++pin_id) {
+            pin_num_fanin[pin_id] =
+                pin_backward_arc_list_end[pin_id + 1] - pin_backward_arc_list_end[pin_id];
+            if (pin_num_fanin[pin_id] == 0) frontiers.push_back(pin_id);
+        }
+    }
+    for (auto& frontiers : local_frontiers) {
+        pin_frontiers.insert(pin_frontiers.end(), frontiers.begin(), frontiers.end());
+    }
+}
+
+int GTDatabase::CountRegisterClockPins(int graph_threads) const
+{
+    int num_clk_pins = 0;
+#pragma omp parallel for num_threads(graph_threads) schedule(static) reduction(+:num_clk_pins)
+    for (int pin_id = 0; pin_id < num_pins; ++pin_id) {
+        num_clk_pins += pin_is_clk[pin_id] != 0 ? 1 : 0;
+    }
+    return num_clk_pins;
+}
+
+void GTDatabase::CompactEndpointPins()
+{
+    std::unordered_map<int, int> endpoint_pin_to_compact;
+    endpoint_pin_to_compact.reserve(endpoints_id.size());
+    endpoint_unique_pin_ids.clear();
+    auto compact_endpoint_id = [&](int pin_id) {
+        auto [iter, inserted] = endpoint_pin_to_compact.emplace(
+            pin_id,
+            static_cast<int>(endpoint_unique_pin_ids.size()));
+        if (inserted) {
+            endpoint_unique_pin_ids.push_back(pin_id);
+        }
+        return iter->second;
+    };
+    primary_output2_endpoint_id.clear();
+    primary_output2_endpoint_id.reserve(primary_outputs.size());
+    for (int pin_id : primary_outputs) {
+        primary_output2_endpoint_id.push_back(compact_endpoint_id(pin_id));
+    }
+    test_id2_endpoint_id.assign(test_id2_arc_id.size(), -1);
+    for (int test_id = 0; test_id < static_cast<int>(test_id2_arc_id.size()); ++test_id) {
+        const int arc_id = test_id2_arc_id[test_id];
+        if (arc_id >= 0 && arc_id < static_cast<int>(timing_arc_to_pin_id.size())) {
+            test_id2_endpoint_id[test_id] = compact_endpoint_id(timing_arc_to_pin_id[arc_id]);
+        }
+    }
+}
 
 bool GTDatabase::is_redundant_timing(const TimingArc* timing_arc, Split el) {
     if (timing_arc->from_port_->name == timing_arc->to_port_->name) return true;
@@ -329,9 +629,14 @@ GTDatabase::~GTDatabase() {
     logger.info("destruct gtdb");
 }
 
+void GTDatabase::MarkExtractProfile(const char* phase)
+{
+    if (extract_profile) {
+        extract_profile->mark(phase);
+    }
+}
 
-void GTDatabase::SetupThresholdAndFlattenLib(
-    const std::function<void(const char*)>& log_phase) {
+void GTDatabase::SetupThresholdAndFlattenLib() {
     res_unit = cell_libs_[MIN]->resistance_unit_->value();
     cap_unit = cell_libs_[MIN]->capacitance_unit_->value();
     time_unit = cell_libs_[MIN]->time_unit_->value();
@@ -374,9 +679,7 @@ void GTDatabase::SetupThresholdAndFlattenLib(
                 dmp_slew_derates[1],
                 dmp_slew_derates[2],
                 dmp_slew_derates[3]);
-    if (log_phase) {
-        log_phase("thresholds");
-    }
+    MarkExtractProfile("thresholds");
 
     //  Flatten Liberty Cell Timing
     std::map<std::array<float, 18>, int> dmp_library_id_by_thresholds;
@@ -460,14 +763,10 @@ void GTDatabase::SetupThresholdAndFlattenLib(
             }
         }
     }
-    if (log_phase) {
-        log_phase("flatten_liberty");
-    }
+    MarkExtractProfile("flatten_liberty");
 }
 
-vector<uint8_t> GTDatabase::SetPinMapAndTag(
-    int graph_threads,
-    const std::function<void(const char*)>& log_phase) {
+vector<uint8_t> GTDatabase::SetPinMapAndTag(int graph_threads) {
     std::map<std::array<float, 18>, int> dmp_library_id_by_thresholds;
     std::unordered_map<const LibertyCell*, int> dmp_library_id_by_cell;
     dmp_library_id_by_cell.reserve(rawdb.celltypes.size() * 2u);
@@ -506,9 +805,7 @@ vector<uint8_t> GTDatabase::SetPinMapAndTag(
         dmp_timing_library_ids[timing_id] =
             cached_cell != dmp_library_id_by_cell.end() ? cached_cell->second : -1;
     }
-    if (log_phase) {
-        log_phase("liberty_threshold_vectors");
-    }
+    MarkExtractProfile("liberty_threshold_vectors");
 
     //  Traverse Circuit Pins
     //
@@ -604,9 +901,7 @@ vector<uint8_t> GTDatabase::SetPinMapAndTag(
         }
     }
     pin_name_map_targets.clear();
-    if (log_phase) {
-        log_phase("pin_name_map");
-    }
+    MarkExtractProfile("pin_name_map");
     size_t primary_input_count = 0;
     size_t primary_output_count = 0;
     for (int tid = 0; tid < graph_threads; ++tid) {
@@ -638,421 +933,69 @@ vector<uint8_t> GTDatabase::SetPinMapAndTag(
         }
     }
     num_POs = primary_outputs.size();
-    if (log_phase) {
-        log_phase("set_pin_map_and_tag");
-    }
+    MarkExtractProfile("set_pin_map_and_tag");
     return primary_input_mask;
 }
 
 void GTDatabase::ExtractTimingGraph() {
-    ExtractProfileTimer extract_profile(extract_profile_enabled());
+    extract_profile = std::make_unique<StageProfiler>("XPLACE_EXTRACT_PROFILE", extract_profile_enabled(), stdout);
     const int graph_threads = graph_thread_count(timing_raw_db.num_threads);
     logger.info("Timing graph extraction threads: %d", graph_threads);
-    SetupThresholdAndFlattenLib(
-        [&](const char* phase) { extract_profile.log(phase); });
-    vector<uint8_t> primary_input_mask = SetPinMapAndTag(
+    SetupThresholdAndFlattenLib();
+    SetPinMapAndTag(graph_threads);
+
+    vector<int> net_arc_start;
+    vector<vector<CellTimingArc>> local_cell_timing_arcs;
+    vector<int> thread_cell_arc_start;
+    vector<int> thread_cell_test_start;
+    auto [built_num_arcs, built_num_tests] = BuildNetCellArcAndTest(
+        *this,
         graph_threads,
-        [&](const char* phase) { extract_profile.log(phase); });
+        net_arc_start,
+        local_cell_timing_arcs,
+        thread_cell_arc_start,
+        thread_cell_test_start);
+    num_arcs = built_num_arcs;
+    num_tests = built_num_tests;
+    const int num_net_arcs = net_arc_start.empty() ? 0 : net_arc_start.back();
 
-    const int num_nets = static_cast<int>(gpdb.getNets().size());
-    const int num_cells = static_cast<int>(rawdb.cells.size());
+    vector<index_type> pin_forward_arc_cursor;
+    vector<index_type> pin_backward_arc_cursor;
+    AllocatePinArcListStorage(
+        graph_threads,
+        pin_forward_arc_cursor,
+        pin_backward_arc_cursor);
 
-    vector<int> net_arc_start(num_nets + 1, 0);
-    vector<int> net_driver_pin(num_nets, -1);
-#pragma omp parallel for num_threads(graph_threads) schedule(static)
-    for (int net_id = 0; net_id < num_nets; ++net_id) {
-        const auto& pins = gpdb.getNets()[net_id].pins();
-        if (!pins.empty()) {
-            net_driver_pin[net_id] = static_cast<int>(pins[0]);
-            net_arc_start[net_id] = static_cast<int>(pins.size()) - 1;
-        }
-    }
-    const int num_net_arcs = prefix_sum_counts(net_arc_start, "net arcs", graph_threads);
+    WriteNetArcList(
+        graph_threads,
+        net_arc_start,
+        pin_forward_arc_cursor,
+        pin_backward_arc_cursor);
+    MarkExtractProfile("net_arcs");
 
-    auto is_primary_input_pin = [&](int pin_id) -> bool {
-        return pin_id >= 0 && pin_id < num_pins && primary_input_mask[pin_id] != 0;
-    };
-    auto pin_has_net_fanin = [&](int pin_id) -> bool {
-        if (pin_id < 0 || pin_id >= num_pins) return false;
-        const int net_id = static_cast<int>(gpdb.getPins()[pin_id].getParNetId());
-        return net_id >= 0 && net_id < num_nets &&
-               net_driver_pin[net_id] >= 0 && net_driver_pin[net_id] != pin_id;
-    };
-    auto constant_driver_value = [&](int pin_id) -> int {
-        if (pin_id < 0 || pin_id >= num_pins) {
-            return -1;
-        }
-        auto [ori_node_id, ori_node_pin_id, ori_net_id] = gpdb.getPins()[pin_id].getOriDBInfo();
-        (void) ori_net_id;
-        if (ori_node_pin_id == -1 || ori_node_id < 0 || ori_node_id >= static_cast<int>(rawdb.cells.size())) {
-            return -1;
-        }
-        db::Cell* dbcell = rawdb.cells[ori_node_id];
-        if (dbcell == nullptr || dbcell->ctype() == nullptr) {
-            return -1;
-        }
-        LibertyCell* liberty_cell = dbcell->ctype()->liberty_cell;
-        if (liberty_cell == nullptr) {
-            return -1;
-        }
-        const int port_id = liberty_cell->get_port(gpdb.getPins()[pin_id].getMacroName());
-        if (port_id < 0 || port_id >= static_cast<int>(liberty_cell->ports_.size())) {
-            return -1;
-        }
-        LibertyPort* port = liberty_cell->ports_[port_id];
-        if (port == nullptr || !port->has_function_) {
-            return -1;
-        }
-        LibertyFuncExpr expr;
-        if (!expr.compile(port->function_expr_, liberty_cell)) {
-            return -1;
-        }
-        vector<int8_t> port_values(liberty_cell->ports_.size(), -1);
-        const int8_t value = expr.eval(port_values);
-        return value == 0 || value == 1 ? value : -1;
-    };
-    auto constant_driven_pin_value = [&](int pin_id) -> int {
-        if (!pin_has_net_fanin(pin_id)) {
-            return -1;
-        }
-        const int net_id = static_cast<int>(gpdb.getPins()[pin_id].getParNetId());
-        return constant_driver_value(net_driver_pin[net_id]);
-    };
-    auto known_pin_logic_value = [&](int pin_id) -> int {
-        if (pin_id >= 0 && pin_id < static_cast<int>(pin_case_values.size()) &&
-            pin_case_values[pin_id] >= 0) {
-            return pin_case_values[pin_id];
-        }
-        return constant_driven_pin_value(pin_id);
-    };
-    auto is_functional_combinational_timing = [](const TimingArc* timing_arc) {
-        return timing_arc->timing_type_ == TimingType::combinational ||
-               timing_arc->timing_type_ == TimingType::combinational_rise ||
-               timing_arc->timing_type_ == TimingType::combinational_fall;
-    };
-    auto output_function_allows_timing_arc = [&](const TimingArc* timing_arc,
-                                                 int gpdb_id) -> bool {
-        if (!is_functional_combinational_timing(timing_arc) ||
-            timing_arc->from_port_ == nullptr ||
-            timing_arc->to_port_ == nullptr ||
-            !timing_arc->to_port_->has_function_) {
-            return true;
-        }
-        const LibertyCell* liberty_cell = timing_arc->to_port_->cell_;
-        if (liberty_cell == nullptr) {
-            return true;
-        }
-        const int from_port_id = liberty_cell->get_port(timing_arc->from_port_->name);
-        if (from_port_id < 0 ||
-            from_port_id >= static_cast<int>(liberty_cell->ports_.size())) {
-            return true;
-        }
-        LibertyFuncExpr expr;
-        if (!expr.compile(timing_arc->to_port_->function_expr_, liberty_cell)) {
-            return true;
-        }
+    WriteCellArcListAndTest(
+        *this,
+        graph_threads,
+        num_net_arcs,
+        local_cell_timing_arcs,
+        thread_cell_arc_start,
+        thread_cell_test_start,
+        pin_forward_arc_cursor,
+        pin_backward_arc_cursor);
+    MarkExtractProfile("cell_arcs");
 
-        vector<int8_t> port_values(liberty_cell->ports_.size(), -1);
-        vector<int> unknown_ports;
-        for (const LibertyFuncExprOp& op : expr.ops()) {
-            if (op.opcode != LibertyFuncExprOpcode::port ||
-                op.port_id < 0 ||
-                op.port_id >= static_cast<int>(liberty_cell->ports_.size()) ||
-                op.port_id == from_port_id) {
-                continue;
-            }
-            if (port_values[op.port_id] < 0) {
-                const int pin_id = gpdb.getNodes()[gpdb_id].getPinbyPortName(
-                    liberty_cell->ports_[op.port_id]->name);
-                const int logic_value = known_pin_logic_value(pin_id);
-                if (logic_value >= 0) {
-                    port_values[op.port_id] = static_cast<int8_t>(logic_value);
-                } else if (!contains_int(unknown_ports, op.port_id)) {
-                    unknown_ports.push_back(op.port_id);
-                }
-            }
-        }
+    AppendTestEndpoints();
+    MarkExtractProfile("release_arc_build_temps");
 
-        constexpr int kMaxFunctionArcUnknownPorts = 16;
-        if (unknown_ports.size() > kMaxFunctionArcUnknownPorts) {
-            return true;
-        }
-        const uint64_t assignment_count = uint64_t{1} << unknown_ports.size();
-        for (uint64_t assignment = 0; assignment < assignment_count; ++assignment) {
-            for (size_t i = 0; i < unknown_ports.size(); ++i) {
-                port_values[unknown_ports[i]] =
-                    static_cast<int8_t>((assignment >> i) & uint64_t{1});
-            }
-            port_values[from_port_id] = 0;
-            const int8_t out_when_from_zero = expr.eval(port_values);
-            port_values[from_port_id] = 1;
-            const int8_t out_when_from_one = expr.eval(port_values);
-            if (timing_sense_transition_possible(timing_arc->timing_sense_,
-                                                 out_when_from_zero,
-                                                 out_when_from_one)) {
-                return true;
-            }
-        }
-        return false;
-    };
-    auto valid_cell_timing_arc = [&](db::Cell* dbcell,
-                                     int gpdb_id,
-                                     int libcell_id,
-                                     Split el,
-                                     int timing_id,
-                                     int& from_pin_id,
-                                     int& to_pin_id,
-                                     bool& is_test) -> bool {
-        TimingArc* timing_arc = liberty_timing_arcs[timing_id];
-        if (is_redundant_timing(timing_arc, el)) {
-            return false;
-        }
-        from_pin_id = gpdb.getNodes()[gpdb_id].getPinbyPortName(timing_arc->from_port_->name);
-        to_pin_id = gpdb.getNodes()[gpdb_id].getPinbyPortName(timing_arc->to_port_->name);
-        if (from_pin_id < 0 || to_pin_id < 0) {
-            return false;
-        }
-        if (!output_function_allows_timing_arc(timing_arc, gpdb_id)) {
-            return false;
-        }
-        is_test = timing_arc->is_constraint() && !is_clock_gating_check(timing_arc);
-        (void) dbcell;
-        (void) libcell_id;
-        return true;
-    };
+    BuildPinFrontiers(graph_threads);
+    MarkExtractProfile("pin_fanout_lists");
+    MarkExtractProfile("pin_arc_lists");
 
-    cell_node_type_map.assign(gpdb.getNodes().size(), -1);
-#pragma omp parallel for num_threads(graph_threads) schedule(static)
-    for (int cell_idx = 0; cell_idx < num_cells; ++cell_idx) {
-        db::Cell* dbcell = rawdb.cells[cell_idx];
-        if (dbcell == nullptr || dbcell->ctype() == nullptr) continue;
-        const int gpdb_id = dbcell->gpdb_id;
-        if (gpdb_id >= 0 && gpdb_id < static_cast<int>(cell_node_type_map.size())) {
-            cell_node_type_map[gpdb_id] = dbcell->ctype()->libcell();
-        }
-    }
-    vector<int> cell_arc_start(num_cells + 1, 0);
-    vector<int> cell_test_start(num_cells + 1, 0);
-#pragma omp parallel for num_threads(graph_threads) schedule(dynamic, 256)
-    for (int cell_idx = 0; cell_idx < num_cells; ++cell_idx) {
-        db::Cell* dbcell = rawdb.cells[cell_idx];
-        if (dbcell == nullptr || dbcell->ctype() == nullptr) continue;
-        const int gpdb_id = dbcell->gpdb_id;
-        const int libcell_id = dbcell->ctype()->libcell();
-        if (libcell_id < 0 || !dbcell->ctype()->liberty_cell ||
-            gpdb_id < 0 || gpdb_id >= static_cast<int>(gpdb.getNodes().size())) {
-            continue;
-        }
-        int arc_count = 0;
-        int test_count = 0;
-        for_each_el(el) {
-            for (int pin_id : gpdb.getNodes()[gpdb_id].pins()) {
-                int pin_id2port_start = liberty_cell_type2port_list_end[libcell_id];
-                int pin_id2port_offset = pin_id2port_offset_id[pin_id];
-                int port_id = pin_id2port_start + pin_id2port_offset;
-                int start = liberty_port2timing_list_end[2 * port_id + el];
-                int end = liberty_port2timing_list_end[2 * port_id + el + 1];
-                for (int timing_id = start; timing_id < end; ++timing_id) {
-                    int from_pin_id = -1;
-                    int to_pin_id = -1;
-                    bool is_test = false;
-                    if (!valid_cell_timing_arc(dbcell, gpdb_id, libcell_id, el, timing_id,
-                                               from_pin_id, to_pin_id, is_test)) {
-                        continue;
-                    }
-                    ++arc_count;
-                    if (is_test) ++test_count;
-                }
-            }
-        }
-        cell_arc_start[cell_idx] = arc_count;
-        cell_test_start[cell_idx] = test_count;
-    }
-    const int num_cell_arcs = prefix_sum_counts(cell_arc_start, "cell arcs", graph_threads);
-    num_tests = prefix_sum_counts(cell_test_start, "test arcs", graph_threads);
-    num_arcs = num_net_arcs + num_cell_arcs;
-
-    timing_arc_from_pin_id.assign(num_arcs, -1);
-    timing_arc_to_pin_id.assign(num_arcs, -1);
-    timing_arc_id_map.assign(static_cast<size_t>(num_arcs) * 2u, -1);
-    arc_types.assign(num_arcs, 0);
-    arc_id2test_id.assign(num_arcs, -1);
-    test_id2_arc_id.assign(num_tests, -1);
-
-#pragma omp parallel for num_threads(graph_threads) schedule(static)
-    for (int net_id = 0; net_id < num_nets; ++net_id) {
-        const auto& pins = gpdb.getNets()[net_id].pins();
-        if (pins.size() <= 1) continue;
-        const int driver_pin_id = static_cast<int>(pins[0]);
-        int arc_id = net_arc_start[net_id];
-        for (index_type i = 1; i < static_cast<index_type>(pins.size()); ++i, ++arc_id) {
-            timing_arc_from_pin_id[arc_id] = driver_pin_id;
-            timing_arc_to_pin_id[arc_id] = static_cast<int>(pins[i]);
-        }
-    }
-    extract_profile.log("net_arcs");
-
-#pragma omp parallel for num_threads(graph_threads) schedule(dynamic, 256)
-    for (int cell_idx = 0; cell_idx < num_cells; ++cell_idx) {
-        db::Cell* dbcell = rawdb.cells[cell_idx];
-        if (dbcell == nullptr || dbcell->ctype() == nullptr) continue;
-        const int gpdb_id = dbcell->gpdb_id;
-        const int libcell_id = dbcell->ctype()->libcell();
-        if (libcell_id < 0 || !dbcell->ctype()->liberty_cell ||
-            gpdb_id < 0 || gpdb_id >= static_cast<int>(gpdb.getNodes().size())) {
-            continue;
-        }
-        int local_arc = 0;
-        int local_test = 0;
-        for_each_el(el) {
-            for (int pin_id : gpdb.getNodes()[gpdb_id].pins()) {
-                int pin_id2port_start = liberty_cell_type2port_list_end[libcell_id];
-                int pin_id2port_offset = pin_id2port_offset_id[pin_id];
-                int port_id = pin_id2port_start + pin_id2port_offset;
-                int start = liberty_port2timing_list_end[2 * port_id + el];
-                int end = liberty_port2timing_list_end[2 * port_id + el + 1];
-                for (int timing_id = start; timing_id < end; ++timing_id) {
-                    int from_pin_id = -1;
-                    int to_pin_id = -1;
-                    bool is_test = false;
-                    if (!valid_cell_timing_arc(dbcell, gpdb_id, libcell_id, el, timing_id,
-                                               from_pin_id, to_pin_id, is_test)) {
-                        continue;
-                    }
-                    const int arc_id = num_net_arcs + cell_arc_start[cell_idx] + local_arc++;
-                    timing_arc_from_pin_id[arc_id] = from_pin_id;
-                    timing_arc_to_pin_id[arc_id] = to_pin_id;
-                    timing_arc_id_map[arc_id * 2 + static_cast<int>(el)] = timing_id;
-                    arc_types[arc_id] = 1;
-                    if (is_test) {
-                        const int test_id = cell_test_start[cell_idx] + local_test++;
-                        arc_id2test_id[arc_id] = test_id;
-                        test_id2_arc_id[test_id] = arc_id;
-                    }
-                }
-            }
-        }
-    }
-    for (int test_id = 0; test_id < num_tests; ++test_id) {
-        const int arc_id = test_id2_arc_id[test_id];
-        if (arc_id >= 0 && arc_id < num_arcs) {
-            endpoints_id.push_back(timing_arc_to_pin_id[arc_id]);
-        }
-    }
-    extract_profile.log("cell_arcs");
-    release_vector_storage(primary_input_mask);
-    release_vector_storage(net_arc_start);
-    release_vector_storage(net_driver_pin);
-    release_vector_storage(cell_arc_start);
-    release_vector_storage(cell_test_start);
-    extract_profile.log("release_arc_build_temps");
-
-    // Construct connectivity CSR from final arc arrays.  Scatter is serial to
-    // keep each pin's arc order identical to increasing arc_id order.
-    vector<int> pin_fanout_count(num_pins, 0);
-    pin_num_fanin.assign(num_pins, 0);
-#pragma omp parallel for num_threads(graph_threads) schedule(static)
-    for (int arc_id = 0; arc_id < num_arcs; ++arc_id) {
-        const int from_pin = timing_arc_from_pin_id[arc_id];
-        const int to_pin = timing_arc_to_pin_id[arc_id];
-        if (from_pin >= 0 && from_pin < num_pins) {
-#pragma omp atomic update
-            pin_fanout_count[from_pin]++;
-        }
-        if (to_pin >= 0 && to_pin < num_pins) {
-#pragma omp atomic update
-            pin_num_fanin[to_pin]++;
-        }
-    }
-    pin_fanout_list_end.resize(num_pins + 1);
-    pin_forward_arc_list_end.resize(num_pins + 1);
-    pin_backward_arc_list_end.resize(num_pins + 1);
-    int fanout_total = 0;
-    int fanin_total = 0;
-    for (int pin_id = 0; pin_id < num_pins; ++pin_id) {
-        pin_fanout_list_end[pin_id] = fanout_total;
-        pin_forward_arc_list_end[pin_id] = fanout_total;
-        pin_backward_arc_list_end[pin_id] = fanin_total;
-        fanout_total += pin_fanout_count[pin_id];
-        fanin_total += pin_num_fanin[pin_id];
-    }
-    pin_fanout_list_end[num_pins] = fanout_total;
-    pin_forward_arc_list_end[num_pins] = fanout_total;
-    pin_backward_arc_list_end[num_pins] = fanin_total;
-    total_num_fanouts = fanout_total;
-    pin_fanout_list.resize(fanout_total);
-    pin_forward_arc_list.resize(fanout_total);
-    pin_backward_arc_list.resize(fanin_total);
-
-    std::fill(pin_fanout_count.begin(), pin_fanout_count.end(), 0);
-    vector<int> pin_backward_cursor(num_pins, 0);
-    for (int arc_id = 0; arc_id < num_arcs; ++arc_id) {
-        const int from_pin = timing_arc_from_pin_id[arc_id];
-        const int to_pin = timing_arc_to_pin_id[arc_id];
-        if (from_pin >= 0 && from_pin < num_pins) {
-            const int pos = pin_forward_arc_list_end[from_pin] + pin_fanout_count[from_pin]++;
-            pin_forward_arc_list[pos] = arc_id;
-            pin_fanout_list[pos] = to_pin;
-        }
-        if (to_pin >= 0 && to_pin < num_pins) {
-            const int pos = pin_backward_arc_list_end[to_pin] + pin_backward_cursor[to_pin]++;
-            pin_backward_arc_list[pos] = arc_id;
-        }
-    }
-    pin_frontiers.clear();
-    std::vector<std::vector<index_type>> local_frontiers(graph_threads);
-#pragma omp parallel num_threads(graph_threads)
-    {
-        const int tid = omp_get_thread_num();
-        const int start = (num_pins * tid) / graph_threads;
-        const int end = (num_pins * (tid + 1)) / graph_threads;
-        auto& frontiers = local_frontiers[tid];
-        for (int pin_id = start; pin_id < end; ++pin_id) {
-            pin_num_fanin[pin_id] = pin_backward_arc_list_end[pin_id + 1] - pin_backward_arc_list_end[pin_id];
-            if (pin_num_fanin[pin_id] == 0) frontiers.push_back(pin_id);
-        }
-    }
-    for (auto& frontiers : local_frontiers) {
-        pin_frontiers.insert(pin_frontiers.end(), frontiers.begin(), frontiers.end());
-    }
-    release_vector_storage(pin_fanout_count);
-    release_vector_storage(pin_backward_cursor);
-    extract_profile.log("pin_fanout_lists");
-    extract_profile.log("pin_arc_lists");
-
-    // Build pin_is_clk: mark register clock pins (from_pin of test/constraint arcs)
-    for (int i = 0; i < num_arcs; i++) {
-        if (arc_id2test_id[i] != -1) {
-            pin_is_clk[timing_arc_from_pin_id[i]] = 1;
-        }
-    }
-    int num_clk_pins = 0;
-    for (int i = 0; i < num_pins; i++) num_clk_pins += pin_is_clk[i];
+    const int num_clk_pins = CountRegisterClockPins(graph_threads);
     logger.info("Identified %d register clock pins", num_clk_pins);
 
-    std::unordered_map<int, int> endpoint_pin_to_compact;
-    endpoint_pin_to_compact.reserve(endpoints_id.size());
-    endpoint_unique_pin_ids.clear();
-    auto compact_endpoint_id = [&](int pin_id) {
-        auto [iter, inserted] = endpoint_pin_to_compact.emplace(pin_id, static_cast<int>(endpoint_unique_pin_ids.size()));
-        if (inserted) {
-            endpoint_unique_pin_ids.push_back(pin_id);
-        }
-        return iter->second;
-    };
-    primary_output2_endpoint_id.clear();
-    primary_output2_endpoint_id.reserve(primary_outputs.size());
-    for (int pin_id : primary_outputs) {
-        primary_output2_endpoint_id.push_back(compact_endpoint_id(pin_id));
-    }
-    test_id2_endpoint_id.assign(test_id2_arc_id.size(), -1);
-    for (int test_id = 0; test_id < static_cast<int>(test_id2_arc_id.size()); ++test_id) {
-        const int arc_id = test_id2_arc_id[test_id];
-        if (arc_id >= 0 && arc_id < static_cast<int>(timing_arc_to_pin_id.size())) {
-            test_id2_endpoint_id[test_id] = compact_endpoint_id(timing_arc_to_pin_id[arc_id]);
-        }
-    }
-    extract_profile.log("endpoint_compaction");
+    CompactEndpointPins();
+    MarkExtractProfile("endpoint_compaction");
 
     // gputimer arrays
     auto device = timing_raw_db.node_size_x.device();
@@ -1071,7 +1014,7 @@ void GTDatabase::ExtractTimingGraph() {
     timing_raw_db.pin_fanout_list = torch::from_blob(pin_fanout_list.data(), {static_cast<index_type>(pin_fanout_list.size())}, options).contiguous().to(device);
     timing_raw_db.pin_fanout_list_end = torch::from_blob(pin_fanout_list_end.data(), {static_cast<index_type>(pin_fanout_list_end.size())}, options).contiguous().to(device);
     gputimer_log_cuda_mem_info("GTDatabase::ExtractTimingGraph after_topology_tensors");
-    extract_profile.log("topology_tensors");
+    MarkExtractProfile("topology_tensors");
 
     // Timer timing liberty variables
     timing_raw_db.arc_types = torch::from_blob(arc_types.data(), {static_cast<int>(arc_types.size())}, byte_options).contiguous().to(device);
@@ -1095,7 +1038,7 @@ void GTDatabase::ExtractTimingGraph() {
     timing_raw_db.dmp_library_slew_upper_thresholds = torch::from_blob(dmp_library_slew_upper_thresholds.data(), {static_cast<int>(dmp_library_slew_upper_thresholds.size())}, float_options).contiguous().to(device);
     timing_raw_db.dmp_library_slew_derates = torch::from_blob(dmp_library_slew_derates.data(), {static_cast<int>(dmp_library_slew_derates.size())}, float_options).contiguous().to(device);
     gputimer_log_cuda_mem_info("GTDatabase::ExtractTimingGraph after_liberty_tensors");
-    extract_profile.log("liberty_tensors");
+    MarkExtractProfile("liberty_tensors");
 
     if (!skip_legacy_rc_tensors) {
         timing_raw_db.pinImpulse = torch::zeros({num_pins, NUM_ATTR}, torch::dtype(torch::kFloat32).device(torch::Device(device))).contiguous();
@@ -1113,7 +1056,8 @@ void GTDatabase::ExtractTimingGraph() {
 
     timing_raw_db.arcDelay = torch::zeros({num_arcs, 2 * NUM_ATTR}, torch::dtype(torch::kFloat32).device(torch::Device(device))).contiguous();
     gputimer_log_cuda_mem_info("GTDatabase::ExtractTimingGraph after_state_tensors");
-    extract_profile.log("state_tensors");
+    MarkExtractProfile("state_tensors");
+    extract_profile.reset();
     if (!skip_legacy_rc_tensors && !gputimer_env_enabled("GPUTIMER_DISABLE_REF_TIMING_TENSORS")) {
         timing_raw_db.pinImpulse_ref = torch::zeros({num_pins, NUM_ATTR}, torch::dtype(torch::kFloat32).device(torch::Device(device))).contiguous();
         timing_raw_db.pinLoad_ref = torch::zeros({num_pins, NUM_ATTR}, torch::dtype(torch::kFloat32).device(torch::Device(device))).contiguous();

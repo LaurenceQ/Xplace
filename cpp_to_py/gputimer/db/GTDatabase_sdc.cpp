@@ -1,6 +1,7 @@
 #include "GTDatabase.h"
 #include "sdc/SdcUtils.h"
 
+#include "common/XplaceLog.h"
 #include "common/common.h"
 #include "common/db/Cell.h"
 #include "common/db/Database.h"
@@ -20,6 +21,7 @@
 #include <iterator>
 #include <limits>
 #include <optional>
+#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 #include <variant>
@@ -68,202 +70,245 @@ void GTDatabase::preparePinNameMapForSdc(const sdc::SDC& sdc) {
     }
 }
 
-void GTDatabase::readSdc(sdc::SDC& sdc) {
-    driving_cell_sources.clear();
-    clock_transitions.clear();
-    clock_setup_uncertainty.clear();
-    clock_hold_uncertainty.clear();
-    propagated_all_clocks = false;
-    propagated_clock_names.clear();
-    propagated_clock_pins.clear();
-    power_disabled_constraint_arc.assign(timing_arc_from_pin_id.size(), 0);
-    pin_clock_latency_overrides.clear();
-    output_delay_clock_by_pin_attr.clear();
-    const size_t pin_state_count = static_cast<size_t>(num_pins) * NUM_ATTR;
-    host_pin_slew.assign(pin_state_count, nanf(""));
-    host_pin_load.assign(pin_state_count, 0.0f);
-    host_pin_rat.assign(pin_state_count, nanf(""));
-    host_pin_at.assign(pin_state_count, nanf(""));
-    for (auto& command : sdc.commands) {
-        std::visit(Functors{[this](auto&& cmd) { _read_sdc(cmd); }}, command);
-    }
-    num_timings = static_cast<int>(liberty_timing_arcs.size());
+void GTDatabase::RunSdcConstantSimulation() {
+    // SDC parsing now happens after structural graph construction. Constant
+    // propagation and timing-disabled arc masks will be added here.
+}
 
-    float default_period = 0.0f;
-    float default_rise_edge = nanf("");
-    float default_fall_edge = nanf("");
-    if (!clocks.empty()) {
-        default_period = clocks.begin()->second.period();
-        default_rise_edge = clocks.begin()->second.rise_edge();
-        default_fall_edge = clocks.begin()->second.fall_edge();
-    }
+bool GTDatabase::ClockIdValid(uint16_t clock_id) const {
+    return clock_id != kInvalidClockId &&
+           clock_id < static_cast<uint16_t>(clock_periods.size());
+}
 
-    const uint8_t invalid_clock_id = std::numeric_limits<uint8_t>::max();
+float GTDatabase::ClockPeriodForPin(int pin_id) const {
+    if (pin_id < 0 || pin_id >= static_cast<int>(pin_clock_ids.size())) {
+        return nanf("");
+    }
+    const uint16_t clock_id = pin_clock_ids[pin_id];
+    return ClockIdValid(clock_id) ? clock_periods[clock_id] : nanf("");
+}
+
+float GTDatabase::ClockRiseEdgeForPin(int pin_id) const {
+    if (pin_id < 0 || pin_id >= static_cast<int>(pin_clock_ids.size())) {
+        return nanf("");
+    }
+    const uint16_t clock_id = pin_clock_ids[pin_id];
+    const float override = pin_id < static_cast<int>(pin_clock_latency_overrides.size())
+                               ? pin_clock_latency_overrides[pin_id]
+                               : nanf("");
+    if (std::isfinite(override)) {
+        if (ClockIdValid(clock_id)) {
+            const float waveform = clock_waveform_rise_edges[clock_id];
+            return std::isfinite(waveform) ? waveform + override : override;
+        }
+        return override;
+    }
+    return ClockIdValid(clock_id) ? clock_rise_edges[clock_id] : nanf("");
+}
+
+float GTDatabase::ClockFallEdgeForPin(int pin_id) const {
+    if (pin_id < 0 || pin_id >= static_cast<int>(pin_clock_ids.size())) {
+        return nanf("");
+    }
+    const uint16_t clock_id = pin_clock_ids[pin_id];
+    const float override = pin_id < static_cast<int>(pin_clock_latency_overrides.size())
+                               ? pin_clock_latency_overrides[pin_id]
+                               : nanf("");
+    if (std::isfinite(override)) {
+        if (ClockIdValid(clock_id)) {
+            const float waveform = clock_waveform_fall_edges[clock_id];
+            return std::isfinite(waveform) ? waveform + override : override;
+        }
+        return override;
+    }
+    return ClockIdValid(clock_id) ? clock_fall_edges[clock_id] : nanf("");
+}
+
+float GTDatabase::ClockSlewForPin(int pin_id, int attr) const {
+    if (pin_id < 0 || pin_id >= static_cast<int>(pin_clock_ids.size()) ||
+        attr < 0 || attr >= NUM_ATTR) {
+        return nanf("");
+    }
+    const uint16_t clock_id = pin_clock_ids[pin_id];
+    if (!ClockIdValid(clock_id)) {
+        return nanf("");
+    }
+    const size_t idx = static_cast<size_t>(clock_id) * NUM_ATTR + attr;
+    return idx < clock_slews.size() ? clock_slews[idx] : nanf("");
+}
+
+float GTDatabase::ClockSetupUncertaintyForTest(int test_id) const {
+    if (test_id < 0 || test_id >= static_cast<int>(test_clock_ids.size())) {
+        return 0.0f;
+    }
+    const uint16_t clock_id = test_clock_ids[test_id];
+    return ClockIdValid(clock_id) ? clock_setup_uncertainties[clock_id] : 0.0f;
+}
+
+float GTDatabase::ClockHoldUncertaintyForTest(int test_id) const {
+    if (test_id < 0 || test_id >= static_cast<int>(test_clock_ids.size())) {
+        return 0.0f;
+    }
+    const uint16_t clock_id = test_clock_ids[test_id];
+    return ClockIdValid(clock_id) ? clock_hold_uncertainties[clock_id] : 0.0f;
+}
+
+void GTDatabase::InitPinClockLatencyOverrides() {
+    pin_clock_latency_overrides.assign(num_pins, nanf(""));
+}
+
+bool GTDatabase::SetClockLatencyHasUnsupportedMask(const sdc::SetClockLatency& obj) const {
+    return obj.rise.has_value() || obj.fall.has_value() ||
+           obj.min.has_value() || obj.max.has_value() ||
+           obj.source.has_value() || obj.early.has_value() ||
+           obj.late.has_value();
+}
+
+void GTDatabase::ApplyScalarPinClockLatencyOverride(int pin_id, float delay) {
+    if (pin_id >= 0 && pin_id < static_cast<int>(pin_clock_latency_overrides.size()) &&
+        std::isfinite(delay)) {
+        pin_clock_latency_overrides[pin_id] = delay;
+    }
+}
+
+uint16_t GTDatabase::BuildClockIdTablesForSdc() {
+    const Clock* default_clock = clocks.empty() ? nullptr : &clocks.begin()->second;
+    clock_names.clear();
+    clock_name2id.clear();
     clock_periods.clear();
-    auto intern_clock_period = [&](float period) -> uint8_t {
-        if (!std::isfinite(period) || period <= 0.0f) {
-            return invalid_clock_id;
-        }
-        for (size_t idx = 0; idx < clock_periods.size(); ++idx) {
-            if (clock_periods[idx] == period) {
-                return static_cast<uint8_t>(idx);
-            }
-        }
-        if (clock_periods.size() >= static_cast<size_t>(invalid_clock_id)) {
-            return invalid_clock_id;
-        }
-        clock_periods.push_back(period);
-        return static_cast<uint8_t>(clock_periods.size() - 1);
-    };
+    clock_rise_edges.clear();
+    clock_fall_edges.clear();
+    clock_waveform_rise_edges.clear();
+    clock_waveform_fall_edges.clear();
+    clock_slews.clear();
+    clock_setup_uncertainties.clear();
+    clock_hold_uncertainties.clear();
 
-    const int sdc_threads = std::max(1, timing_raw_db.num_threads);
+    std::vector<std::string> names;
+    names.reserve(clocks.size());
+    for (const auto& [clock_name, clock] : clocks) {
+        (void)clock;
+        names.push_back(clock_name);
+    }
+    std::sort(names.begin(), names.end());
+    for (const std::string& clock_name : names) {
+        if (clock_names.size() >= static_cast<size_t>(kInvalidClockId)) {
+            throw std::runtime_error("SDC clock count exceeds uint16 clock id range");
+        }
+        const Clock& clock = clocks.at(clock_name);
+        const uint16_t clock_id = static_cast<uint16_t>(clock_names.size());
+        clock_names.push_back(clock_name);
+        clock_name2id.emplace(clock_name, clock_id);
+        clock_periods.push_back(clock.period());
+        clock_rise_edges.push_back(clock.rise_edge());
+        clock_fall_edges.push_back(clock.fall_edge());
+        clock_waveform_rise_edges.push_back(clock.waveform_rise_edge());
+        clock_waveform_fall_edges.push_back(clock.waveform_fall_edge());
+        auto transition_iter = clock_transitions.find(clock_name);
+        for (int attr = 0; attr < NUM_ATTR; ++attr) {
+            clock_slews.push_back(transition_iter == clock_transitions.end()
+                                      ? nanf("")
+                                      : transition_iter->second[attr]);
+        }
+        auto setup_iter = clock_setup_uncertainty.find(clock_name);
+        clock_setup_uncertainties.push_back(setup_iter == clock_setup_uncertainty.end()
+                                                ? 0.0f
+                                                : setup_iter->second);
+        auto hold_iter = clock_hold_uncertainty.find(clock_name);
+        clock_hold_uncertainties.push_back(hold_iter == clock_hold_uncertainty.end()
+                                               ? 0.0f
+                                               : hold_iter->second);
+    }
+
+    if (default_clock == nullptr) {
+        return kInvalidClockId;
+    }
+    auto default_iter = clock_name2id.find(default_clock->name());
+    return default_iter == clock_name2id.end() ? kInvalidClockId : default_iter->second;
+}
+
+void GTDatabase::AssignClockIdsToPins(uint16_t default_clock_id,
+                                      vector<uint16_t>& net_clock_ids,
+                                      int sdc_threads) {
     const int num_nets = static_cast<int>(gpdb.getNets().size());
     const auto& gp_pins = gpdb.getPins();
     const int gp_pin_count = static_cast<int>(gp_pins.size());
-    std::vector<const Clock*> net_clock(num_nets, nullptr);
-    std::vector<uint8_t> net_clock_id(num_nets, invalid_clock_id);
-    std::vector<float> net_clock_period(num_nets, 0.0f);
-    std::vector<float> net_clock_rise_edge(num_nets, nanf(""));
-    std::vector<float> net_clock_fall_edge(num_nets, nanf(""));
-    std::vector<float> net_clock_setup_uncertainty(num_nets, 0.0f);
-    std::vector<float> net_clock_hold_uncertainty(num_nets, 0.0f);
-    std::vector<const std::array<float, NUM_ATTR>*> net_clock_transition(num_nets, nullptr);
-    const Clock* default_clock = clocks.empty() ? nullptr : &clocks.begin()->second;
-    const uint8_t default_clock_id = default_clock ? intern_clock_period(default_clock->period())
-                                                   : invalid_clock_id;
     pin_clock_ids.assign(num_pins, default_clock_id);
-    pin_clock_periods.assign(num_pins, default_period);
-    pin_clock_rise_edges.assign(num_pins, default_rise_edge);
-    pin_clock_fall_edges.assign(num_pins, default_fall_edge);
-    pin_clock_slews.assign(num_pins * NUM_ATTR, nanf(""));
+    pin_clock_is_default_fallback.assign(num_pins, ClockIdValid(default_clock_id) ? 1 : 0);
+    net_clock_ids.assign(num_nets, kInvalidClockId);
     net_is_clock.assign(num_nets, 0);
-    std::vector<const Clock*> pin_clock_context(num_pins, default_clock);
-    std::vector<char> pin_clock_context_is_default(num_pins, default_clock ? 1 : 0);
-    auto clock_transition_values = [&](const Clock& clock) -> const std::array<float, NUM_ATTR>* {
-        auto transition_iter = clock_transitions.find(clock.name());
-        return transition_iter == clock_transitions.end() ? nullptr : &transition_iter->second;
-    };
-    auto apply_clock_transition_to_pin = [&](int pin_id, const std::array<float, NUM_ATTR>* values) {
-        if (values == nullptr) {
-            return;
-        }
-        for (int attr = 0; attr < NUM_ATTR; ++attr) {
-            const float transition = (*values)[attr];
-            if (std::isfinite(transition)) {
-                hostPinSlew(pin_id, attr) = transition;
-                pin_clock_slews[pin_id * NUM_ATTR + attr] = transition;
-            }
-        }
-    };
+
+    std::vector<int> clock_net_ids;
+    std::vector<uint8_t> clock_net_seen(num_nets, 0);
     for (auto& [clock_name, clock] : clocks) {
-        if (clock.source_id() < 0 ||
-            clock.source_id() >= gp_pin_count) {
+        auto clock_id_iter = clock_name2id.find(clock_name);
+        if (clock_id_iter == clock_name2id.end()) {
             continue;
         }
-        const uint8_t clock_id = intern_clock_period(clock.period());
-        const auto* transition_values = clock_transition_values(clock);
+        const uint16_t clock_id = clock_id_iter->second;
         const int source_pin = clock.source_id();
+        if (source_pin < 0 || source_pin >= gp_pin_count) {
+            continue;
+        }
         const int net_id = gp_pins[source_pin].getParNetId();
         if (net_id >= 0 && net_id < num_nets) {
-            net_clock[net_id] = &clock;
-            net_clock_id[net_id] = clock_id;
-            net_clock_period[net_id] = clock.period();
-            net_clock_rise_edge[net_id] = clock.rise_edge();
-            net_clock_fall_edge[net_id] = clock.fall_edge();
-            if (auto setup_iter = clock_setup_uncertainty.find(clock.name());
-                setup_iter != clock_setup_uncertainty.end()) {
-                net_clock_setup_uncertainty[net_id] = setup_iter->second;
+            if (net_clock_ids[net_id] != kInvalidClockId &&
+                net_clock_ids[net_id] != clock_id) {
+                logger.warning("Multiple SDC clocks mapped to net %s; keeping %s and ignoring %s for clock-net propagation",
+                               net_names[net_id].c_str(),
+                               clock_names[net_clock_ids[net_id]].c_str(),
+                               clock_name.c_str());
+            } else {
+                net_clock_ids[net_id] = clock_id;
+                net_is_clock[net_id] = 1;
+                if (!clock_net_seen[net_id]) {
+                    clock_net_seen[net_id] = 1;
+                    clock_net_ids.push_back(net_id);
+                }
             }
-            if (auto hold_iter = clock_hold_uncertainty.find(clock.name());
-                hold_iter != clock_hold_uncertainty.end()) {
-                net_clock_hold_uncertainty[net_id] = hold_iter->second;
-            }
-            net_clock_transition[net_id] = transition_values;
-            net_is_clock[net_id] = 1;
         }
-        pin_clock_ids[source_pin] = clock_id;
-        pin_clock_periods[source_pin] = clock.period();
-        pin_clock_rise_edges[source_pin] = clock.rise_edge();
-        pin_clock_fall_edges[source_pin] = clock.fall_edge();
-        pin_clock_context[source_pin] = &clock;
-        pin_clock_context_is_default[source_pin] = 0;
-        logger.info("clock: %s, source_pin: %s, period: %.2f, rise_edge: %.3f, fall_edge: %.3f",
-                    clock_name.c_str(),
-                    gp_pins[source_pin].getName().c_str(),
-                    clock.period(),
-                    clock.rise_edge(),
-                    clock.fall_edge());
-    }
-#pragma omp parallel for num_threads(sdc_threads) schedule(static)
-    for (int pin_index = 0; pin_index < gp_pin_count; ++pin_index) {
-        const auto& gppin = gp_pins[pin_index];
-        const int net_id = gppin.getParNetId();
-        if (net_id < 0 || net_id >= num_nets || net_clock[net_id] == nullptr) {
-            continue;
+        if (source_pin >= 0 && source_pin < num_pins) {
+            pin_clock_ids[source_pin] = clock_id;
+            pin_clock_is_default_fallback[source_pin] = 0;
         }
-        const int pin_id = gppin.getId();
-        const Clock* clock = net_clock[net_id];
-        pin_clock_ids[pin_id] = net_clock_id[net_id];
-        pin_clock_periods[pin_id] = net_clock_period[net_id];
-        pin_clock_rise_edges[pin_id] = net_clock_rise_edge[net_id];
-        pin_clock_fall_edges[pin_id] = net_clock_fall_edge[net_id];
-        pin_clock_context[pin_id] = clock;
-        pin_clock_context_is_default[pin_id] = 0;
-        apply_clock_transition_to_pin(pin_id, net_clock_transition[net_id]);
+        XPLACE_DEBUGF("GPUTIMER_VERBOSE_SDC_CLOCKS",
+                      "clock=%s source_pin=%s period=%.2f rise_edge=%.3f fall_edge=%.3f",
+                      clock_name.c_str(),
+                      gp_pins[source_pin].getName().c_str(),
+                      clock.period(),
+                      clock.rise_edge(),
+                      clock.fall_edge());
     }
 
-    int pin_clock_latency_override_count = 0;
-    int pin_clock_latency_with_clock_context = 0;
-    int pin_clock_latency_with_default_context = 0;
-    int pin_clock_latency_without_context = 0;
-    for (const auto& [pin_id, override] : pin_clock_latency_overrides) {
-        if (pin_id < 0 || pin_id >= num_pins || !std::isfinite(override)) {
+#pragma omp parallel for num_threads(sdc_threads) schedule(static)
+    for (int idx = 0; idx < static_cast<int>(clock_net_ids.size()); ++idx) {
+        const int net_id = clock_net_ids[idx];
+        const uint16_t clock_id = net_clock_ids[net_id];
+        if (!ClockIdValid(clock_id)) {
             continue;
         }
-        ++pin_clock_latency_override_count;
-        const Clock* clock = pin_clock_context[pin_id];
-        if (clock) {
-            pin_clock_ids[pin_id] = intern_clock_period(clock->period());
-            pin_clock_periods[pin_id] = clock->period();
-            // OpenSTA gives pin clock latency precedence over clock-object
-            // latency. Apply it to the waveform edge, not to clock.rise_edge()
-            // / fall_edge(), which already include clock-object latency.
-            pin_clock_rise_edges[pin_id] = clock->waveform_rise_edge() + override;
-            pin_clock_fall_edges[pin_id] = clock->waveform_fall_edge() + override;
-            if (pin_clock_context_is_default[pin_id]) {
-                ++pin_clock_latency_with_default_context;
-            } else {
-                ++pin_clock_latency_with_clock_context;
-            }
-        } else {
-            pin_clock_ids[pin_id] = invalid_clock_id;
-            pin_clock_rise_edges[pin_id] = override;
-            pin_clock_fall_edges[pin_id] = override;
-            ++pin_clock_latency_without_context;
-        }
-    }
-    if (pin_clock_latency_override_count > 0) {
-        logger.warning("Applied %d pin set_clock_latency overrides (%d clock-net/source context, %d default-clock context, %d no-clock context)",
-                       pin_clock_latency_override_count,
-                       pin_clock_latency_with_clock_context,
-                       pin_clock_latency_with_default_context,
-                       pin_clock_latency_without_context);
-    }
-    if (default_clock) {
-        const auto* default_transition_values = clock_transition_values(*default_clock);
-#pragma omp parallel for num_threads(sdc_threads) schedule(static)
-        for (int pin_id = 0; pin_id < num_pins; ++pin_id) {
-            if (!pin_is_clk[pin_id]) {
+        for (int pin_id : gpdb.getNets()[net_id].pins()) {
+            if (pin_id < 0 || pin_id >= num_pins) {
                 continue;
             }
-            apply_clock_transition_to_pin(pin_id, default_transition_values);
+            pin_clock_ids[pin_id] = clock_id;
+            pin_clock_is_default_fallback[pin_id] = 0;
+            for (int attr = 0; attr < NUM_ATTR; ++attr) {
+                const float slew = clock_slews[static_cast<size_t>(clock_id) * NUM_ATTR + attr];
+                if (std::isfinite(slew)) {
+                    hostPinSlew(pin_id, attr) = slew;
+                }
+            }
         }
     }
+}
 
+void GTDatabase::MapTestsToClockIds(const vector<uint16_t>& net_clock_ids,
+                                    uint16_t default_clock_id,
+                                    int sdc_threads) {
+    const auto& gp_pins = gpdb.getPins();
+    const int gp_pin_count = static_cast<int>(gp_pins.size());
     test_clock_ids.assign(num_tests, default_clock_id);
-    test_clock_periods.assign(num_tests, default_period);
-    test_setup_uncertainties.assign(num_tests, 0.0f);
-    test_hold_uncertainties.assign(num_tests, 0.0f);
     int tests_with_clock = 0;
 #pragma omp parallel for num_threads(sdc_threads) schedule(static) reduction(+:tests_with_clock)
     for (int test_id = 0; test_id < static_cast<int>(test_id2_arc_id.size()); ++test_id) {
@@ -276,16 +321,83 @@ void GTDatabase::readSdc(sdc::SDC& sdc) {
             continue;
         }
         const int net_id = gp_pins[clock_pin_id].getParNetId();
-        if (net_id < 0 || net_id >= num_nets || net_clock[net_id] == nullptr) {
+        if (net_id < 0 || net_id >= static_cast<int>(net_clock_ids.size()) ||
+            !ClockIdValid(net_clock_ids[net_id])) {
             continue;
         }
-        test_clock_ids[test_id] = net_clock_id[net_id];
-        test_clock_periods[test_id] = net_clock_period[net_id];
-        test_setup_uncertainties[test_id] = net_clock_setup_uncertainty[net_id];
-        test_hold_uncertainties[test_id] = net_clock_hold_uncertainty[net_id];
+        test_clock_ids[test_id] = net_clock_ids[net_id];
         ++tests_with_clock;
     }
     logger.info("Mapped %d/%d timing tests to capture clocks", tests_with_clock, num_tests);
+}
+
+void GTDatabase::readSdc(sdc::SDC& sdc) {
+    driving_cell_sources.clear();
+    clock_transitions.clear();
+    clock_setup_uncertainty.clear();
+    clock_hold_uncertainty.clear();
+    propagated_all_clocks = false;
+    propagated_clock_names.clear();
+    propagated_clock_pins.clear();
+    power_disabled_constraint_arc.assign(timing_arc_from_pin_id.size(), 0);
+    InitPinClockLatencyOverrides();
+    output_delay_clock_by_pin_attr.clear();
+    const size_t pin_state_count = static_cast<size_t>(num_pins) * NUM_ATTR;
+    host_pin_slew.assign(pin_state_count, nanf(""));
+    host_pin_load.assign(pin_state_count, 0.0f);
+    host_pin_rat.assign(pin_state_count, nanf(""));
+    host_pin_at.assign(pin_state_count, nanf(""));
+    for (auto& command : sdc.commands) {
+        std::visit(Functors{[this](auto&& cmd) { _read_sdc(cmd); }}, command);
+    }
+    num_timings = static_cast<int>(liberty_timing_arcs.size());
+
+    const int sdc_threads = std::max(1, timing_raw_db.num_threads);
+    const uint16_t default_clock_id = BuildClockIdTablesForSdc();
+    std::vector<uint16_t> net_clock_ids;
+    AssignClockIdsToPins(default_clock_id, net_clock_ids, sdc_threads);
+
+    int pin_clock_latency_override_count = 0;
+    int pin_clock_latency_with_clock_context = 0;
+    int pin_clock_latency_with_default_context = 0;
+    int pin_clock_latency_without_context = 0;
+    for (int pin_id = 0; pin_id < static_cast<int>(pin_clock_latency_overrides.size()); ++pin_id) {
+        const float override = pin_clock_latency_overrides[pin_id];
+        if (!std::isfinite(override)) {
+            continue;
+        }
+        ++pin_clock_latency_override_count;
+        if (pin_id >= static_cast<int>(pin_clock_ids.size()) ||
+            !ClockIdValid(pin_clock_ids[pin_id])) {
+            ++pin_clock_latency_without_context;
+        } else if (pin_id < static_cast<int>(pin_clock_is_default_fallback.size()) &&
+                   pin_clock_is_default_fallback[pin_id]) {
+            ++pin_clock_latency_with_default_context;
+        } else {
+            ++pin_clock_latency_with_clock_context;
+        }
+    }
+    if (pin_clock_latency_override_count > 0) {
+        logger.warning("Applied %d pin set_clock_latency overrides (%d clock-net/source context, %d default-clock context, %d no-clock context)",
+                       pin_clock_latency_override_count,
+                       pin_clock_latency_with_clock_context,
+                       pin_clock_latency_with_default_context,
+                       pin_clock_latency_without_context);
+    }
+#pragma omp parallel for num_threads(sdc_threads) schedule(static)
+    for (int pin_id = 0; pin_id < num_pins; ++pin_id) {
+        if (!pin_is_clk[pin_id]) {
+            continue;
+        }
+        for (int attr = 0; attr < NUM_ATTR; ++attr) {
+            const float slew = ClockSlewForPin(pin_id, attr);
+            if (std::isfinite(slew)) {
+                hostPinSlew(pin_id, attr) = slew;
+            }
+        }
+    }
+
+    MapTestsToClockIds(net_clock_ids, default_clock_id, sdc_threads);
 
     // set nan slew of PIs to half period
 #pragma omp parallel for num_threads(sdc_threads) schedule(static)
@@ -298,15 +410,17 @@ void GTDatabase::readSdc(sdc::SDC& sdc) {
     }
 
     for (auto& [clock_name, clock] : clocks) {
-        if (clock.source_id() == -1) {
+        if (clock.source_id() < 0 || clock.source_id() >= num_pins) {
             continue;
         }
         int clock_pin_id = clock.source_id();
         pin_is_clk[clock_pin_id] = 1;
-        if (std::isnan(hostPinAT(clock_pin_id, 0))) hostPinAT(clock_pin_id, 0) = clock.rise_edge();
-        if (std::isnan(hostPinAT(clock_pin_id, 1))) hostPinAT(clock_pin_id, 1) = clock.fall_edge();
-        if (std::isnan(hostPinAT(clock_pin_id, 2))) hostPinAT(clock_pin_id, 2) = clock.rise_edge();
-        if (std::isnan(hostPinAT(clock_pin_id, 3))) hostPinAT(clock_pin_id, 3) = clock.fall_edge();
+        const float rise_edge = ClockRiseEdgeForPin(clock_pin_id);
+        const float fall_edge = ClockFallEdgeForPin(clock_pin_id);
+        if (std::isnan(hostPinAT(clock_pin_id, 0))) hostPinAT(clock_pin_id, 0) = rise_edge;
+        if (std::isnan(hostPinAT(clock_pin_id, 1))) hostPinAT(clock_pin_id, 1) = fall_edge;
+        if (std::isnan(hostPinAT(clock_pin_id, 2))) hostPinAT(clock_pin_id, 2) = rise_edge;
+        if (std::isnan(hostPinAT(clock_pin_id, 3))) hostPinAT(clock_pin_id, 3) = fall_edge;
     }
 
     pin_is_ideal_clk.assign(num_pins, 0);
@@ -319,10 +433,13 @@ void GTDatabase::readSdc(sdc::SDC& sdc) {
             continue;
         }
         const bool direct_propagated = propagated_clock_pins.find(pin_id) != propagated_clock_pins.end();
-        const Clock* clock = pin_clock_context[pin_id];
+        const uint16_t clock_id = pin_id < static_cast<int>(pin_clock_ids.size())
+                                      ? pin_clock_ids[pin_id]
+                                      : kInvalidClockId;
         const bool clock_propagated =
             propagated_all_clocks ||
-            (clock != nullptr && propagated_clock_names.find(clock->name()) != propagated_clock_names.end());
+            (ClockIdValid(clock_id) &&
+             propagated_clock_names.find(clock_names[clock_id]) != propagated_clock_names.end());
         const bool propagated = direct_propagated || clock_propagated;
         pin_is_ideal_clk[pin_id] = propagated ? 0 : 1;
         if (propagated) {
@@ -339,8 +456,8 @@ void GTDatabase::readSdc(sdc::SDC& sdc) {
         if (!pin_is_ideal_clk[pin_id]) {
             continue;
         }
-        const float rise_edge = pin_clock_rise_edges[pin_id];
-        const float fall_edge = pin_clock_fall_edges[pin_id];
+        const float rise_edge = ClockRiseEdgeForPin(pin_id);
+        const float fall_edge = ClockFallEdgeForPin(pin_id);
         if (std::isfinite(rise_edge)) {
             hostPinAT(pin_id, 0) = rise_edge;
             hostPinAT(pin_id, 2) = rise_edge;
@@ -357,7 +474,6 @@ void GTDatabase::readSdc(sdc::SDC& sdc) {
 
     auto device = timing_raw_db.node_size_x.device();
     auto float_options = torch::TensorOptions().dtype(torch::kFloat32);
-    auto byte_options = torch::TensorOptions().dtype(torch::kUInt8);
     timing_raw_db.pinSlew = torch::from_blob(host_pin_slew.data(), {num_pins, NUM_ATTR}, float_options).contiguous().to(device);
     timing_raw_db.pinLoad = torch::from_blob(host_pin_load.data(), {num_pins, NUM_ATTR}, float_options).contiguous().to(device);
     timing_raw_db.pinRAT = torch::from_blob(host_pin_rat.data(), {num_pins, NUM_ATTR}, float_options).contiguous().to(device);
@@ -366,16 +482,6 @@ void GTDatabase::readSdc(sdc::SDC& sdc) {
     vector<float>().swap(host_pin_load);
     vector<float>().swap(host_pin_rat);
     vector<float>().swap(host_pin_at);
-    timing_raw_db.clock_periods = torch::from_blob(clock_periods.data(), {static_cast<int>(clock_periods.size())}, float_options).contiguous().to(device);
-    timing_raw_db.pin_clock_ids = torch::from_blob(pin_clock_ids.data(), {static_cast<int>(pin_clock_ids.size())}, byte_options).contiguous().to(device);
-    timing_raw_db.test_clock_ids = torch::from_blob(test_clock_ids.data(), {static_cast<int>(test_clock_ids.size())}, byte_options).contiguous().to(device);
-    timing_raw_db.test_clock_periods = torch::from_blob(test_clock_periods.data(), {static_cast<int>(test_clock_periods.size())}, float_options).contiguous().to(device);
-    timing_raw_db.test_setup_uncertainties = torch::from_blob(test_setup_uncertainties.data(), {static_cast<int>(test_setup_uncertainties.size())}, float_options).contiguous().to(device);
-    timing_raw_db.test_hold_uncertainties = torch::from_blob(test_hold_uncertainties.data(), {static_cast<int>(test_hold_uncertainties.size())}, float_options).contiguous().to(device);
-    timing_raw_db.pin_clock_periods = torch::from_blob(pin_clock_periods.data(), {static_cast<int>(pin_clock_periods.size())}, float_options).contiguous().to(device);
-    timing_raw_db.pin_clock_rise_edges = torch::from_blob(pin_clock_rise_edges.data(), {static_cast<int>(pin_clock_rise_edges.size())}, float_options).contiguous().to(device);
-    timing_raw_db.pin_clock_fall_edges = torch::from_blob(pin_clock_fall_edges.data(), {static_cast<int>(pin_clock_fall_edges.size())}, float_options).contiguous().to(device);
-    timing_raw_db.pin_clock_slews = torch::from_blob(pin_clock_slews.data(), {static_cast<int>(pin_clock_slews.size())}, float_options).contiguous().to(device);
     gputimer_log_cuda_mem_info("GTDatabase::readSdc after_clock_tensors");
 }
 

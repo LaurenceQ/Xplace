@@ -1,5 +1,6 @@
 #include "gputimer/core/GPUTimer.h"
 #include "gputimer/db/GTDatabase.h"
+#include "common/XplaceLog.h"
 #include "common/utils/log.h"
 
 #include <array>
@@ -59,10 +60,10 @@ static std::vector<std::string> split_csv_str(const std::string& line) {
 void GPUTimer::read_opr_gt_infer(const std::string& infile) {
     std::ifstream fin(infile);
     if (!fin.is_open()) {
-        logger.error("Cannot open OPR GT infer file: %s\n", infile.c_str());
+        logger.error("Cannot open OPR GT infer file: %s", infile.c_str());
         return;
     }
-    logger.info("[read_opr_gt_infer] Opened file: %s\n", infile.c_str());
+    logger.info("[read_opr_gt_infer] opened file: %s", infile.c_str());
 
     // Build reverse map: pin_name → GPUTimer pin_id
     std::unordered_map<std::string, int> name_to_id;
@@ -77,7 +78,9 @@ void GPUTimer::read_opr_gt_infer(const std::string& infile) {
     host_pinGT_AT.assign(num_pins_gt * 4, std::numeric_limits<float>::quiet_NaN());
 
     float time_to_internal = 1.0f / (gtdb.time_unit * 1e9f);
-    logger.info("[read_opr_gt_infer] time_unit=%.6e, time_to_internal=%.6e\n", gtdb.time_unit, time_to_internal);
+    XPLACE_DEBUGF("XPLACE_INFER_DEBUG",
+                  "[read_opr_gt_infer] time_unit=%.6e time_to_internal=%.6e",
+                  gtdb.time_unit, time_to_internal);
 
     std::vector<std::pair<int, std::array<float, 4>>> slews, net_delays;
     std::vector<std::tuple<int, int, std::array<float, 4>>> cell_delays;
@@ -90,8 +93,16 @@ void GPUTimer::read_opr_gt_infer(const std::string& infile) {
         line = trim(line);
         line_count++;
         if (line.empty()) continue;
-        if (line.find("# Node predictions") == 0) { section = 1; logger.info("[read_opr_gt_infer] Entering section 1: Node predictions (line %d)\n", line_count); continue; }
-        if (line.find("# Cell edge predictions") == 0) { section = 2; logger.info("[read_opr_gt_infer] Entering section 2: Cell edge predictions (line %d)\n", line_count); continue; }
+        if (line.find("# Node predictions") == 0) {
+            section = 1;
+            XPLACE_DEBUGF("XPLACE_INFER_DEBUG", "[read_opr_gt_infer] section=node line=%d", line_count);
+            continue;
+        }
+        if (line.find("# Cell edge predictions") == 0) {
+            section = 2;
+            XPLACE_DEBUGF("XPLACE_INFER_DEBUG", "[read_opr_gt_infer] section=edge line=%d", line_count);
+            continue;
+        }
         if (line[0] == '#') continue;
 
         if (section == 1) {
@@ -110,7 +121,9 @@ void GPUTimer::read_opr_gt_infer(const std::string& infile) {
                 auto it = name_to_id.find(pin_name);
                 if (it == name_to_id.end()) {
                     opr_to_gt[opr_id] = -1;
-                    if (++name_miss <= 5) logger.warning("[read_opr_gt_infer] pin_name '%s' not found in GPUTimer\n", pin_name.c_str());
+                    if (++name_miss <= 5) {
+                        logger.warning("[read_opr_gt_infer] pin_name '%s' not found in GPUTimer", pin_name.c_str());
+                    }
                     continue;
                 }
                 int gt_id = it->second;
@@ -127,8 +140,9 @@ void GPUTimer::read_opr_gt_infer(const std::string& infile) {
                 net_delays.push_back({gt_id, delays});
 
                 if (slews.size() <= 3 || slews.size() % 10000 == 0)
-                    logger.info("[read_opr_gt_infer] Node opr=%d gt=%d '%s': gt_at=[%.6e,..], slew=[%.6e,..] ns (total: %zu)\n",
-                        opr_id, gt_id, pin_name.c_str(), std::stof(tokens[2]), slew[0], slews.size());
+                    XPLACE_DEBUGF("XPLACE_INFER_DEBUG",
+                                  "[read_opr_gt_infer] node opr=%d gt=%d name=%s gt_at0=%.6e slew0=%.6e total=%zu",
+                                  opr_id, gt_id, pin_name.c_str(), std::stof(tokens[2]), slew[0], slews.size());
             } catch (...) { continue; }
 
         } else if (section == 2) {
@@ -142,22 +156,20 @@ void GPUTimer::read_opr_gt_infer(const std::string& infile) {
             std::array<float, 4> delays = {{values[3], values[4], values[5], values[6]}};
             cell_delays.push_back({it1->second, it2->second, delays});
             if (cell_delays.size() <= 3 || cell_delays.size() % 5000 == 0)
-                logger.info("[read_opr_gt_infer] Edge %d: opr %d->%d (gt %d->%d), delays=[%.6e,..] ns (total: %zu)\n",
-                    (int)values[0], opr_from, opr_to, it1->second, it2->second, delays[0], cell_delays.size());
+                XPLACE_DEBUGF("XPLACE_INFER_DEBUG",
+                              "[read_opr_gt_infer] edge=%d opr=%d->%d gt=%d->%d delay0=%.6e total=%zu",
+                              (int)values[0], opr_from, opr_to,
+                              it1->second, it2->second, delays[0], cell_delays.size());
         }
     }
     auto device = timing_raw_db.node_size_x.device();
     timing_raw_db.pinGT_AT = torch::from_blob(host_pinGT_AT.data(), {(long)num_pins, 4}, torch::kFloat32).contiguous().to(device);
     fin.close();
-    logger.info("[read_opr_gt_infer] File parsing complete. Parsed %zu slews, %zu net delays, %zu cell delays (%d pin name misses)\n",
-                slews.size(), net_delays.size(), cell_delays.size(), name_miss);
 
     apply_infer_data(slews, net_delays, cell_delays, time_to_internal);
 
-    logger.info("[read_opr_gt_infer] ========== COMPLETE ==========\n");
-    logger.info("[read_opr_gt_infer] Loaded: %zu slews, %zu net delays, %zu cell delays from %s\n",
-                slews.size(), net_delays.size(), cell_delays.size(), infile.c_str());
-    logger.info("[read_opr_gt_infer] ================================\n");
+    logger.info("[read_opr_gt_infer] loaded slews=%zu net_delays=%zu cell_delays=%zu name_misses=%d file=%s",
+                slews.size(), net_delays.size(), cell_delays.size(), name_miss, infile.c_str());
 }
 
 }  // namespace gt

@@ -1,5 +1,6 @@
 #include "gputimer/core/GPUTimer.h"
 #include "gputimer/db/GTDatabase.h"
+#include "common/XplaceLog.h"
 #include "common/utils/log.h"
 
 #include <array>
@@ -15,27 +16,27 @@ void GPUTimer::apply_infer_data(
     float time_to_internal)
 {
     int num_arcs = static_cast<int>(gtdb.timing_arc_from_pin_id.size());
-    logger.info("[apply_infer_data] num_arcs=%d\n", num_arcs);
+    XPLACE_DEBUGF("XPLACE_INFER_DEBUG", "[apply_infer_data] num_arcs=%d", num_arcs);
 
     // Ensure any previous GPU kernels have completed before copying
     cudaDeviceSynchronize();
-    logger.info("[apply_infer_data] GPU synchronized before D2H copy\n");
+    XPLACE_DEBUGF("XPLACE_INFER_DEBUG", "[apply_infer_data] synchronized before D2H copy");
 
     // Copy arcDelay to host for modification
     float* h_arcDelay = new float[num_arcs * 8];
     cudaMemcpy(h_arcDelay, arcDelay, num_arcs * 8 * sizeof(float), cudaMemcpyDeviceToHost);
-    logger.info("[apply_infer_data] Copied arcDelay D2H: %d arcs * 8 * 4 bytes\n", num_arcs);
+    XPLACE_DEBUGF("XPLACE_INFER_DEBUG", "[apply_infer_data] copied arcDelay D2H arcs=%d", num_arcs);
 
     // Copy pinSlew to host for modification (pinSlew is pinSlew GPU array)
     // pinSlew layout: pinSlew[pin_id * NUM_ATTR + corner] where NUM_ATTR = 4
     int num_pins = static_cast<int>(gtdb.pin_names.size());
     float* h_pinSlew = new float[num_pins * 4];
     cudaMemcpy(h_pinSlew, pinSlew, num_pins * 4 * sizeof(float), cudaMemcpyDeviceToHost);
-    logger.info("[apply_infer_data] Copied pinSlew D2H: %d pins * 4 corners * 4 bytes\n", num_pins);
+    XPLACE_DEBUGF("XPLACE_INFER_DEBUG", "[apply_infer_data] copied pinSlew D2H pins=%d", num_pins);
 
     // Ensure D2H copy is complete before modifying on host
     cudaDeviceSynchronize();
-    logger.info("[apply_infer_data] GPU synchronized after D2H copy\n");
+    XPLACE_DEBUGF("XPLACE_INFER_DEBUG", "[apply_infer_data] synchronized after D2H copy");
 
     // Update slew values for pins
     int slew_count = 0;
@@ -46,14 +47,14 @@ void GPUTimer::apply_infer_data(
                 float slew_internal = slew[corner] * time_to_internal;
                 h_pinSlew[pin_id * 4 + corner] = slew_internal;
                 if (slew_count < 3) {
-                    logger.info("[apply_infer_data]   pin[%d] '%s' slew[%d] = %.6e ns -> %.6e internal\n",
-                        pin_id, pin_name, corner, slew[corner], slew_internal);
+                    XPLACE_DEBUGF("XPLACE_INFER_DEBUG",
+                                  "[apply_infer_data] pin=%d name=%s slew_corner=%d ns=%.6e internal=%.6e",
+                                  pin_id, pin_name, corner, slew[corner], slew_internal);
                 }
             }
             slew_count++;
         }
     }
-    logger.info("[apply_infer_data] Updated %d pins with slew values\n", slew_count);
 
     // Update net delays
     // For each net delay prediction (indexed by pin_id), find fanin net arcs using CSR lookup
@@ -87,14 +88,14 @@ void GPUTimer::apply_infer_data(
 
             if (net_delay_updates < 3) {
                 const char* pin_name = (pin_id < (int)gtdb.pin_names.size()) ? gtdb.pin_names[pin_id].c_str() : "UNKNOWN";
-                logger.info("[apply_infer_data] Net delay pin[%d] '%s' -> arc %d: [%.6e,%.6e,%.6e,%.6e] internal\n",
-                    pin_id, pin_name, arc_id, delay0, delay1, delay2, delay3);
+                XPLACE_DEBUGF("XPLACE_INFER_DEBUG",
+                              "[apply_infer_data] net_delay pin=%d name=%s arc=%d delay=[%.6e,%.6e,%.6e,%.6e]",
+                              pin_id, pin_name, arc_id, delay0, delay1, delay2, delay3);
             }
             net_delay_updates++;
         }
         if (!found) net_delay_missing++;
     }
-    logger.info("[apply_infer_data] Updated %d net arcs, %d net delays with no fanin arc\n", net_delay_updates, net_delay_missing);
 
     // Update cell delays
     // For each cell delay prediction, find the arc by traversing forward arcs
@@ -148,10 +149,11 @@ void GPUTimer::apply_infer_data(
             if (cell_delay_updates < 3) {
                 const char* from_name = (from_pin_id < (int)gtdb.pin_names.size()) ? gtdb.pin_names[from_pin_id].c_str() : "UNKNOWN";
                 const char* to_name = (to_pin_id < (int)gtdb.pin_names.size()) ? gtdb.pin_names[to_pin_id].c_str() : "UNKNOWN";
-                logger.info("[apply_infer_data] Cell delay [%d]'%s' -> [%d]'%s' arc_id=%d: delays=[%.6e,%.6e,%.6e,%.6e] internal, updated %d corners\n",
-                    from_pin_id, from_name, to_pin_id, to_name, arc_id,
-                    delays[0]*time_to_internal, delays[1]*time_to_internal,
-                    delays[2]*time_to_internal, delays[3]*time_to_internal, corners_updated);
+                XPLACE_DEBUGF("XPLACE_INFER_DEBUG",
+                              "[apply_infer_data] cell_delay from=%d:%s to=%d:%s arc=%d delays=[%.6e,%.6e,%.6e,%.6e] corners=%d",
+                              from_pin_id, from_name, to_pin_id, to_name, arc_id,
+                              delays[0] * time_to_internal, delays[1] * time_to_internal,
+                              delays[2] * time_to_internal, delays[3] * time_to_internal, corners_updated);
             }
             cell_delay_updates++;
             // Do NOT break — GTDatabase creates TWO arcs per Liberty timing arc:
@@ -165,44 +167,47 @@ void GPUTimer::apply_infer_data(
             if (cell_delay_missing < 10) {  // Only log first 10 missing
                 const char* from_name = (from_pin_id < (int)gtdb.pin_names.size()) ? gtdb.pin_names[from_pin_id].c_str() : "UNKNOWN";
                 const char* to_name = (to_pin_id < (int)gtdb.pin_names.size()) ? gtdb.pin_names[to_pin_id].c_str() : "UNKNOWN";
-                logger.warning("[apply_infer_data] Could not find cell arc [%d]'%s' -> [%d]'%s' (searched %d fanout arcs)\n",
+                logger.warning("[apply_infer_data] could not find cell arc from=%d:%s to=%d:%s searched_fanout_arcs=%d",
                     from_pin_id, from_name, to_pin_id, to_name, num_fanout);
             }
             cell_delay_missing++;
         }
     }
-    logger.info("[apply_infer_data] Updated %d cell arcs, %d cell delays with no matching arc\n", cell_delay_updates, cell_delay_missing);
+    logger.info("[apply_infer_data] updated slews=%d net_arcs=%d missing_net_fanin=%d cell_arcs=%d missing_cell_arcs=%d",
+                slew_count, net_delay_updates, net_delay_missing, cell_delay_updates, cell_delay_missing);
 
     // Copy back to GPU
     cudaMemcpy(arcDelay, h_arcDelay, num_arcs * 8 * sizeof(float), cudaMemcpyHostToDevice);
-    logger.info("[apply_infer_data] Copied arcDelay H2D: %d arcs * 8 * 4 bytes\n", num_arcs);
+    XPLACE_DEBUGF("XPLACE_INFER_DEBUG", "[apply_infer_data] copied arcDelay H2D arcs=%d", num_arcs);
 
     cudaMemcpy(pinSlew, h_pinSlew, num_pins * 4 * sizeof(float), cudaMemcpyHostToDevice);
-    logger.info("[apply_infer_data] Copied pinSlew H2D: %d pins * 4 corners * 4 bytes\n", num_pins);
+    XPLACE_DEBUGF("XPLACE_INFER_DEBUG", "[apply_infer_data] copied pinSlew H2D pins=%d", num_pins);
 
     // Ensure H2D copy is complete and GPU sees updated data before kernels access it
     cudaDeviceSynchronize();
-    logger.info("[apply_infer_data] GPU synchronized after H2D copy - arcDelay and pinSlew ready for kernels\n");
+    XPLACE_DEBUGF("XPLACE_INFER_DEBUG", "[apply_infer_data] synchronized after H2D copy");
 
     // Sample verification: read back some values to confirm
     float sample_arcDelay[8];
     if (num_arcs > 0) {
         cudaMemcpy(sample_arcDelay, arcDelay, 8 * sizeof(float), cudaMemcpyDeviceToHost);
-        logger.info("[apply_infer_data] Arc 0 after H2D: [%.6e, %.6e, %.6e, %.6e, %.6e, %.6e, %.6e, %.6e]\n",
-            sample_arcDelay[0], sample_arcDelay[1], sample_arcDelay[2], sample_arcDelay[3],
-            sample_arcDelay[4], sample_arcDelay[5], sample_arcDelay[6], sample_arcDelay[7]);
+        XPLACE_DEBUGF("XPLACE_INFER_DEBUG",
+                      "[apply_infer_data] arc0_after_h2d=[%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e]",
+                      sample_arcDelay[0], sample_arcDelay[1], sample_arcDelay[2], sample_arcDelay[3],
+                      sample_arcDelay[4], sample_arcDelay[5], sample_arcDelay[6], sample_arcDelay[7]);
     }
 
     float sample_pinSlew[4];
     if (num_pins > 0) {
         cudaMemcpy(sample_pinSlew, pinSlew, 4 * sizeof(float), cudaMemcpyDeviceToHost);
-        logger.info("[apply_infer_data] Pin 0 slew after H2D: [%.6e, %.6e, %.6e, %.6e]\n",
-            sample_pinSlew[0], sample_pinSlew[1], sample_pinSlew[2], sample_pinSlew[3]);
+        XPLACE_DEBUGF("XPLACE_INFER_DEBUG",
+                      "[apply_infer_data] pin0_slew_after_h2d=[%.6e,%.6e,%.6e,%.6e]",
+                      sample_pinSlew[0], sample_pinSlew[1], sample_pinSlew[2], sample_pinSlew[3]);
     }
 
     // Final sync before returning
     cudaDeviceSynchronize();
-    logger.info("[apply_infer_data] GPU synchronized before returning\n");
+    XPLACE_DEBUGF("XPLACE_INFER_DEBUG", "[apply_infer_data] synchronized before returning");
 
     delete[] h_arcDelay;
     delete[] h_pinSlew;

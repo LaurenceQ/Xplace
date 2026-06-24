@@ -10,6 +10,7 @@
 #include <cstring>
 #include <limits>
 #include <string>
+#include <type_traits>
 #include <vector>
 // #include "utils.cuh"
 namespace gt {
@@ -237,14 +238,18 @@ __host__ DmpModel::DmpModel(GPUTimer* timer)
         testRelatedAT(timer -> testRelatedAT),
         testRAT(timer -> testRAT),
         testConstraint(timer -> testConstraint),
+        pin_clock_ids(nullptr),
         test_clock_ids(nullptr),
         clock_periods(nullptr),
+        clock_rise_edges(nullptr),
+        clock_fall_edges(nullptr),
+        clock_waveform_rise_edges(nullptr),
+        clock_waveform_fall_edges(nullptr),
+        clock_slews(nullptr),
+        clock_setup_uncertainties(nullptr),
+        clock_hold_uncertainties(nullptr),
+        pin_clock_latency_overrides(nullptr),
         clock_count(0),
-        pin_clock_rise_edges(timer -> pin_clock_rise_edges),
-        pin_clock_fall_edges(timer -> pin_clock_fall_edges),
-        pin_clock_slews(timer -> pin_clock_slews),
-        test_setup_uncertainties(timer -> test_setup_uncertainties),
-        test_hold_uncertainties(timer -> test_hold_uncertainties),
         arcDelay(timer -> arcDelay),
         timing_arc_id_map(timer -> timing_arc_id_map),
         at_prefix_pin(timer -> at_prefix_pin),
@@ -347,29 +352,51 @@ __host__ DmpModel::DmpModel(GPUTimer* timer)
                host_pin_flags.data(),
                sizeof(uint8_t) * num_pins,
                cudaMemcpyHostToDevice);
-    const std::vector<float>& host_clock_periods = timer->gtdb.clock_periods;
-    std::vector<uint8_t> host_test_clock_ids(num_tests, std::numeric_limits<uint8_t>::max());
-    const int host_test_clock_id_count = static_cast<int>(timer->gtdb.test_clock_ids.size());
-    for (int test_id = 0; test_id < num_tests; ++test_id) {
-        if (test_id < host_test_clock_id_count) {
-            host_test_clock_ids[test_id] = timer->gtdb.test_clock_ids[test_id];
+    const auto& gtdb = timer->gtdb;
+    clock_count = static_cast<int>(gtdb.clock_periods.size());
+    auto upload_vector = [](auto** dst, const auto& values, const char* name) {
+        using PtrT = std::remove_reference_t<decltype(*dst)>;
+        using ValueT = std::remove_pointer_t<PtrT>;
+        dmpCudaMallocChecked(dst, values.size(), name);
+        if (!values.empty()) {
+            cudaMemcpy(*dst,
+                       values.data(),
+                       sizeof(ValueT) * values.size(),
+                       cudaMemcpyHostToDevice);
+        }
+    };
+    std::vector<uint16_t> host_pin_clock_ids(num_pins, DMP_INVALID_CLOCK_ID);
+    const int host_pin_clock_id_count = static_cast<int>(gtdb.pin_clock_ids.size());
+    for (int pin_id = 0; pin_id < num_pins; ++pin_id) {
+        if (pin_id < host_pin_clock_id_count) {
+            host_pin_clock_ids[pin_id] = gtdb.pin_clock_ids[pin_id];
         }
     }
-    clock_count = static_cast<int>(host_clock_periods.size());
-    dmpCudaMallocChecked(&clock_periods, host_clock_periods.size(), "clock_periods");
-    if (!host_clock_periods.empty()) {
-        cudaMemcpy(clock_periods,
-                   host_clock_periods.data(),
-                   sizeof(float) * host_clock_periods.size(),
-                   cudaMemcpyHostToDevice);
+    std::vector<uint16_t> host_test_clock_ids(num_tests, DMP_INVALID_CLOCK_ID);
+    const int host_test_clock_id_count = static_cast<int>(gtdb.test_clock_ids.size());
+    for (int test_id = 0; test_id < num_tests; ++test_id) {
+        if (test_id < host_test_clock_id_count) {
+            host_test_clock_ids[test_id] = gtdb.test_clock_ids[test_id];
+        }
     }
-    dmpCudaMallocChecked(&test_clock_ids, host_test_clock_ids.size(), "test_clock_ids");
-    if (!host_test_clock_ids.empty()) {
-        cudaMemcpy(test_clock_ids,
-                   host_test_clock_ids.data(),
-                   sizeof(uint8_t) * host_test_clock_ids.size(),
-                   cudaMemcpyHostToDevice);
+    std::vector<float> host_pin_clock_latency_overrides(num_pins, nanf(""));
+    const int host_latency_override_count = static_cast<int>(gtdb.pin_clock_latency_overrides.size());
+    for (int pin_id = 0; pin_id < num_pins; ++pin_id) {
+        if (pin_id < host_latency_override_count) {
+            host_pin_clock_latency_overrides[pin_id] = gtdb.pin_clock_latency_overrides[pin_id];
+        }
     }
+    upload_vector(&pin_clock_ids, host_pin_clock_ids, "pin_clock_ids");
+    upload_vector(&test_clock_ids, host_test_clock_ids, "test_clock_ids");
+    upload_vector(&clock_periods, gtdb.clock_periods, "clock_periods");
+    upload_vector(&clock_rise_edges, gtdb.clock_rise_edges, "clock_rise_edges");
+    upload_vector(&clock_fall_edges, gtdb.clock_fall_edges, "clock_fall_edges");
+    upload_vector(&clock_waveform_rise_edges, gtdb.clock_waveform_rise_edges, "clock_waveform_rise_edges");
+    upload_vector(&clock_waveform_fall_edges, gtdb.clock_waveform_fall_edges, "clock_waveform_fall_edges");
+    upload_vector(&clock_slews, gtdb.clock_slews, "clock_slews");
+    upload_vector(&clock_setup_uncertainties, gtdb.clock_setup_uncertainties, "clock_setup_uncertainties");
+    upload_vector(&clock_hold_uncertainties, gtdb.clock_hold_uncertainties, "clock_hold_uncertainties");
+    upload_vector(&pin_clock_latency_overrides, host_pin_clock_latency_overrides, "pin_clock_latency_overrides");
     if (dmpDeferTimingAlloc()) {
         if (dmpInitSummaryEnabled()) {
             std::fprintf(stderr, "[DMP INIT] timing scratch allocation deferred until after RC propagation\n");
@@ -474,15 +501,10 @@ void DmpModel::release_after_timing()
 {
     cudaFree(pin_at_winner);
     cudaFree(pin_flags);
-    cudaFree(test_clock_ids);
-    cudaFree(clock_periods);
     cudaFree(r_pi);
     cudaFree(elmore_delay);
     pin_at_winner = nullptr;
     pin_flags = nullptr;
-    test_clock_ids = nullptr;
-    clock_periods = nullptr;
-    clock_count = 0;
     r_pi = nullptr;
     elmore_delay = nullptr;
     if (dmpInitMemProfileEnabled()) {
@@ -522,8 +544,17 @@ __host__ DmpModel::~DmpModel(){
         if (elmore_delay) cudaFree(elmore_delay);
         cudaFree(pin_at_winner);
         cudaFree(pin_flags);
+        cudaFree(pin_clock_ids);
         cudaFree(test_clock_ids);
         cudaFree(clock_periods);
+        cudaFree(clock_rise_edges);
+        cudaFree(clock_fall_edges);
+        cudaFree(clock_waveform_rise_edges);
+        cudaFree(clock_waveform_fall_edges);
+        cudaFree(clock_slews);
+        cudaFree(clock_setup_uncertainties);
+        cudaFree(clock_hold_uncertainties);
+        cudaFree(pin_clock_latency_overrides);
             }
 }
 

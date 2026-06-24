@@ -240,13 +240,6 @@ __device__ void RouteGradOnePoleSolveSlopes::clear()
     wave.clear();
 }
 
-static constexpr unsigned int kRouteGradLutMetaScalar = 1u << 0;
-static constexpr unsigned int kRouteGradLutMetaVar0IsSlew = 1u << 1;
-
-static constexpr int kRouteGradNetKeyDirectDrivingCell = 1;
-static constexpr int kRouteGradNetKeyGateNetPair = 2;
-
-
 // Analytic branch-local solve derivatives for DMP driver models. ZERO_C2 uses a
 // one-pole implicit solve; PI uses coefficient derivatives plus the final
 // implicit system J_x dx = -F_p dp for (t0, dt, ceff).

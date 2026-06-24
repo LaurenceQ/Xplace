@@ -5,10 +5,11 @@
 #include <cstdint>
 
 #include <cmath>
-#include <functional>
+#include <limits>
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 #include "common/common.h"
 #include "common/lib/sdc/sdc.h"
@@ -20,6 +21,8 @@ using std::string;
 using std::unordered_map;
 using std::vector;
 using std::array;
+
+class StageProfiler;
 
 namespace gp {
 class GPDatabase;
@@ -98,13 +101,48 @@ public:
 
     bool skip_legacy_rc_tensors = false;
 
+private:
+    std::unique_ptr<StageProfiler> extract_profile;
+    void MarkExtractProfile(const char* phase);
+
 public:
+    static constexpr uint16_t kInvalidClockId = std::numeric_limits<uint16_t>::max();
+
     void ExtractTimingGraph();
-    void SetupThresholdAndFlattenLib(const std::function<void(const char*)>& log_phase);
-    vector<uint8_t> SetPinMapAndTag(int graph_threads, const std::function<void(const char*)>& log_phase);
+    void SetupThresholdAndFlattenLib();
+    vector<uint8_t> SetPinMapAndTag(int graph_threads);
+    void AllocatePinArcListStorage(int graph_threads,
+                                   vector<index_type>& pin_forward_arc_cursor,
+                                   vector<index_type>& pin_backward_arc_cursor);
+    void WriteNetArcList(int graph_threads,
+                         vector<int>& net_arc_start,
+                         vector<index_type>& pin_forward_arc_cursor,
+                         vector<index_type>& pin_backward_arc_cursor);
+    void AppendTestEndpoints();
+    void BuildPinFrontiers(int graph_threads);
+    int CountRegisterClockPins(int graph_threads) const;
+    void CompactEndpointPins();
     void preparePinNameMapForSdc(const sdc::SDC& sdc);
     void readSpef(const std::string& file);
     void readSdc(sdc::SDC& sdc);
+    void RunSdcConstantSimulation();
+    uint16_t BuildClockIdTablesForSdc();
+    void AssignClockIdsToPins(uint16_t default_clock_id,
+                              vector<uint16_t>& net_clock_ids,
+                              int sdc_threads);
+    void InitPinClockLatencyOverrides();
+    bool SetClockLatencyHasUnsupportedMask(const sdc::SetClockLatency& obj) const;
+    void ApplyScalarPinClockLatencyOverride(int pin_id, float delay);
+    void MapTestsToClockIds(const vector<uint16_t>& net_clock_ids,
+                            uint16_t default_clock_id,
+                            int sdc_threads);
+    bool ClockIdValid(uint16_t clock_id) const;
+    float ClockPeriodForPin(int pin_id) const;
+    float ClockRiseEdgeForPin(int pin_id) const;
+    float ClockFallEdgeForPin(int pin_id) const;
+    float ClockSlewForPin(int pin_id, int attr) const;
+    float ClockSetupUncertaintyForTest(int test_id) const;
+    float ClockHoldUncertaintyForTest(int test_id) const;
     void _read_sdc(sdc::SetInputDelay&);
     void _read_sdc(sdc::SetDrivingCell&);
     void _read_sdc(sdc::SetInputTransition&);
@@ -192,17 +230,20 @@ public:
     vector<uint8_t> arc_types;
     vector<int> arc_id2test_id;
     vector<int> test_id2_arc_id;
+    vector<string> clock_names;
+    unordered_map<string, uint16_t> clock_name2id;
     vector<float> clock_periods;
-    vector<uint8_t> pin_clock_ids;
-    vector<uint8_t> test_clock_ids;
-    vector<float> test_clock_periods;
-    vector<float> test_setup_uncertainties;
-    vector<float> test_hold_uncertainties;
-    vector<float> pin_clock_periods;
-    vector<float> pin_clock_rise_edges;
-    vector<float> pin_clock_fall_edges;
-    vector<float> pin_clock_slews;
-    unordered_map<int, float> pin_clock_latency_overrides;
+    vector<float> clock_rise_edges;
+    vector<float> clock_fall_edges;
+    vector<float> clock_waveform_rise_edges;
+    vector<float> clock_waveform_fall_edges;
+    vector<float> clock_slews;
+    vector<float> clock_setup_uncertainties;
+    vector<float> clock_hold_uncertainties;
+    vector<uint16_t> pin_clock_ids;
+    vector<uint16_t> test_clock_ids;
+    vector<float> pin_clock_latency_overrides;
+    vector<char> pin_clock_is_default_fallback;
     unordered_map<std::string, std::array<float, NUM_ATTR>> clock_transitions;
     unordered_map<std::string, float> clock_setup_uncertainty;
     unordered_map<std::string, float> clock_hold_uncertainty;
@@ -389,16 +430,6 @@ public:
     torch::Tensor test_id2_arc_id;
     torch::Tensor test_id2_endpoint_id;
     torch::Tensor primary_output2_endpoint_id;
-    torch::Tensor clock_periods;
-    torch::Tensor pin_clock_ids;
-    torch::Tensor test_clock_ids;
-    torch::Tensor test_clock_periods;
-    torch::Tensor test_setup_uncertainties;
-    torch::Tensor test_hold_uncertainties;
-    torch::Tensor pin_clock_periods;
-    torch::Tensor pin_clock_rise_edges;
-    torch::Tensor pin_clock_fall_edges;
-    torch::Tensor pin_clock_slews;
 
     // DMP/OpenROAD library-level thresholds indexed by [el_rf].
     torch::Tensor dmp_input_thresholds;

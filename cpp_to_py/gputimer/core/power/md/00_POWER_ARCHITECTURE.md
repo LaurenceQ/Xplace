@@ -264,8 +264,8 @@ compute_power_activity_cuda(...)
  20. choosePowerActivityLevels(...)
  21. preparePowerCudaRunBuffers(...)
  22. choosePowerDmpLoadPointers(...)
- 23. 组装 PowerGraphDeviceView / PowerExprDeviceView / PowerActivityState /
-     PowerActivityConfig / PowerComponentDeviceView / PowerActivityCudaModel
+ 23. 组装 PowerGraphDevice / PowerExprDevice / PowerActivitySeedDevice /
+     PowerActivityConfig / PowerComponentDevice / PowerActivityDevice
  24. run_power_activity_cuda_launcher(activity_model)
  25. runPowerChunkedComponents(...)
  26. finishPowerActivityOutputs(...)
@@ -274,7 +274,7 @@ compute_power_activity_cuda(...)
 ## 8. CUDA 主干
 
 ```text
-run_power_activity_cuda_launcher(const PowerActivityCudaModel& model)
+run_power_activity_cuda_launcher(const PowerActivityDevice& model)
   文件: cpp_to_py/gputimer/core/power/cuda_activity/PowerCudaActivity.cu
   做什么:
     - 解包 model
@@ -339,13 +339,13 @@ Component power:
 - `PowerCudaRootInputs`: root seed、loop、feedback 控制。
 - `PowerCudaArcSkipInputs`: power propagation arc skip table。
 - `PowerCudaRunBuffers`: 本次 run 的 output tensors 和 raw pointers。
-- `PowerGraphDeviceView`: graph/timing/load/clock/level device view。
-- `PowerExprDeviceView`: expression device view。
-- `PowerActivityState`: seed 和 sequential state。
+- `PowerGraphDevice`: graph/timing/load/clock/level device view。
+- `PowerExprDevice`: expression device view。
+- `PowerActivitySeedDevice`: seed 和 sequential state。
 - `PowerActivityConfig`: runtime knobs。
-- `PowerComponentDeviceView`: switching/internal/leakage row table 和 output pointers。
-- `PowerActivityCudaModel`: launcher 和 kernels 的总模型。
-- `PowerActivityScratchView`: launcher 内部可变 scratch。
+- `PowerComponentDevice`: switching/internal/leakage row table 和 output pointers。
+- `PowerActivityDevice`: launcher 和 kernels 的总模型。
+- `PowerActivityPropDevice`: launcher 内部可变 scratch。
 
 ## 10. 不变量
 

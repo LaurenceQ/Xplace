@@ -1,5 +1,6 @@
 
 #include "GPUTimer.h"
+#include "DmpModel.h"
 #include "timing/TimingPropagationModel.h"
 
 namespace gt {
@@ -64,7 +65,13 @@ void GPUTimer::propagate_infer_timing() {
     model.d_allocator = d_allocator;
     model.pin_is_clk = pin_is_clk;
     model.pin_is_ideal_clk = pin_is_ideal_clk;
-    model.pin_clock_fall_edges = pin_clock_fall_edges;
+    if (h_dmp_db != nullptr) {
+        model.pin_clock_ids = h_dmp_db->pin_clock_ids;
+        model.clock_fall_edges = h_dmp_db->clock_fall_edges;
+        model.clock_waveform_fall_edges = h_dmp_db->clock_waveform_fall_edges;
+        model.pin_clock_latency_overrides = h_dmp_db->pin_clock_latency_overrides;
+        model.clock_count = h_dmp_db->clock_count;
+    }
     model.num_pins = num_pins;
     propagate_infer_timing_impl(model);
 }

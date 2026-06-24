@@ -1,5 +1,6 @@
 #include "PowerCudaInputBuildInternal.h"
 
+#include "common/XplaceLog.h"
 #include "common/db/Cell.h"
 #include "common/db/Database.h"
 #include "gputimer/core/power/common/PowerActivityHostUtils.h"
@@ -120,23 +121,19 @@ void printPowerRowStatsIfRequested(const std::vector<GpuPowerInternalHost>& h_in
         if (row.when_expr_id >= 0) ++leakage_when_rows;
         else ++leakage_no_when_rows;
     }
-    std::fprintf(stderr,
-                 "[power_row_stats] internal_rows=%zu internal_bytes=%zu internal_chunk=%zu chunk_internal=%d "
-                 "denom_groups=%zu leakage_rows=%zu leakage_bytes=%zu leakage_chunk=%zu chunk_leakage=%d "
-                 "leakage_groups=%zu expr_ops=%zu expr_bytes=%zu expr_cache=%zu\n",
-                 h_internal_rows.size(), internal_row_bytes, internal_chunk_bytes,
-                 chunk_internal_rows ? 1 : 0, denom_group_count,
-                 h_leakage_rows.size(), leakage_row_bytes, leakage_chunk_bytes,
-                 chunk_leakage_rows ? 1 : 0, leakage_group_count,
-                 expr_ops_count, expr_bytes, expr_cache_count);
-    std::fprintf(stderr,
-                 "[power_row_stats] internal_kind input=%zu output=%zu duty0=%zu duty1_expr=%zu "
-                 "duty2_diff=%zu duty3_half=%zu duty4_zero=%zu fast_duty=%zu expr_duty=%zu "
-                 "leakage_no_when=%zu leakage_when=%zu\n",
-                 internal_input_rows, internal_output_rows,
-                 internal_duty_modes[0], internal_duty_modes[1], internal_duty_modes[2],
-                 internal_duty_modes[3], internal_duty_modes[4], internal_fast_duty_rows,
-                 internal_expr_duty_rows, leakage_no_when_rows, leakage_when_rows);
+    XPLACE_DEBUGF("XPLACE_POWER_ROW_STATS",
+                  "internal_rows=%zu internal_bytes=%zu internal_chunk=%zu chunk_internal=%d denom_groups=%zu leakage_rows=%zu leakage_bytes=%zu leakage_chunk=%zu chunk_leakage=%d leakage_groups=%zu expr_ops=%zu expr_bytes=%zu expr_cache=%zu",
+                  h_internal_rows.size(), internal_row_bytes, internal_chunk_bytes,
+                  chunk_internal_rows ? 1 : 0, denom_group_count,
+                  h_leakage_rows.size(), leakage_row_bytes, leakage_chunk_bytes,
+                  chunk_leakage_rows ? 1 : 0, leakage_group_count,
+                  expr_ops_count, expr_bytes, expr_cache_count);
+    XPLACE_DEBUGF("XPLACE_POWER_ROW_STATS",
+                  "internal_kind input=%zu output=%zu duty0=%zu duty1_expr=%zu duty2_diff=%zu duty3_half=%zu duty4_zero=%zu fast_duty=%zu expr_duty=%zu leakage_no_when=%zu leakage_when=%zu",
+                  internal_input_rows, internal_output_rows,
+                  internal_duty_modes[0], internal_duty_modes[1], internal_duty_modes[2],
+                  internal_duty_modes[3], internal_duty_modes[4], internal_fast_duty_rows,
+                  internal_expr_duty_rows, leakage_no_when_rows, leakage_when_rows);
 }
 
 void buildPowerCudaInternalRows(GTDatabase& gtdb,
@@ -263,7 +260,7 @@ void buildPowerCudaInternalRows(GTDatabase& gtdb,
                                     out_pin = port_pin_by_offset[port_id];
                             }
                             if (out_pin >= 0 && out_pin < n && is_driver_pin[out_pin]) {
-                                const int func_expr_id = expr_inputs.pin_func_expr_id[out_pin];
+                                const int func_expr_id = expr_inputs.pin_expr_id[out_pin];
                                 if (expr_inputs.containsPin(gtdb, func_expr_id, pin_id)) {
                                     duty_mode = 2;
                                     duty_expr_id = func_expr_id;
@@ -285,17 +282,17 @@ void buildPowerCudaInternalRows(GTDatabase& gtdb,
                                              duty_mode,
                                              1);
                     if (debug_power_node_env && node.getName().find(debug_power_node_env) != std::string::npos) {
-                        std::fprintf(stderr,
-                                     "[XPLACE_POWER_DEBUG_NODE] node=%s port=%s kind=input ip=%d when='%s' duty_mode=%d duty_expr=%d\n",
-                                     node.getName().c_str(), port->name.c_str(), ip_id,
-                                     ip->when_expr_.c_str(), row.duty_mode, row.duty_expr_id);
+                        XPLACE_DEBUGF("XPLACE_POWER_DEBUG_NODE",
+                                      "node=%s port=%s kind=input ip=%d when='%s' duty_mode=%d duty_expr=%d",
+                                      node.getName().c_str(), port->name.c_str(), ip_id,
+                                      ip->when_expr_.c_str(), row.duty_mode, row.duty_expr_id);
                     }
                     internal_rows.push_back(row);
                 }
             }
 
             if (is_driver_pin[pin_id]) {
-                const int func_expr_id = expr_inputs.pin_func_expr_id[pin_id];
+                const int func_expr_id = expr_inputs.pin_expr_id[pin_id];
                 denom_group_by_pg.clear();
                 for (int ip_id = ip_start; ip_id < ip_end; ++ip_id) {
                     InternalPower* ip = gtdb.liberty_internal_powers[ip_id];
@@ -351,11 +348,11 @@ void buildPowerCudaInternalRows(GTDatabase& gtdb,
                                              duty_mode,
                                              positive_unate);
                     if (debug_power_node_env && node.getName().find(debug_power_node_env) != std::string::npos) {
-                        std::fprintf(stderr,
-                                     "[XPLACE_POWER_DEBUG_NODE] node=%s port=%s kind=output ip=%d related=%s when='%s' duty_mode=%d duty_expr=%d from_pin=%d\n",
-                                     node.getName().c_str(), port->name.c_str(), ip_id,
-                                     ip->related_port_name_.c_str(), ip->when_expr_.c_str(),
-                                     row.duty_mode, row.duty_expr_id, row.from_pin);
+                        XPLACE_DEBUGF("XPLACE_POWER_DEBUG_NODE",
+                                      "node=%s port=%s kind=output ip=%d related=%s when='%s' duty_mode=%d duty_expr=%d from_pin=%d",
+                                      node.getName().c_str(), port->name.c_str(), ip_id,
+                                      ip->related_port_name_.c_str(), ip->when_expr_.c_str(),
+                                      row.duty_mode, row.duty_expr_id, row.from_pin);
                     }
                     internal_rows.push_back(row);
                 }

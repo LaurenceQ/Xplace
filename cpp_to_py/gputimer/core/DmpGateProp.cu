@@ -487,25 +487,64 @@ __device__ bool DmpModel::isIdealClockTimingArc(int timing_id,
     // ISPD25 SDC clocks are ideal unless explicitly propagated. Treat clock
     // pins with a parsed SDC waveform as ideal even if the packed flag is not
     // present after DMP RC setup.
-    return hasPinFlag(from_pin_id, DMP_PIN_CLK) &&
-           pin_clock_rise_edges != nullptr &&
-           from_pin_id >= 0 &&
-           (isfinite(pin_clock_rise_edges[from_pin_id]) ||
-            (pin_clock_fall_edges != nullptr &&
-             isfinite(pin_clock_fall_edges[from_pin_id])));
+    return hasPinFlag(from_pin_id, DMP_PIN_CLK) && clockIdValid(pinClockId(from_pin_id));
+}
+
+__device__ __forceinline__ bool DmpModel::clockIdValid(uint16_t clock_id) const {
+    return clock_id != DMP_INVALID_CLOCK_ID &&
+           clock_id < static_cast<uint16_t>(clock_count);
+}
+
+__device__ __forceinline__ uint16_t DmpModel::pinClockId(int pin_id) const {
+    if (pin_clock_ids == nullptr || pin_id < 0 || pin_id >= num_pins) {
+        return DMP_INVALID_CLOCK_ID;
+    }
+    return pin_clock_ids[pin_id];
+}
+
+__device__ __forceinline__ uint16_t DmpModel::testClockId(int test_id) const {
+    if (test_clock_ids == nullptr || test_id < 0 || test_id >= num_tests) {
+        return DMP_INVALID_CLOCK_ID;
+    }
+    return test_clock_ids[test_id];
 }
 
 __device__ __forceinline__ float DmpModel::clockPeriodForTest(int test_id) const {
-    if (test_clock_ids != nullptr && clock_periods != nullptr && test_id >= 0) {
-        const uint8_t clock_id = test_clock_ids[test_id];
-        if (clock_id < static_cast<uint8_t>(clock_count)) {
+    if (clock_periods != nullptr) {
+        const uint16_t clock_id = testClockId(test_id);
+        if (clockIdValid(clock_id)) {
             const float period = clock_periods[clock_id];
-            if (isfinite(period) && period > 0.0f) {
-                return period;
-            }
+            if (isfinite(period) && period > 0.0f) return period;
         }
     }
     return clock_period;
+}
+
+__device__ __forceinline__ float DmpModel::pinClockEdge(int pin_id, bool fall) const {
+    const uint16_t clock_id = pinClockId(pin_id);
+    const float override =
+        (pin_clock_latency_overrides != nullptr && pin_id >= 0 && pin_id < num_pins)
+            ? pin_clock_latency_overrides[pin_id]
+            : nanf("");
+    if (isfinite(override)) {
+        if (clockIdValid(clock_id)) {
+            const float* waveform_edges = fall ? clock_waveform_fall_edges
+                                               : clock_waveform_rise_edges;
+            if (waveform_edges != nullptr) {
+                const float waveform = waveform_edges[clock_id];
+                if (isfinite(waveform)) return waveform + override;
+            }
+        }
+        return override;
+    }
+    if (clockIdValid(clock_id)) {
+        const float* edges = fall ? clock_fall_edges : clock_rise_edges;
+        if (edges != nullptr) {
+            const float edge = edges[clock_id];
+            if (isfinite(edge)) return edge;
+        }
+    }
+    return nanf("");
 }
 
 __device__ float DmpModel::idealClockEdgeTime(int timing_id,
@@ -517,18 +556,9 @@ __device__ float DmpModel::idealClockEdgeTime(int timing_id,
                                    !d_allocator->timing_is_rising_edge_triggered(timing_id);
     const bool use_fall_edge = latch_clock_arc ? !falling_triggered : falling_triggered;
     if (from_pin_id >= 0) {
-        if (use_fall_edge) {
-            if (pin_clock_fall_edges != nullptr) {
-                const float edge = pin_clock_fall_edges[from_pin_id];
-                if (isfinite(edge)) {
-                    return edge;
-                }
-            }
-        } else if (pin_clock_rise_edges != nullptr) {
-            const float edge = pin_clock_rise_edges[from_pin_id];
-            if (isfinite(edge)) {
-                return edge;
-            }
+        const float clock_edge = pinClockEdge(from_pin_id, use_fall_edge);
+        if (isfinite(clock_edge)) {
+            return clock_edge;
         }
         if (pinAt != nullptr) {
             const int rf = use_fall_edge ? 1 : 0;
@@ -548,10 +578,35 @@ __device__ float DmpModel::idealClockEdgeTime(int timing_id,
 
 __device__ float DmpModel::idealClockSlew(int from_pin_id,
                                           int attr) const {
-    if (pin_clock_slews != nullptr && from_pin_id >= 0 && attr >= 0 && attr < NUM_ATTR) {
-        const float slew = pin_clock_slews[from_pin_id * NUM_ATTR + attr];
-        if (isfinite(slew)) {
-            return slew;
+    if (clock_slews != nullptr && from_pin_id >= 0 && attr >= 0 && attr < NUM_ATTR) {
+        const uint16_t clock_id = pinClockId(from_pin_id);
+        if (clockIdValid(clock_id)) {
+            const float slew = clock_slews[static_cast<int>(clock_id) * NUM_ATTR + attr];
+            if (isfinite(slew)) {
+                return slew;
+            }
+        }
+    }
+    return 0.0f;
+}
+
+__device__ __forceinline__ float DmpModel::setupUncertaintyForTest(int test_id) const {
+    if (clock_setup_uncertainties != nullptr) {
+        const uint16_t clock_id = testClockId(test_id);
+        if (clockIdValid(clock_id)) {
+            const float uncertainty = clock_setup_uncertainties[clock_id];
+            return isfinite(uncertainty) ? uncertainty : 0.0f;
+        }
+    }
+    return 0.0f;
+}
+
+__device__ __forceinline__ float DmpModel::holdUncertaintyForTest(int test_id) const {
+    if (clock_hold_uncertainties != nullptr) {
+        const uint16_t clock_id = testClockId(test_id);
+        if (clockIdValid(clock_id)) {
+            const float uncertainty = clock_hold_uncertainties[clock_id];
+            return isfinite(uncertainty) ? uncertainty : 0.0f;
         }
     }
     return 0.0f;
@@ -597,13 +652,13 @@ __device__ inline void DmpModel::propagateTest(int test_id,
             sr = idealClockSlew(from_pin_id, fel_rf);
         }
         float sc = pinSlew[to_slot];
-        testConstraint[test_id * NUM_ATTR + attr] = d_allocator->query(timing_id, frf, rf, sr, sc, 2);
+            testConstraint[test_id * NUM_ATTR + attr] = d_allocator->query(timing_id, frf, rf, sr, sc, 2);
         if (!isnan(testConstraint[test_id * NUM_ATTR + attr]) && !isnan(testRelatedAT[test_id * NUM_ATTR + attr])) {
             if (el == 0) {
-                const float hold_uncertainty = test_hold_uncertainties ? test_hold_uncertainties[test_id] : 0.0f;
+                const float hold_uncertainty = holdUncertaintyForTest(test_id);
                 pinRat[to_slot] = testRelatedAT[test_id * NUM_ATTR + attr] + testConstraint[test_id * NUM_ATTR + attr] + hold_uncertainty;  // hold clocks needs data stay late, rat = at_clk + T_hold
             } else {
-                const float setup_uncertainty = test_setup_uncertainties ? test_setup_uncertainties[test_id] : 0.0f;
+                const float setup_uncertainty = setupUncertaintyForTest(test_id);
                 pinRat[to_slot] = testRelatedAT[test_id * NUM_ATTR + attr] - testConstraint[test_id * NUM_ATTR + attr] - setup_uncertainty;  // setup clock needs data come early, rat = at_clk - T_setup
             }
             testRAT[test_id * NUM_ATTR + attr] = pinRat[to_slot];

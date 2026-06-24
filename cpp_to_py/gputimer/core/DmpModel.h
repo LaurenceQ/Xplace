@@ -34,6 +34,7 @@ static constexpr int DMP_DRIVING_CELL_PREFIX_ATTR = -2;
 static constexpr uint8_t DMP_PIN_PRIMARY_INPUT = 1u << 0;
 static constexpr uint8_t DMP_PIN_CLK = 1u << 1;
 static constexpr uint8_t DMP_PIN_IDEAL_CLK = 1u << 2;
+static constexpr uint16_t DMP_INVALID_CLOCK_ID = 65535u;
 
 struct DmpModel {
     const char **pin_names;
@@ -77,14 +78,18 @@ struct DmpModel {
     float *testRelatedAT;
     float *testRAT;
     float *testConstraint;
-    uint8_t *test_clock_ids;
+    uint16_t *pin_clock_ids;
+    uint16_t *test_clock_ids;
     float *clock_periods;
+    float *clock_rise_edges;
+    float *clock_fall_edges;
+    float *clock_waveform_rise_edges;
+    float *clock_waveform_fall_edges;
+    float *clock_slews;
+    float *clock_setup_uncertainties;
+    float *clock_hold_uncertainties;
+    float *pin_clock_latency_overrides;
     int clock_count;
-    const float *pin_clock_rise_edges;
-    const float *pin_clock_fall_edges;
-    const float *pin_clock_slews;
-    const float *test_setup_uncertainties;
-    const float *test_hold_uncertainties;
     float *arcDelay;
     int *timing_arc_id_map;
     float clock_period;
@@ -121,10 +126,12 @@ struct DmpModel {
                   dmp_library_slew_derates(nullptr), pin_flags(nullptr),
                   pinSlew(nullptr), elmore_delay(nullptr), pinAt(nullptr), pinRat(nullptr),
                   testRelatedAT(nullptr), testRAT(nullptr), testConstraint(nullptr),
-                  test_clock_ids(nullptr), clock_periods(nullptr), clock_count(0),
-                  pin_clock_rise_edges(nullptr), pin_clock_fall_edges(nullptr),
-                  pin_clock_slews(nullptr),
-                  test_setup_uncertainties(nullptr), test_hold_uncertainties(nullptr),
+                  pin_clock_ids(nullptr), test_clock_ids(nullptr),
+                  clock_periods(nullptr), clock_rise_edges(nullptr), clock_fall_edges(nullptr),
+                  clock_waveform_rise_edges(nullptr), clock_waveform_fall_edges(nullptr),
+                  clock_slews(nullptr), clock_setup_uncertainties(nullptr),
+                  clock_hold_uncertainties(nullptr), pin_clock_latency_overrides(nullptr),
+                  clock_count(0),
                   arcDelay(nullptr),
                   timing_arc_id_map(nullptr),
                   at_prefix_pin(nullptr), at_prefix_arc(nullptr), at_prefix_attr(nullptr),
@@ -141,6 +148,10 @@ struct DmpModel {
     }
     CUDA_DEV int timingLibraryId(int timing_id) const;
     CUDA_DEV int pinLibraryId(int pin_id) const;
+    CUDA_DEV_INLINE bool clockIdValid(uint16_t clock_id) const;
+    CUDA_DEV_INLINE uint16_t pinClockId(int pin_id) const;
+    CUDA_DEV_INLINE uint16_t testClockId(int test_id) const;
+    CUDA_DEV_INLINE float pinClockEdge(int pin_id, bool fall) const;
     CUDA_DEV_INLINE void loadPinThresholds(int pin_id,
                                     int attr,
                                     double& vth,
@@ -245,6 +256,8 @@ struct DmpModel {
     CUDA_DEV_INLINE float clockPeriodForTest(int test_id) const;
     CUDA_DEV float idealClockEdgeTime(int timing_id, int from_pin_id) const;
     CUDA_DEV float idealClockSlew(int from_pin_id, int attr) const;
+    CUDA_DEV_INLINE float setupUncertaintyForTest(int test_id) const;
+    CUDA_DEV_INLINE float holdUncertaintyForTest(int test_id) const;
     CUDA_DEV void propagateLoadSlewDelay(int arc_id, int attr);
     CUDA_DEV bool updateAtWinner(int to_slot, float at, int arc_id, int from_attr);
     CUDA_DEV_INLINE void propagateTest(int test_id, int from_pin_id, int attr, int el, int rf, int timing_id, int to_slot);
@@ -302,19 +315,7 @@ struct DmpModel {
                float unit_to_micron,
                float rf,
                float cf);
-    void initialize_rc_explicit(
-               const std::vector<int>& host_edge_from,
-               const std::vector<int>& host_edge_to,
-               const std::vector<int>& host_flat_net2node_start_map,
-               const std::vector<int>& host_flat_net2edge_start_map,
-               const std::vector<int>& host_node2pin_map,
-               const std::vector<float>& host_edge_res,
-               const std::vector<float>& host_node_cap,
-               const std::vector<uint8_t>& host_includes_pin_caps,
-               float *pinCap,
-               int num_nets,
-               int num_nodes,
-               int num_edges);
+    void initialize_rc_explicit(const HostRcGraph& graph, float *pinCap);
     CUDA_DEV void calc_dmp_rc();
     CUDA_DEV void propagate_dmp_rc();
 

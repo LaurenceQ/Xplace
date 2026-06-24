@@ -137,30 +137,13 @@ bool load_route_segment_cache(const std::string& cache_path,
                               HostRcGraph& graph) {
     const bool profile = env_enabled("GPUTIMER_ROUTE_SEG_CACHE_PROFILE") ||
                          env_enabled("DMP_RC_PROFILE");
-    const auto start = std::chrono::steady_clock::now();
-    auto last = start;
-    auto log_profile = [&](const char* phase) {
-        if (!profile) {
-            return;
-        }
-        const auto now = std::chrono::steady_clock::now();
-        const double elapsed = std::chrono::duration<double>(now - last).count();
-        const double total = std::chrono::duration<double>(now - start).count();
-        std::fprintf(stderr,
-                     "[ROUTE_SEG_CACHE_PROFILE] phase=%s elapsed=%.3f total=%.3f path=%s\n",
-                     phase,
-                     elapsed,
-                     total,
-                     cache_path.c_str());
-        std::fflush(stderr);
-        last = now;
-    };
+    StageProfiler cache_profiler("ROUTE_SEG_CACHE_PROFILE", profile, stderr);
 
     std::ifstream input(cache_path, std::ios::binary);
     if (!input) {
         return false;
     }
-    log_profile("open_cache");
+    cache_profiler.markf("open_cache", "path=%s", cache_path.c_str());
 
     RouteSegmentCacheHeader header;
     input.read(reinterpret_cast<char*>(&header), sizeof(header));
@@ -177,9 +160,10 @@ bool load_route_segment_cache(const std::string& cache_path,
         header.num_edges < 0) {
         return false;
     }
-    log_profile("read_header");
+    cache_profiler.markf("read_header", "path=%s", cache_path.c_str());
 
     HostRcGraph loaded;
+    loaded.num_nets = header.num_nets;
     loaded.num_nodes = header.num_nodes;
     loaded.num_edges = header.num_edges;
     loaded.skipped_loop_edges = header.skipped_loop_edges;
@@ -191,38 +175,38 @@ bool load_route_segment_cache(const std::string& cache_path,
     if (!read_cache_vector(input, loaded.edge_from, num_edges)) {
         return false;
     }
-    log_profile("read_edge_from");
+    cache_profiler.markf("read_edge_from", "path=%s", cache_path.c_str());
     if (!read_cache_vector(input, loaded.edge_to, num_edges)) {
         return false;
     }
-    log_profile("read_edge_to");
+    cache_profiler.markf("read_edge_to", "path=%s", cache_path.c_str());
     if (!read_cache_vector(input, loaded.edge_res, num_edges)) {
         return false;
     }
-    log_profile("read_edge_res");
+    cache_profiler.markf("read_edge_res", "path=%s", cache_path.c_str());
     if (!read_cache_vector(input, loaded.node_cap, num_nodes * NUM_ATTR)) {
         return false;
     }
-    log_profile("read_node_cap");
+    cache_profiler.markf("read_node_cap", "path=%s", cache_path.c_str());
     if (!read_cache_vector(input, loaded.net2node_start, num_nets + 1)) {
         return false;
     }
-    log_profile("read_net2node_start");
+    cache_profiler.markf("read_net2node_start", "path=%s", cache_path.c_str());
     if (!read_cache_vector(input, loaded.net2edge_start, num_nets + 1)) {
         return false;
     }
-    log_profile("read_net2edge_start");
+    cache_profiler.markf("read_net2edge_start", "path=%s", cache_path.c_str());
     if (!read_cache_vector(input, loaded.node2pin, num_nodes)) {
         return false;
     }
-    log_profile("read_node2pin");
+    cache_profiler.markf("read_node2pin", "path=%s", cache_path.c_str());
     if (!read_cache_vector(input, loaded.includes_pin_caps, num_nets)) {
         return false;
     }
-    log_profile("read_includes_pin_caps");
+    cache_profiler.markf("read_includes_pin_caps", "path=%s", cache_path.c_str());
 
     graph = std::move(loaded);
-    log_profile("load_done");
+    cache_profiler.markf("load_done", "path=%s", cache_path.c_str());
     return true;
 }
 

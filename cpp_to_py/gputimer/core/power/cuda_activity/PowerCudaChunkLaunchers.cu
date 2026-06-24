@@ -63,22 +63,22 @@ static bool prepare_power_component_scratch(int n,
                                             const float* packed_activity,
                                             const float* activity_density,
                                             const float* activity_duty,
-                                            PowerActivityScratchView& scratch,
+                                            PowerActivityPropDevice& scratch,
                                             float** owned_density,
                                             float** owned_duty) {
     *owned_density = nullptr;
     *owned_duty = nullptr;
-    scratch = PowerActivityScratchView{};
+    scratch = PowerActivityPropDevice{};
     if (n <= 0) return false;
     if (activity_density && activity_duty) {
-        scratch = PowerActivityScratchView(const_cast<float*>(activity_density),
+        scratch = PowerActivityPropDevice(const_cast<float*>(activity_density),
                                            const_cast<float*>(activity_duty));
         return true;
     }
     if (!packed_activity) return false;
     unpack_power_activity_density_duty(n, packed_activity, owned_density, owned_duty);
     if (!*owned_density || !*owned_duty) return false;
-    scratch = PowerActivityScratchView(*owned_density, *owned_duty);
+    scratch = PowerActivityPropDevice(*owned_density, *owned_duty);
     return true;
 }
 
@@ -88,7 +88,7 @@ static void release_owned_power_component_scratch(float* owned_density,
     if (owned_duty) cudaFree(owned_duty);
 }
 
-void run_power_internal_denom_chunk_cuda_launcher(const PowerInternalDenomModel& model) {
+void run_power_internal_denom_chunk_cuda_launcher(const PowerInternalDenomDevice& model) {
     int n = model.n;
     const float* d_precomputed_activity = model.precomputed_activity;
     GpuPowerInternalHost* d_internal_rows = model.internal_rows;
@@ -97,7 +97,7 @@ void run_power_internal_denom_chunk_cuda_launcher(const PowerInternalDenomModel&
     if (n <= 0 || (!d_precomputed_activity && (!model.activity_density || !model.activity_duty)) ||
         !d_internal_rows || num_internal_rows <= 0 || !d_denom)
         return;
-    PowerActivityScratchView scratch;
+    PowerActivityPropDevice scratch;
     float* owned_density = nullptr;
     float* owned_duty = nullptr;
     if (prepare_power_component_scratch(n, d_precomputed_activity,
@@ -116,7 +116,7 @@ void run_power_internal_denom_chunk_cuda_launcher(const PowerInternalDenomModel&
     release_owned_power_component_scratch(owned_density, owned_duty);
 }
 
-void run_power_internal_contrib_chunk_cuda_launcher(const PowerInternalContribModel& model) {
+void run_power_internal_contrib_chunk_cuda_launcher(const PowerInternalInstDevice& model) {
     int n = model.n;
     const float* d_precomputed_activity = model.precomputed_activity;
     GpuPowerInternalHost* d_internal_rows = model.internal_rows;
@@ -126,7 +126,7 @@ void run_power_internal_contrib_chunk_cuda_launcher(const PowerInternalContribMo
     if (n <= 0 || (!d_precomputed_activity && (!model.activity_density || !model.activity_duty)) ||
         !d_internal_rows || num_internal_rows <= 0 || !d_denom || !d_power_allocator)
         return;
-    PowerActivityScratchView scratch;
+    PowerActivityPropDevice scratch;
     float* owned_density = nullptr;
     float* owned_duty = nullptr;
     if (prepare_power_component_scratch(n, d_precomputed_activity,
@@ -145,7 +145,7 @@ void run_power_internal_contrib_chunk_cuda_launcher(const PowerInternalContribMo
     release_owned_power_component_scratch(owned_density, owned_duty);
 }
 
-void run_power_leakage_rows_chunk_cuda_launcher(const PowerLeakageRowsModel& model) {
+void run_power_leakage_rows_chunk_cuda_launcher(const PowerLeakageCondDevice& model) {
     const int n = model.n;
     const float* d_precomputed_activity = model.precomputed_activity;
     GpuPowerLeakageRowHost* d_leakage_rows = model.leakage_rows;
@@ -157,7 +157,7 @@ void run_power_leakage_rows_chunk_cuda_launcher(const PowerLeakageRowsModel& mod
         !d_leakage_rows || num_leakage_rows <= 0 || !d_group_cond_leakage ||
         !d_group_cond_duty_sum || !d_group_cond_count)
         return;
-    PowerActivityScratchView scratch;
+    PowerActivityPropDevice scratch;
     float* owned_density = nullptr;
     float* owned_duty = nullptr;
     if (prepare_power_component_scratch(n, d_precomputed_activity,
@@ -176,7 +176,7 @@ void run_power_leakage_rows_chunk_cuda_launcher(const PowerLeakageRowsModel& mod
     release_owned_power_component_scratch(owned_density, owned_duty);
 }
 
-void run_power_leakage_summary_chunk_cuda_launcher(const PowerLeakageSummaryModel& model) {
+void run_power_leakage_summary_chunk_cuda_launcher(const PowerLeakageInstDevice& model) {
     GpuPowerLeakageGroupHost* d_leakage_groups = model.leakage_groups;
     const int num_leakage_groups = model.num_leakage_groups;
     float* d_group_cond_leakage = model.group_cond_leakage;

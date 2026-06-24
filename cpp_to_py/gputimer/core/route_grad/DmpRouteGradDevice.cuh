@@ -27,6 +27,12 @@ inline constexpr int kRouteGradStatPiFailExtraLut = 38;
 inline constexpr int kRouteGradStatPiRecoveredCeffFromDelay = 39;
 inline constexpr int kRouteGradPrimitiveStatCount = 40;
 
+inline constexpr unsigned int kRouteGradLutMetaScalar = 1u << 0;
+inline constexpr unsigned int kRouteGradLutMetaVar0IsSlew = 1u << 1;
+
+inline constexpr int kRouteGradNetKeyDirectDrivingCell = 1;
+inline constexpr int kRouteGradNetKeyGateNetPair = 2;
+
 struct RouteGradObjectiveInit {
     const float* pin_at = nullptr;
     const float* pin_rat = nullptr;

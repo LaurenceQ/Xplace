@@ -63,20 +63,15 @@ std::pair<float, float> powerClockActivityForPin(GTDatabase& gtdb,
                                                  float clock_density) {
     float density = clock_density;
     float duty = 0.5f;
-    if (pin_id >= 0 && pin_id < static_cast<int>(gtdb.pin_clock_periods.size())) {
-        const float period = gtdb.pin_clock_periods[pin_id];
-        if (std::isfinite(period) && period > 0.0f && sdc_time_scale > 0.0) {
-            density = powerDensityForPeriod(2.0, period, sdc_time_scale);
-            if (pin_id < static_cast<int>(gtdb.pin_clock_rise_edges.size())
-                && pin_id < static_cast<int>(gtdb.pin_clock_fall_edges.size())) {
-                const float rise = gtdb.pin_clock_rise_edges[pin_id];
-                const float fall = gtdb.pin_clock_fall_edges[pin_id];
-                if (std::isfinite(rise) && std::isfinite(fall)) {
-                    const float candidate_duty = (fall - rise) / period;
-                    if (std::isfinite(candidate_duty) && candidate_duty >= 0.0f && candidate_duty <= 1.0f)
-                        duty = candidate_duty;
-                }
-            }
+    const float period = gtdb.ClockPeriodForPin(pin_id);
+    if (std::isfinite(period) && period > 0.0f && sdc_time_scale > 0.0) {
+        density = powerDensityForPeriod(2.0, period, sdc_time_scale);
+        const float rise = gtdb.ClockRiseEdgeForPin(pin_id);
+        const float fall = gtdb.ClockFallEdgeForPin(pin_id);
+        if (std::isfinite(rise) && std::isfinite(fall)) {
+            const float candidate_duty = (fall - rise) / period;
+            if (std::isfinite(candidate_duty) && candidate_duty >= 0.0f && candidate_duty <= 1.0f)
+                duty = candidate_duty;
         }
     }
     return {density, duty};

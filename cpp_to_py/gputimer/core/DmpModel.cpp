@@ -1,9 +1,9 @@
 // #include "DmpModel.h"
 #include "GPUTimer.h"
+#include "common/XplaceLog.h"
 #include "common/utils/utils.h"
 #include "common/db/Database.h"
 #include "gputimer/db/GTDatabase.h"
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
@@ -31,35 +31,12 @@ static bool dmp_progress_enabled()
            dmp_cpp_env_enabled("DMP_RC_PROFILE");
 }
 
-class DmpRcStageProfile {
-public:
-    explicit DmpRcStageProfile(bool enabled)
-        : enabled_(enabled),
-          start_(std::chrono::steady_clock::now()),
-          last_(start_) {}
-
-    void log(const char* phase)
-    {
-        if (!enabled_) {
-            return;
-        }
-        const auto now = std::chrono::steady_clock::now();
-        const double elapsed = std::chrono::duration<double>(now - last_).count();
-        const double total = std::chrono::duration<double>(now - start_).count();
-        std::fprintf(stderr,
-                     "[DMP_RC_STAGE] phase=%s elapsed=%.3f total=%.3f\n",
-                     phase,
-                     elapsed,
-                     total);
-        std::fflush(stderr);
-        last_ = now;
-    }
-
-private:
-    bool enabled_ = false;
-    std::chrono::steady_clock::time_point start_;
-    std::chrono::steady_clock::time_point last_;
-};
+#define DMP_PROGRESS_PRINT(...)           \
+    do {                                  \
+        if (dmp_progress_enabled()) {     \
+            XPLACE_LOGF("DMP_PROGRESS", __VA_ARGS__); \
+        }                                 \
+    } while (false)
 
 template <typename T>
 static void release_vector_storage(std::vector<T>& values)
@@ -67,17 +44,17 @@ static void release_vector_storage(std::vector<T>& values)
     std::vector<T>().swap(values);
 }
 
-static void release_host_rc_graph_storage(HostRcGraph& graph)
+void HostRcGraph::release_storage()
 {
-    release_vector_storage(graph.edge_from);
-    release_vector_storage(graph.edge_to);
-    release_vector_storage(graph.edge_res);
-    release_vector_storage(graph.node_cap);
-    release_vector_storage(graph.net2node_start);
-    release_vector_storage(graph.net2edge_start);
-    release_vector_storage(graph.node2pin);
-    release_vector_storage(graph.node_names);
-    release_vector_storage(graph.includes_pin_caps);
+    release_vector_storage(edge_from);
+    release_vector_storage(edge_to);
+    release_vector_storage(edge_res);
+    release_vector_storage(node_cap);
+    release_vector_storage(net2node_start);
+    release_vector_storage(net2edge_start);
+    release_vector_storage(node2pin);
+    release_vector_storage(node_names);
+    release_vector_storage(includes_pin_caps);
 }
 
 void compute_pi_model_cuda(DmpModel* dmp_db, int num_nets);
@@ -90,10 +67,7 @@ void update_timing_dmp_cuda(GPUTimer* timer);
 void print_pinLoad_cuda(DmpModel* dmp_db, vector<int> level_list_end_cpu, vector<string> pin_names);
 static void apply_dmp_driving_cell_source_slew(GPUTimer& timer);
 void GPUTimer::update_timing_dmp(){
-    if (dmp_progress_enabled()) {
-        printf("Update timing DMP started.\n");
-        fflush(stdout);
-    }
+    DMP_PROGRESS_PRINT("Update timing DMP started.");
     apply_dmp_driving_cell_source_slew(*this);
     update_timing_dmp_cuda(this);
 }
@@ -103,7 +77,7 @@ void GPUTimer::print_pinLoad(){
 
 void GPUTimer::print_pin_id_name(){
     for (size_t pin_id = 0; pin_id < gtdb.pin_names.size(); ++pin_id) {
-        printf("%zu %s\n", pin_id, gtdb.pin_names[pin_id].c_str());
+        XPLACE_LOGF("DMP_PIN_ID", "%zu %s", pin_id, gtdb.pin_names[pin_id].c_str());
     }
 }
 
@@ -148,20 +122,17 @@ static void apply_dmp_driving_cell_source_slew(GPUTimer& timer) {
         }
     }
 
-    if (dmp_progress_enabled()) {
-        printf("[DMP DRIVING CELL] prepared sources=%zu lanes=%d\n",
-               timer.gtdb.driving_cell_sources.size(),
-               finite_lanes);
-        fflush(stdout);
-    }
+    DMP_PROGRESS_PRINT("[DMP DRIVING CELL] prepared sources=%zu lanes=%d",
+                       timer.gtdb.driving_cell_sources.size(),
+                       finite_lanes);
     apply_dmp_driving_cell_source_slew_cuda(timer.dmp_db, pin_ids, timing_ids, input_rfs, input_slews);
 }
 void GPUTimer::get_units(){
-    printf("time unit: %E\n", time_unit());
-    printf("res unit: %E\n", res_unit);
-    printf("cap unit: %E\n", cap_unit);
-    printf("micron: %d\n", microns);
-    printf("scale factor: %E\n", scale_factor);
+    XPLACE_LOGF("DMP_UNITS", "time_unit=%E", time_unit());
+    XPLACE_LOGF("DMP_UNITS", "res_unit=%E", res_unit);
+    XPLACE_LOGF("DMP_UNITS", "cap_unit=%E", cap_unit);
+    XPLACE_LOGF("DMP_UNITS", "micron=%d", microns);
+    XPLACE_LOGF("DMP_UNITS", "scale_factor=%E", scale_factor);
 }
 auto& retrieve_pins_from_pos_dmp(std::map<utils::PointT<int>, std::set<int>>& pos2pins_map, const utils::PointT<int>& point, int& index) {
     if (pos2pins_map.find(point) != pos2pins_map.end()) return pos2pins_map[point];
@@ -227,7 +198,7 @@ tuple<vector<int>, vector<int>, vector<float>, vector<int>, vector<int>, vector<
         vy.reserve(degree);
         std::map<int, int> global2inner_map;
         if(dmp_debug_on)
-            printf("net:%s\n", net_names[i].c_str());
+            XPLACE_ERRORF("DMP_FLUTE_DEBUG", "net=%s", net_names[i].c_str());
         for (int j = 0; j < degree; ++j) {
             int pin = flat_net2pin_map[j + flat_net2pin_start_map[i]];
             int node = pin2node_map[pin];
@@ -236,7 +207,9 @@ tuple<vector<int>, vector<int>, vector<float>, vector<int>, vector<int>, vector<
             auto x_ = static_cast<int>((x[node] + offset_x) * scale);
             auto y_ = static_cast<int>((y[node] + offset_y) * scale);
             if(dmp_debug_on)
-                printf("pin:%s node:%d loc:(%.4f, %.4f) offset:(%.4f, %.4f) final:(%d, %d)\n", pin_names[pin].c_str(), node, x[node], y[node], offset_x, offset_y, x_, y_);
+                XPLACE_ERRORF("DMP_FLUTE_DEBUG",
+                              "pin=%s node=%d loc=(%.4f,%.4f) offset=(%.4f,%.4f) final=(%d,%d)",
+                              pin_names[pin].c_str(), node, x[node], y[node], offset_x, offset_y, x_, y_);
             global2inner_map[pin] = j;
 
             if (pos2pins_map.find(Point2i(x_, y_)) != pos2pins_map.end())
@@ -252,14 +225,17 @@ tuple<vector<int>, vector<int>, vector<float>, vector<int>, vector<int>, vector<
         std::set<Point2i> multipin_pos;
         std::map<Point2i, Point2i> pos2neighbor_map;
         if(dmp_debug_on)
-            printf("net:%s degree:%d valid_size:%d\n", net_names[i].c_str(), degree, valid_size);
+            XPLACE_ERRORF("DMP_FLUTE_DEBUG", "net=%s degree=%d valid_size=%d", net_names[i].c_str(), degree, valid_size);
         if (valid_size > 1) {
             Tree flutetree = flute(valid_size, vx.data(), vy.data(), 8);
             for (int bid = 0; bid < 2 * valid_size - 2; ++bid) {
                 Branch& branch1 = flutetree.branch[bid];
                 Branch& branch2 = flutetree.branch[branch1.n];
                 if(dmp_debug_on)
-                    printf("flutetree branch %d : %d %d -> %d %d dist %d\n", bid, branch1.x, branch1.y, branch2.x, branch2.y, utils::Dist(Point2i(branch1.x, branch1.y), Point2i(branch2.x, branch2.y)));
+                    XPLACE_ERRORF("DMP_FLUTE_DEBUG",
+                                  "branch=%d from=(%d,%d) to=(%d,%d) dist=%d",
+                                  bid, branch1.x, branch1.y, branch2.x, branch2.y,
+                                  utils::Dist(Point2i(branch1.x, branch1.y), Point2i(branch2.x, branch2.y)));
                 Point2i p1(branch1.x, branch1.y), p2(branch2.x, branch2.y);
 
                 if (p1 == p2) continue;
@@ -351,20 +327,12 @@ void GPUTimer::update_rc_timing_flute_dmp(torch::Tensor node_lpos, bool record) 
     release_vector_storage(flat_net2edge_start_map);
     release_vector_storage(node2pin_map);
     release_vector_storage(edge_wl);
-    if (dmp_progress_enabled()) {
-        printf("DMP RC calculation starting, num_nets: %d num_nodes: %d num_edges: %d\n", num_nets, num_nodes, num_edges);
-        fflush(stdout);
-    }
+    DMP_PROGRESS_PRINT("DMP RC calculation starting, num_nets: %d num_nodes: %d num_edges: %d",
+                       num_nets, num_nodes, num_edges);
     calc_res_cap_dmp(dmp_db, num_nets);
-    if (dmp_progress_enabled()) {
-        printf("DMP RC calculation done.\n");
-        fflush(stdout);
-    }
+    DMP_PROGRESS_PRINT("DMP RC calculation done.");
     propagate_rc_tree_dmp(dmp_db, num_nets);
-    if (dmp_progress_enabled()) {
-        printf("DMP RC propagation done.\n");
-        fflush(stdout);
-    }
+    DMP_PROGRESS_PRINT("DMP RC propagation done.");
     apply_dmp_driving_cell_source_slew(*this);
 
     if (record) {
@@ -374,116 +342,52 @@ void GPUTimer::update_rc_timing_flute_dmp(torch::Tensor node_lpos, bool record) 
     }
 }
 
-void GPUTimer::init_dmp_rc_spef() {
-    HostRcGraph graph = build_spef_rc();
-    const int graph_num_nodes = graph.num_nodes;
-    const int graph_num_edges = graph.num_edges;
-    initialize_dmp_rc_explicit(graph.edge_from,
-                               graph.edge_to,
-                               graph.net2node_start,
-                               graph.net2edge_start,
-                               graph.node2pin,
-                               graph.edge_res,
-                               graph.node_cap,
-                               graph.includes_pin_caps,
-                               num_nets,
-                               graph.num_nodes,
-                               graph.num_edges);
-    release_host_rc_graph_storage(graph);
-    if (dmp_progress_enabled()) {
-        printf("DMP SPEF RC calculation starting, num_nets: %d num_nodes: %d num_edges: %d\n",
-               num_nets, graph_num_nodes, graph_num_edges);
-        fflush(stdout);
-    }
+void GPUTimer::run_dmp_rc(int num_nets, bool update_timing_after_rc) {
     calc_res_cap_dmp(dmp_db, num_nets);
-    if (dmp_progress_enabled()) {
-        printf("DMP SPEF RC calculation done.\n");
-        fflush(stdout);
-    }
     propagate_rc_tree_dmp(dmp_db, num_nets);
-    if (dmp_progress_enabled()) {
-        printf("DMP SPEF RC propagation done.\n");
-        fflush(stdout);
+    if (update_timing_after_rc) {
+        dmp_prepare_timing_after_rc(h_dmp_db, dmp_db);
     }
     apply_dmp_driving_cell_source_slew(*this);
+}
+
+void GPUTimer::init_dmp_rc_spef() {
+    HostRcGraph graph = build_spef_rc();
+    const int graph_num_nets = graph.num_nets;
+    const int graph_num_nodes = graph.num_nodes;
+    const int graph_num_edges = graph.num_edges;
+    initialize_dmp_rc_explicit(graph);
+    graph.release_storage();
+    DMP_PROGRESS_PRINT("DMP SPEF RC calculation starting, num_nets: %d num_nodes: %d num_edges: %d",
+                       graph_num_nets, graph_num_nodes, graph_num_edges);
+    run_dmp_rc(graph_num_nets, false);
+    DMP_PROGRESS_PRINT("DMP SPEF RC propagation done.");
 }
 
 void GPUTimer::init_dmp_rc_gr(const std::string& file) {
     HostRcGraph graph = build_openroad_gr_rc(file);
+    const int graph_num_nets = graph.num_nets;
     const int graph_num_nodes = graph.num_nodes;
     const int graph_num_edges = graph.num_edges;
-    initialize_dmp_rc_explicit(graph.edge_from,
-                               graph.edge_to,
-                               graph.net2node_start,
-                               graph.net2edge_start,
-                               graph.node2pin,
-                               graph.edge_res,
-                               graph.node_cap,
-                               graph.includes_pin_caps,
-                               num_nets,
-                               graph.num_nodes,
-                               graph.num_edges);
-    release_host_rc_graph_storage(graph);
-    if (dmp_progress_enabled()) {
-        printf("DMP GR RC calculation starting, num_nets: %d num_nodes: %d num_edges: %d\n",
-               num_nets, graph_num_nodes, graph_num_edges);
-        fflush(stdout);
-    }
-    calc_res_cap_dmp(dmp_db, num_nets);
-    if (dmp_progress_enabled()) {
-        printf("DMP GR RC calculation done.\n");
-        fflush(stdout);
-    }
-    propagate_rc_tree_dmp(dmp_db, num_nets);
-    if (dmp_progress_enabled()) {
-        printf("DMP GR RC propagation done.\n");
-        fflush(stdout);
-    }
-    dmp_prepare_timing_after_rc(h_dmp_db, dmp_db);
-    apply_dmp_driving_cell_source_slew(*this);
+    initialize_dmp_rc_explicit(graph);
+    graph.release_storage();
+    DMP_PROGRESS_PRINT("DMP GR RC calculation starting, num_nets: %d num_nodes: %d num_edges: %d",
+                       graph_num_nets, graph_num_nodes, graph_num_edges);
+    run_dmp_rc(graph_num_nets, true);
+    DMP_PROGRESS_PRINT("DMP GR RC propagation done.");
 }
 
 void GPUTimer::init_dmp_rc_route_segments(const std::string& file) {
-    DmpRcStageProfile rc_profile(dmp_cpp_env_enabled("DMP_RC_PROFILE"));
     HostRcGraph graph = build_openroad_route_segments_rc(file);
-    rc_profile.log("build_route_segments_graph");
+    const int graph_num_nets = graph.num_nets;
     const int graph_num_nodes = graph.num_nodes;
     const int graph_num_edges = graph.num_edges;
-    initialize_dmp_rc_explicit(graph.edge_from,
-                               graph.edge_to,
-                               graph.net2node_start,
-                               graph.net2edge_start,
-                               graph.node2pin,
-                               graph.edge_res,
-                               graph.node_cap,
-                               graph.includes_pin_caps,
-                               num_nets,
-                               graph.num_nodes,
-                               graph.num_edges);
-    rc_profile.log("initialize_dmp_rc_explicit");
-    release_host_rc_graph_storage(graph);
-    rc_profile.log("release_host_rc_graph");
-    if (dmp_progress_enabled()) {
-        printf("DMP route-segment RC calculation starting, num_nets: %d num_nodes: %d num_edges: %d\n",
-               num_nets, graph_num_nodes, graph_num_edges);
-        fflush(stdout);
-    }
-    calc_res_cap_dmp(dmp_db, num_nets);
-    rc_profile.log("calc_res_cap_dmp");
-    if (dmp_progress_enabled()) {
-        printf("DMP route-segment RC calculation done.\n");
-        fflush(stdout);
-    }
-    propagate_rc_tree_dmp(dmp_db, num_nets);
-    rc_profile.log("propagate_rc_tree_dmp");
-    if (dmp_progress_enabled()) {
-        printf("DMP route-segment RC propagation done.\n");
-        fflush(stdout);
-    }
-    dmp_prepare_timing_after_rc(h_dmp_db, dmp_db);
-    rc_profile.log("prepare_timing_after_rc");
-    apply_dmp_driving_cell_source_slew(*this);
-    rc_profile.log("apply_driving_cell_source_slew");
+    initialize_dmp_rc_explicit(graph);
+    graph.release_storage();
+    DMP_PROGRESS_PRINT("DMP route-segment RC calculation starting, num_nets: %d num_nodes: %d num_edges: %d",
+                       graph_num_nets, graph_num_nodes, graph_num_edges);
+    run_dmp_rc(graph_num_nets, true);
+    DMP_PROGRESS_PRINT("DMP route-segment RC propagation done.");
 }
 
 void GPUTimer::debug_dump_dmp_rc_net(const std::string& net_name) {
@@ -499,8 +403,7 @@ void GPUTimer::debug_dump_dmp_rc_net(const std::string& net_name) {
         }
     }
     if (net_idx < 0) {
-        printf("[DMP RC DUMP] net %s not found\n", net_name.c_str());
-        fflush(stdout);
+        XPLACE_ERRORF("DMP_RC_DUMP", "net %s not found", net_name.c_str());
         return;
     }
     debug_dump_dmp_rc_net_cuda(h_dmp_db, net_idx, gtdb.net_names, gtdb.pin_names);

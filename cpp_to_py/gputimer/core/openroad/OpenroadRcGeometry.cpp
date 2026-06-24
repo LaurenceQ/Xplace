@@ -237,7 +237,7 @@ OpenroadInferredGrid infer_openroad_route_grid_from_stats(
 }
 
 OpenroadInferredGrid infer_openroad_route_grid(
-    const std::vector<std::unique_ptr<LocalSpefNetRc>>& local_nets,
+    const std::vector<std::unique_ptr<LocalRcNetGraph>>& local_nets,
     const db::Database& rawdb,
     int fallback_tile_size,
     int threads)

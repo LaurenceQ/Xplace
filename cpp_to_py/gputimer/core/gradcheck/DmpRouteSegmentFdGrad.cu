@@ -92,19 +92,9 @@ void run_route_segment_dmp_from_graph(GPUTimer& timer, HostRcGraph& graph)
 {
     release_fd_dmp_state(timer);
     timer.update_states();
-    timer.initialize_dmp_rc_explicit(graph.edge_from,
-                                     graph.edge_to,
-                                     graph.net2node_start,
-                                     graph.net2edge_start,
-                                     graph.node2pin,
-                                     graph.edge_res,
-                                     graph.node_cap,
-                                     graph.includes_pin_caps,
-                                     timer.num_nets,
-                                     graph.num_nodes,
-                                     graph.num_edges);
-    calc_res_cap_dmp(timer.dmp_db, timer.num_nets);
-    propagate_rc_tree_dmp(timer.dmp_db, timer.num_nets);
+    timer.initialize_dmp_rc_explicit(graph);
+    calc_res_cap_dmp(timer.dmp_db, graph.num_nets);
+    propagate_rc_tree_dmp(timer.dmp_db, graph.num_nets);
     dmp_prepare_timing_after_rc(timer.h_dmp_db, timer.dmp_db);
     timer.update_timing_dmp();
     fd_check_cuda(cudaDeviceSynchronize(), "run_route_segment_dmp_from_graph");

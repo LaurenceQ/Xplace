@@ -17,13 +17,20 @@ namespace gt {
 void GPUTimer::read_spef(const std::string& file) {
     logger.info("reading spef: %s", file.c_str());
     if (not std::filesystem::exists(file)) {
-        std::cerr << "can't find " << file << '\n';
+        logger.error("can't find %s", file.c_str());
         std::exit(EXIT_FAILURE);
     }
 
     // Invoke the read function and check the return value
     if (not spef.read(file)) {
-        std::cerr << *spef.error;
+        if (spef.error) {
+            logger.error("failed to read SPEF line=%zu byte=%zu text=%s",
+                         spef.error->line_number,
+                         spef.error->byte_in_line,
+                         spef.error->line.c_str());
+        } else {
+            logger.error("failed to read SPEF");
+        }
         std::exit(EXIT_FAILURE);
     }
 
@@ -52,13 +59,12 @@ void GPUTimer::read_spef(const std::string& file) {
 }
 using std::string;
 using std::ofstream;
-using std::cerr;
 using std::endl;
 using std::stringstream;
 
 namespace {
 
-struct SpefRcBuildStats {
+struct SpefRcBuildCounts {
     int parsed_nets = 0;
     int missing_nets = 0;
     int missing_pin_nodes = 0;
@@ -74,7 +80,7 @@ struct SpefRcBuildStats {
     int fallback_nets = 0;
 };
 
-struct LocalSpefNetRc {
+struct LocalRcNetGraph {
     std::vector<int> edge_from;
     std::vector<int> edge_to;
     std::vector<float> edge_res;
@@ -138,7 +144,7 @@ static bool spef_includes_pin_caps_from_design_flow(const std::string& design_fl
     return pin_cap_clause.find("NONE") == std::string::npos;
 }
 
-static int count_tree_edges_from_root(const LocalSpefNetRc& local)
+static int count_tree_edges_from_root(const LocalRcNetGraph& local)
 {
     if (local.node2pin.empty()) {
         return 0;
@@ -194,9 +200,9 @@ HostRcGraph GPUTimer::build_spef_rc() {
         add_name_alias(global_pin_name_to_id, gtdb.pin_names[i], i);
     }
 
-    std::vector<LocalSpefNetRc> local_nets(num_nets);
+    std::vector<LocalRcNetGraph> local_nets(num_nets);
     std::vector<uint8_t> parsed_net(num_nets, 0);
-    SpefRcBuildStats stats;
+    SpefRcBuildCounts counts;
     const std::string delimiter = spef.delimiter.empty() ? ":" : spef.delimiter;
     const bool spef_includes_pin_caps = spef_includes_pin_caps_from_design_flow(spef.design_flow);
 
@@ -255,7 +261,7 @@ HostRcGraph GPUTimer::build_spef_rc() {
                 return it->second;
             }
             if (auto pin_it = global_pin_name_to_id.find(pin_candidate); pin_it != global_pin_name_to_id.end()) {
-                stats.missing_pin_nodes++;
+                counts.missing_pin_nodes++;
                 return -1;
             }
 
@@ -267,7 +273,7 @@ HostRcGraph GPUTimer::build_spef_rc() {
                 return -1;
             }
 
-            stats.missing_pin_nodes++;
+            counts.missing_pin_nodes++;
             return -1;
         }
 
@@ -275,7 +281,7 @@ HostRcGraph GPUTimer::build_spef_rc() {
             return it->second;
         }
         if (global_pin_name_to_id.find(node_name) != global_pin_name_to_id.end()) {
-            stats.missing_pin_nodes++;
+            counts.missing_pin_nodes++;
         }
         return -1;
     };
@@ -288,7 +294,7 @@ HostRcGraph GPUTimer::build_spef_rc() {
         int net_idx = net_itr->second;
         if (!parsed_net[net_idx]) {
             parsed_net[net_idx] = 1;
-            stats.parsed_nets++;
+            counts.parsed_nets++;
         }
         init_net(net_idx);
         auto& local = local_nets[net_idx];
@@ -296,41 +302,41 @@ HostRcGraph GPUTimer::build_spef_rc() {
         for (const auto& [node1, node2, cap] : n.caps) {
             const float cap_internal = cap * spef_cap_ratio;
             if (node2.empty()) {
-                stats.ground_caps++;
+                counts.ground_caps++;
                 int node = resolve_node(node1, net_idx, true);
                 if (node >= 0) {
                     add_attr_cap(local.node_cap, node, cap_internal);
                 } else {
-                    stats.unresolved_cap_nodes++;
+                    counts.unresolved_cap_nodes++;
                 }
             } else {
-                stats.coupling_caps++;
+                counts.coupling_caps++;
                 int node_a = resolve_node(node1, net_idx, true);
                 int node_b = resolve_node(node2, net_idx, true);
                 if (node_a >= 0) {
                     add_attr_cap(local.node_cap, node_a, cap_internal);
-                    stats.folded_coupling_terms++;
+                    counts.folded_coupling_terms++;
                 }
                 if (node_b >= 0) {
                     add_attr_cap(local.node_cap, node_b, cap_internal);
-                    stats.folded_coupling_terms++;
+                    counts.folded_coupling_terms++;
                 }
                 if (node_a < 0 && node_b < 0) {
-                    stats.unresolved_cap_nodes++;
+                    counts.unresolved_cap_nodes++;
                 }
             }
         }
 
         for (const auto& [node1, node2, res] : n.ress) {
-            stats.resistors++;
+            counts.resistors++;
             int from = resolve_node(node1, net_idx, true);
             int to = resolve_node(node2, net_idx, true);
             if (from < 0 || to < 0) {
-                stats.unresolved_res_nodes++;
+                counts.unresolved_res_nodes++;
                 continue;
             }
             if (from == to) {
-                stats.skipped_self_resistors++;
+                counts.skipped_self_resistors++;
                 continue;
             }
             local.edge_from.emplace_back(from);
@@ -340,14 +346,15 @@ HostRcGraph GPUTimer::build_spef_rc() {
     }
 
     HostRcGraph graph;
+    graph.num_nets = num_nets;
     graph.includes_pin_caps.assign(num_nets, spef_includes_pin_caps ? 1 : 0);
     graph.net2node_start.emplace_back(0);
     graph.net2edge_start.emplace_back(0);
 
     for (int i = 0; i < num_nets; ++i) {
         if (!parsed_net[i]) {
-            stats.missing_nets++;
-            stats.fallback_nets++;
+            counts.missing_nets++;
+            counts.fallback_nets++;
             init_net(i);
             auto& local = local_nets[i];
             for (int node = 1; node < static_cast<int>(local.node2pin.size()); ++node) {
@@ -382,14 +389,14 @@ HostRcGraph GPUTimer::build_spef_rc() {
                     local.edge_from.emplace_back(0);
                     local.edge_to.emplace_back(node);
                     local.edge_res.emplace_back(0.0f);
-                    stats.repaired_edges++;
+                    counts.repaired_edges++;
                 }
             }
         }
         int tree_edges = count_tree_edges_from_root(local);
         int skipped_loop_edges = static_cast<int>(local.edge_from.size()) - tree_edges;
         if (skipped_loop_edges > 0) {
-            stats.skipped_loop_edges += skipped_loop_edges;
+            counts.skipped_loop_edges += skipped_loop_edges;
         }
 
         for (size_t edge = 0; edge < local.edge_from.size(); ++edge) {
@@ -409,17 +416,17 @@ HostRcGraph GPUTimer::build_spef_rc() {
         graph.net2node_start.emplace_back(graph.num_nodes);
         graph.net2edge_start.emplace_back(graph.num_edges);
     }
-    graph.skipped_loop_edges = stats.skipped_loop_edges;
-    graph.repaired_edges = stats.repaired_edges;
+    graph.skipped_loop_edges = counts.skipped_loop_edges;
+    graph.repaired_edges = counts.repaired_edges;
 
     logger.info("SPEF RC graph: parsed_nets=%d missing_nets=%d nodes=%d edges=%d includes_pin_caps=%d",
-                stats.parsed_nets, stats.missing_nets, graph.num_nodes, graph.num_edges,
+                counts.parsed_nets, counts.missing_nets, graph.num_nodes, graph.num_edges,
                 spef_includes_pin_caps ? 1 : 0);
     logger.info("SPEF RC details: ground_caps=%d coupling_caps=%d folded_coupling_terms=%d resistors=%d self_res=%d loop_edges=%d missing_pin_nodes=%d unresolved_cap_nodes=%d unresolved_res_nodes=%d repaired_edges=%d fallback_nets=%d",
-                stats.ground_caps, stats.coupling_caps, stats.folded_coupling_terms,
-                stats.resistors, stats.skipped_self_resistors, stats.skipped_loop_edges,
-                stats.missing_pin_nodes, stats.unresolved_cap_nodes, stats.unresolved_res_nodes,
-                stats.repaired_edges, stats.fallback_nets);
+                counts.ground_caps, counts.coupling_caps, counts.folded_coupling_terms,
+                counts.resistors, counts.skipped_self_resistors, counts.skipped_loop_edges,
+                counts.missing_pin_nodes, counts.unresolved_cap_nodes, counts.unresolved_res_nodes,
+                counts.repaired_edges, counts.fallback_nets);
     return graph;
 }
 
@@ -473,31 +480,31 @@ void GPUTimer::update_rc_timing_spef() {
     torch::Tensor parent_node = -torch::ones({graph.num_nodes}, torch::dtype(torch::kInt32).device(device));
     torch::Tensor res_parent = torch::zeros({graph.num_nodes * NUM_ATTR}, torch::dtype(torch::kFloat32).device(device));
 
-    RcExplicitTreeModel rc_model;
-    rc_model.edge_from = &graph.edge_from;
-    rc_model.edge_to = &graph.edge_to;
-    rc_model.flat_net2node_start_map = &graph.net2node_start;
-    rc_model.flat_net2edge_start_map = &graph.net2edge_start;
-    rc_model.node2pin_map = &graph.node2pin;
-    rc_model.includes_pin_caps = &graph.includes_pin_caps;
-    rc_model.node_order = node_order.data_ptr<int>();
-    rc_model.edge_order = edge_order.data_ptr<int>();
-    rc_model.parent_node = parent_node.data_ptr<int>();
-    rc_model.edge_res = edge_res.data_ptr<float>();
-    rc_model.node_cap = node_cap.data_ptr<float>();
-    rc_model.res_parent = res_parent.data_ptr<float>();
-    rc_model.pinLoad = pinLoad;
-    rc_model.pinImpulse = pinImpulse;
-    rc_model.pinCap = pinCap;
-    rc_model.pinWireCap = pinWireCap;
-    rc_model.pinRootDelay = pinRootDelay;
-    rc_model.pinRootRes = pinRootRes;
-    rc_model.num_nets = num_nets;
-    rc_model.num_pins = num_pins;
-    rc_model.num_nodes = graph.num_nodes;
-    rc_model.num_edges = graph.num_edges;
+    RcTreeHost rc_tree;
+    rc_tree.edge_from = &graph.edge_from;
+    rc_tree.edge_to = &graph.edge_to;
+    rc_tree.flat_net2node_start_map = &graph.net2node_start;
+    rc_tree.flat_net2edge_start_map = &graph.net2edge_start;
+    rc_tree.node2pin_map = &graph.node2pin;
+    rc_tree.includes_pin_caps = &graph.includes_pin_caps;
+    rc_tree.node_order = node_order.data_ptr<int>();
+    rc_tree.edge_order = edge_order.data_ptr<int>();
+    rc_tree.parent_node = parent_node.data_ptr<int>();
+    rc_tree.edge_res = edge_res.data_ptr<float>();
+    rc_tree.node_cap = node_cap.data_ptr<float>();
+    rc_tree.res_parent = res_parent.data_ptr<float>();
+    rc_tree.pinLoad = pinLoad;
+    rc_tree.pinImpulse = pinImpulse;
+    rc_tree.pinCap = pinCap;
+    rc_tree.pinWireCap = pinWireCap;
+    rc_tree.pinRootDelay = pinRootDelay;
+    rc_tree.pinRootRes = pinRootRes;
+    rc_tree.num_nets = num_nets;
+    rc_tree.num_pins = num_pins;
+    rc_tree.num_nodes = graph.num_nodes;
+    rc_tree.num_edges = graph.num_edges;
 
-    flatten_rc_tree(rc_model);
-    propagate_rc_tree(rc_model);
+    flatten_rc_tree(rc_tree);
+    propagate_rc_tree(rc_tree);
 }
 }  // namespace gt

@@ -1,6 +1,6 @@
 # Power Stage 审查解析
 
-Last reviewed: 2026-06-08
+Last reviewed: 2026-06-10
 
 本文展开 `00_POWER_ARCHITECTURE.md` 里的 power 部分，从 Python 验收入口一路追到最底层 C++/CUDA kernel。文件名保留当前要求的拼写：`05_POWER_ANAYLSYS.md`。
 
@@ -338,6 +338,60 @@ h_clock_pin_enqueue
 - `buildPowerClockGateMaps` 依赖 Liberty clock gate port 属性：clock、enable、out 三个端口必须都能识别。
 - clock pin activity 里的 `enqueue` 对 sequential clock load 默认不继续传播 clock tree，除非它是 combinational clock tree load。
 
+### 5.2.1 Sparse clock 输入
+
+power 不再读取 dense `pin_clock_slews` 或 per-pin waveform arrays。当前 clock 数据来源分两条：
+
+```text
+host clock activity:
+  PowerActivityHostUtils.cpp::powerClockActivityForPin(pin)
+    gtdb.ClockPeriodForPin(pin)
+    gtdb.ClockRiseEdgeForPin(pin)
+    gtdb.ClockFallEdgeForPin(pin)
+
+host clock slew selection:
+  PowerActivityCpu.cpp
+    gtdb.ClockSlewForPin(pin, attr)
+
+  PowerCudaInputRoots.cpp::powerIsClockSlewPin(...)
+    pin_is_ideal_clk[pin] -> true
+    else pin_is_clk[pin] && any finite gtdb.ClockSlewForPin(pin, attr)
+```
+
+CUDA 侧不重新上传 clock table，而是复用 DMPModel 里的 sparse clock device pointers：
+
+```text
+PowerCudaInputBuild.cpp
+  d_pin_clock_ids = h_dmp_db ? h_dmp_db->pin_clock_ids : nullptr
+  d_clock_slews = h_dmp_db ? h_dmp_db->clock_slews : nullptr
+  sparse_clock_count = h_dmp_db ? h_dmp_db->clock_count : 0
+
+PowerGraphDevice / PowerInternalInstDevice:
+  pin_clock_ids
+  clock_slews
+  clock_count
+  power_clock_slew_pins
+  num_power_clock_slew_pins
+  power_clock_slew_fallback[NUM_ATTR]
+```
+
+device lookup：
+
+```text
+power_clock_slew_value(graph, pin, attr)
+  binary-search pin in power_clock_slew_pins
+  clock_id = pin_clock_ids[pin]
+  if clock_id valid and clock_slews[clock_id, attr] finite:
+    return clock_slews[clock_id, attr]
+  return power_clock_slew_fallback[attr]
+```
+
+审查点：
+
+- `power_clock_slew_pins` 是 sorted sparse pin list；它只是标记哪些 pin 允许 clock slew override，不存 slew 值。
+- `clock_slews` 的 owner 是 DMPModel；`release_dmp_timing_scratch_for_power()` 不能释放 `pin_clock_ids/clock_slews`。
+- fallback 来自默认 clock 的 finite `clock_slews`，没有 finite 值时就是 0。
+
 ### 5.3 Expression 和 sequential 表
 
 文件：`PowerCudaInputExpr.cpp`
@@ -520,30 +574,36 @@ powerCudaBytesTensor(vector<T>)      -> byte CUDA tensor, device side reinterpre
 核心 device view：
 
 ```text
-PowerGraphDeviceView:
-  graph CSR, net fanout, pin flags, timing/load/slew/DMP pointers, level pointers
+PowerGraphDevice:
+  graph CSR, net fanout, pin flags, timing/load/slew/DMP pointers, level pointers,
+  sparse clock slew pointers
 
-PowerExprDeviceView:
+PowerExprDevice:
   expression ops/start/count, node-port-pin map, missing function outputs
 
-PowerActivityState:
+PowerActivitySeedDevice:
   roots, clocks, sequentials, feedback seeds
 
 PowerActivityConfig:
   default_density, clock_density, time_unit, max passes, trace pins,
   precomputed activity pointer, clamp/override knobs
 
-PowerComponentDeviceView:
+PowerComponentDevice:
   internal/leakage rows, power LUT allocator, voltage/cap unit,
   output pointers
 
-PowerActivityCudaModel:
+PowerInternalInstDevice:
+  internal rows plus expression table, activity pointers, DMP load pointers,
+  sparse clock slew pointers
+
+PowerActivityDevice:
   all device views plus n and output activity pointer
 ```
 
 审查点：
 
 - device view 只保存 raw pointers；对应 torch tensor 必须在 launcher 返回前保持活着。当前实现把 tensor 局部变量保留在 `compute_power_activity_cuda` 栈上，直到 launcher 和 chunk launcher 都结束。
+- sparse clock pointers `pin_clock_ids/clock_slews` 不来自本函数创建的 torch tensor，而是来自 `h_dmp_db` 的 CUDA allocations；它们必须在 power stage 期间保持有效。
 - bytes tensor 的 device pointer 必须按原 struct alignment/size reinterpret；`GpuPowerExprOpHost` 和 `GpuPowerInternalHost` 有 `static_assert` 保护大小。
 - 空 vector 上传成 1-element sentinel，避免空 tensor data_ptr 问题；kernel 必须同时看 count，不可只看 pointer 非空。
 
@@ -554,7 +614,7 @@ PowerActivityCudaModel:
 入口：
 
 ```cpp
-run_power_activity_cuda_launcher(const PowerActivityCudaModel& model)
+run_power_activity_cuda_launcher(const PowerActivityDevice& model)
 ```
 
 主步骤：
@@ -575,7 +635,7 @@ run_power_activity_cuda_launcher(const PowerActivityCudaModel& model)
    - `active_level`
    - `visit_active`
    - `pending_seq/pending_seq_count`
-4. 把 `PowerActivityCudaModel` 和 `PowerActivityScratchView` 拷到 device。
+4. 把 `PowerActivityDevice` 和 `PowerActivityPropDevice` 拷到 device。
 5. 把 env knobs 拷到 device symbols：
    - clock override
    - min density/duty
@@ -635,7 +695,8 @@ origin 当前语义：
 
 审查点：
 
-- slew cap 来自 `pinSlew`，sequential clock input 可用 sparse clock slew override。
+- slew cap 默认来自 `pinSlew`，sequential clock input 会先尝试 sparse clock slew override。
+- clock slew override 路径是 `power_clock_slew_value(...)`：先确认 pin 在 sparse list 中，再用 `pin_clock_ids[pin] -> clock_slews[clock_id, attr]` 查值，失败才用 fallback。
 - `force=true` 会绕过普通 slew cap，只受 clock density cap。
 
 ### `PowerActivityOps::enqueueAdjacent(pin)`
@@ -669,7 +730,7 @@ driver pin:
   if seq output valid:
     use seq_pin_density/duty
   else if function expr exists:
-    PowerExprView::activity(expr_id)
+    PowerExprEval::activity(expr_id)
     set output activity
   apply clock gate output formula
 
@@ -707,13 +768,13 @@ write seq_pin_* and activate q/qn
 
 文件：`PowerCudaActivityDevice.cu`
 
-`PowerExprView::resolvePinArg(arg)`：
+`PowerExprEval::resolvePinArg(arg)`：
 
 - `arg >= 0`：已经是 physical pin id。
 - `arg == -1`：缺失/常量，返回 -1。
 - `arg <= -2`：template port id，使用 `node_port_pin_start/list` 和 `node_id` resolve physical pin。
 
-`PowerExprView::activity(expr_id, density, duty)`：
+`PowerExprEval::activity(expr_id, density, duty)`：
 
 1. 默认先尝试 `PowerDirectExprEval`。
 2. direct path 安全条件：
@@ -766,7 +827,7 @@ while pending_seq_count > 0 and pass < max_activity_passes:
 frontier 路径：
 
 - `XPLACE_POWER_ACTIVITY_FRONTIER=1` 打开。
-- 使用 `PowerActivityQueueView` 的 per-level queue。
+- 使用 `PowerActivityLevelQueueDevice` 的 per-level queue。
 - persistent cooperative kernel 或 ordered single-thread kernel drain queue。
 - 如果 GPU 不支持 cooperative launch，会 fallback 到默认 level scan。
 
@@ -836,6 +897,11 @@ slew pin =
   input row: to_pin
   output row: from_pin
 
+if slew pin is in power_clock_slew_pins:
+  slew = clock_slews[pin_clock_ids[slew_pin], attr] or power_clock_slew_fallback[attr]
+else:
+  slew = pinSlew[slew_pin, attr]
+
 energy = average(query_internal_power(row.internal_power_id, rise/fall, slew, load))
 power = weight * energy * energy_unit * density[to_pin]
 atomicAdd inst_internal[node]
@@ -846,6 +912,7 @@ optional internal_row_power[row_idx] = power
 
 - fast kernels handle duty modes 0/3/4；expr kernels handle duty modes 1/2。
 - `positive_unate` 决定 output row 用 related input rise/fall 还是交换 rise/fall。
+- internal contrib 的 clock slew override 使用 `PowerInternalInstDevice::pin_clock_ids/clock_slews`，和 activity slew cap 的 sparse clock path 同源。
 - `energy_unit` fallback 是 `cap_unit`，这块单位逻辑要和 Liberty parser 保持一致。
 
 ### 11.3 Leakage

@@ -13,6 +13,8 @@ namespace gt {
 
 class GPUTimer;
 
+inline constexpr int kRouteGradRcTreeCheckColumns = 13;
+
 void route_grad_cuda_check(cudaError_t err, const char* label);
 
 struct RouteGradDeviceFloatBuffer {

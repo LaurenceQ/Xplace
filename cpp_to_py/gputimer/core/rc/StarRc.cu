@@ -8,25 +8,25 @@
 
 namespace gt {
 
-__global__ void RCTreeNet(RcStarModel* model) {
+__global__ void RCTreeNet(RcStarNet* star_net) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    float* x = model->x;
-    float* y = model->y;
-    const float* pin_offset_x = model->pin_offset_x;
-    const float* pin_offset_y = model->pin_offset_y;
-    const int* pin2node_map = model->pin2node_map;
-    const int* flat_net2pin_start_map = model->flat_net2pin_start_map;
-    const int* flat_net2pin_map = model->flat_net2pin_map;
-    float* pinLoad = model->pinLoad;
-    float* pinImpulse = model->pinImpulse;
-    float* pinCap = model->pinCap;
-    float* pinRootDelay = model->pinRootDelay;
-    float* pinRootRes = model->pinRootRes;
-    const int num_nets = model->num_nets;
-    const float unit_to_micron = model->unit_to_micron;
-    const uint8_t* net_is_clock = model->net_is_clock;
-    const float cf = model->cf;
-    const float rf = model->rf;
+    float* x = star_net->x;
+    float* y = star_net->y;
+    const float* pin_offset_x = star_net->pin_offset_x;
+    const float* pin_offset_y = star_net->pin_offset_y;
+    const int* pin2node_map = star_net->pin2node_map;
+    const int* flat_net2pin_start_map = star_net->flat_net2pin_start_map;
+    const int* flat_net2pin_map = star_net->flat_net2pin_map;
+    float* pinLoad = star_net->pinLoad;
+    float* pinImpulse = star_net->pinImpulse;
+    float* pinCap = star_net->pinCap;
+    float* pinRootDelay = star_net->pinRootDelay;
+    float* pinRootRes = star_net->pinRootRes;
+    const int num_nets = star_net->num_nets;
+    const float unit_to_micron = star_net->unit_to_micron;
+    const uint8_t* net_is_clock = star_net->net_is_clock;
+    const float cf = star_net->cf;
+    const float rf = star_net->rf;
     if (idx < num_nets) {
         int start_idx = flat_net2pin_start_map[idx];
         int end_idx = flat_net2pin_start_map[idx + 1];
@@ -91,14 +91,14 @@ __global__ void RCTreeNet(RcStarModel* model) {
     }
 }
 
-void update_rc_timing_cuda(const RcStarModel& model) {
-    const int num_nets = model.num_nets;
-    (void)model.num_pins;
-    RcStarModel* d_model = nullptr;
-    cudaMalloc(&d_model, sizeof(RcStarModel));
-    cudaMemcpy(d_model, &model, sizeof(RcStarModel), cudaMemcpyHostToDevice);
-    RCTreeNet<<<BLOCK_NUMBER(num_nets), BLOCK_SIZE>>>(d_model);
-    cudaFree(d_model);
+void update_rc_timing_cuda(const RcStarNet& star_net) {
+    const int num_nets = star_net.num_nets;
+    (void)star_net.num_pins;
+    RcStarNet* d_star_net = nullptr;
+    cudaMalloc(&d_star_net, sizeof(RcStarNet));
+    cudaMemcpy(d_star_net, &star_net, sizeof(RcStarNet), cudaMemcpyHostToDevice);
+    RCTreeNet<<<BLOCK_NUMBER(num_nets), BLOCK_SIZE>>>(d_star_net);
+    cudaFree(d_star_net);
 }
 
 

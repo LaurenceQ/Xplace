@@ -1,5 +1,6 @@
 #include "gputimer/core/GPUTimer.h"
 #include "gputimer/db/GTDatabase.h"
+#include "common/XplaceLog.h"
 #include "common/utils/log.h"
 
 #include <array>
@@ -59,15 +60,17 @@ static std::vector<std::string> split_csv_str(const std::string& line) {
 void GPUTimer::read_infer(const std::string& infile) {
     std::ifstream fin(infile);
     if (!fin.is_open()) {
-        logger.error("Cannot open inference file: %s\n", infile.c_str());
+        logger.error("Cannot open inference file: %s", infile.c_str());
         return;
     }
-    logger.info("[read_infer] Opened file: %s\n", infile.c_str());
+    logger.info("[read_infer] opened file: %s", infile.c_str());
 
     std::vector<std::pair<int, std::array<float, 4>>> slews, net_delays;
     std::vector<std::tuple<int, int, std::array<float, 4>>> cell_delays;
     float time_to_internal = 1.0f / (gtdb.time_unit * 1e9f);
-    logger.info("[read_infer] time_unit=%.6e, time_to_internal=%.6e\n", gtdb.time_unit, time_to_internal);
+    XPLACE_DEBUGF("XPLACE_INFER_DEBUG",
+                  "[read_infer] time_unit=%.6e time_to_internal=%.6e",
+                  gtdb.time_unit, time_to_internal);
 
     std::string line;
     int section = 0;  // 0=none, 1=node, 2=edge
@@ -77,8 +80,16 @@ void GPUTimer::read_infer(const std::string& infile) {
         line = trim(line);
         line_count++;
         if (line.empty()) continue;
-        if (line.find("# Node predictions") == 0) { section = 1; logger.info("[read_infer] Entering section 1: Node predictions (line %d)\n", line_count); continue; }
-        if (line.find("# Cell edge predictions") == 0) { section = 2; logger.info("[read_infer] Entering section 2: Cell edge predictions (line %d)\n", line_count); continue; }
+        if (line.find("# Node predictions") == 0) {
+            section = 1;
+            XPLACE_DEBUGF("XPLACE_INFER_DEBUG", "[read_infer] section=node line=%d", line_count);
+            continue;
+        }
+        if (line.find("# Cell edge predictions") == 0) {
+            section = 2;
+            XPLACE_DEBUGF("XPLACE_INFER_DEBUG", "[read_infer] section=edge line=%d", line_count);
+            continue;
+        }
         if (line[0] == '#') continue;
 
         std::vector<float> values;
@@ -91,8 +102,10 @@ void GPUTimer::read_infer(const std::string& infile) {
             slews.push_back({node_id, slew});
             net_delays.push_back({node_id, delays});
             if (slews.size() <= 3 || slews.size() % 10000 == 0)
-                logger.info("[read_infer] Node %d: slew=[%.6e,%.6e,%.6e,%.6e] ns, net_delay=[%.6e,%.6e,%.6e,%.6e] ns (total: %zu)\n",
-                    node_id, slew[0], slew[1], slew[2], slew[3], delays[0], delays[1], delays[2], delays[3], slews.size());
+                XPLACE_DEBUGF("XPLACE_INFER_DEBUG",
+                              "[read_infer] node=%d slew=[%.6e,%.6e,%.6e,%.6e] net_delay=[%.6e,%.6e,%.6e,%.6e] total=%zu",
+                              node_id, slew[0], slew[1], slew[2], slew[3],
+                              delays[0], delays[1], delays[2], delays[3], slews.size());
         } else if (section == 2) {
             // edge_id, from_pin_id, to_pin_id, cell_delay_er, ef, lr, lf
             if (!parse_csv_line(line, values) || values.size() < 7) continue;
@@ -101,20 +114,18 @@ void GPUTimer::read_infer(const std::string& infile) {
             std::array<float, 4> delays = {{values[3], values[4], values[5], values[6]}};
             cell_delays.push_back({from_pin_id, to_pin_id, delays});
             if (cell_delays.size() <= 3 || cell_delays.size() % 5000 == 0)
-                logger.info("[read_infer] Edge %d: %d->%d, delays=[%.6e,%.6e,%.6e,%.6e] ns (total: %zu)\n",
-                    (int)values[0], from_pin_id, to_pin_id, delays[0], delays[1], delays[2], delays[3], cell_delays.size());
+                XPLACE_DEBUGF("XPLACE_INFER_DEBUG",
+                              "[read_infer] edge=%d from=%d to=%d delays=[%.6e,%.6e,%.6e,%.6e] total=%zu",
+                              (int)values[0], from_pin_id, to_pin_id,
+                              delays[0], delays[1], delays[2], delays[3], cell_delays.size());
         }
     }
     fin.close();
-    logger.info("[read_infer] File parsing complete. Parsed %zu slews, %zu net delays, %zu cell delays\n",
-                slews.size(), net_delays.size(), cell_delays.size());
 
     apply_infer_data(slews, net_delays, cell_delays, time_to_internal);
 
-    logger.info("[read_infer] ========== COMPLETE ==========\n");
-    logger.info("[read_infer] Loaded inference: %zu slews, %zu net delays, %zu cell delays from %s\n",
+    logger.info("[read_infer] loaded slews=%zu net_delays=%zu cell_delays=%zu file=%s",
                 slews.size(), net_delays.size(), cell_delays.size(), infile.c_str());
-    logger.info("[read_infer] ================================\n");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

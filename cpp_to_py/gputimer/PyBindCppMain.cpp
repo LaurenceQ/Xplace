@@ -1,5 +1,6 @@
 #include "common/common.h"
 
+#include "common/StageProfiler.h"
 #include "common/db/Database.h"
 #include "io_parser/gp/GPDatabase.h"
 #include "gputimer/db/GTDatabase.h"
@@ -8,22 +9,13 @@
 #include <pybind11/stl.h>
 
 #include <flute.hpp>
-#include <chrono>
-#include <cstdio>
-#include <cstdlib>
 using namespace Flute;
 
 namespace Xplace {
 
 static bool pybind_timer_profile_enabled()
 {
-    const char* value = std::getenv("XPLACE_TIMER_PROFILE");
-    if (value == nullptr || value[0] == '\0') {
-        return false;
-    }
-    return !(value[0] == '0' ||
-             value[0] == 'f' || value[0] == 'F' ||
-             value[0] == 'n' || value[0] == 'N');
+    return xplace_env_enabled("XPLACE_TIMER_PROFILE");
 }
 
 std::shared_ptr<gt::GPUTimer> create_gputimer(const py::dict& kwargs,
@@ -31,18 +23,7 @@ std::shared_ptr<gt::GPUTimer> create_gputimer(const py::dict& kwargs,
                                               std::shared_ptr<gp::GPDatabase> gpdb,
                                               std::shared_ptr<gt::TimingTorchRawDB> timing_raw_db) {
 
-    const bool profile = pybind_timer_profile_enabled();
-    auto profile_t = std::chrono::steady_clock::now();
-    auto profile_log = [&](const char* phase) {
-        if (!profile) {
-            return;
-        }
-        auto now = std::chrono::steady_clock::now();
-        double elapsed = std::chrono::duration<double>(now - profile_t).count();
-        std::fprintf(stdout, "[XPLACE_TIMER_PROFILE_CPP] phase=%s elapsed=%.3f\n", phase, elapsed);
-        std::fflush(stdout);
-        profile_t = now;
-    };
+    StageProfiler profile("XPLACE_TIMER_PROFILE_CPP", pybind_timer_profile_enabled(), stdout);
 
     if (!rawdb->liberty_read) {
         throw std::invalid_argument("Liberty file not found. Please check!");
@@ -56,7 +37,7 @@ std::shared_ptr<gt::GPUTimer> create_gputimer(const py::dict& kwargs,
     std::shared_ptr<gt::GTDatabase> gtdb = std::make_shared<gt::GTDatabase>(rawdb, gpdb, timing_raw_db);
     const bool direct_rc_mode = kwargs.contains("route_segments") || kwargs.contains("gr_rc");
     gtdb->skip_legacy_rc_tensors = direct_rc_mode;
-    profile_log("construct_gtdb");
+    profile.mark("construct_gtdb");
     auto sdc = std::make_shared<gt::sdc::SDC>();
 
     try {
@@ -64,21 +45,23 @@ std::shared_ptr<gt::GPUTimer> create_gputimer(const py::dict& kwargs,
     } catch (std::exception& e) {
         logger.error("%s\n", e.what());
     }
-    profile_log("read_sdc_json");
+    profile.mark("read_sdc_json");
 
     gtdb->preparePinNameMapForSdc(*sdc);
-    profile_log("prepare_pin_name_map_targets");
+    profile.mark("prepare_pin_name_map_targets");
     gtdb->ExtractTimingGraph();
-    profile_log("extract_timing_graph");
+    profile.mark("extract_timing_graph");
     gtdb->readSdc(*sdc);
-    profile_log("read_sdc_into_gtdb");
+    profile.mark("read_sdc_into_gtdb");
+    gtdb->RunSdcConstantSimulation();
+    profile.mark("sdc_constant_simulation");
 
     std::shared_ptr<gt::GPUTimer> gputimer = std::make_shared<gt::GPUTimer>(gtdb, timing_raw_db);
-    profile_log("construct_gputimer");
+    profile.mark("construct_gputimer");
 
     if (!direct_rc_mode) {
         readLUT("thirdparty/flute_mp/lut.ICCAD2015/POWV9.dat", "thirdparty/flute_mp/lut.ICCAD2015/POST9.dat");
-        profile_log("read_flute_lut");
+        profile.mark("read_flute_lut");
     }
 
     return gputimer;

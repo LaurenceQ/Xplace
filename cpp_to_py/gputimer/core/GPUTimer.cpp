@@ -90,27 +90,6 @@ GPUTimer::GPUTimer(std::shared_ptr<GTDatabase> gtdb_, shared_ptr<TimingTorchRawD
     microns = timing_raw_db.microns;
     res_unit = gtdb.res_unit;
     cap_unit = gtdb.cap_unit;
-    test_clock_periods = timing_raw_db.test_clock_periods.defined()
-                             ? timing_raw_db.test_clock_periods.data_ptr<float>()
-                             : nullptr;
-    test_setup_uncertainties = timing_raw_db.test_setup_uncertainties.defined()
-                                   ? timing_raw_db.test_setup_uncertainties.data_ptr<float>()
-                                   : nullptr;
-    test_hold_uncertainties = timing_raw_db.test_hold_uncertainties.defined()
-                                  ? timing_raw_db.test_hold_uncertainties.data_ptr<float>()
-                                  : nullptr;
-    pin_clock_periods = timing_raw_db.pin_clock_periods.defined()
-                            ? timing_raw_db.pin_clock_periods.data_ptr<float>()
-                            : nullptr;
-    pin_clock_rise_edges = timing_raw_db.pin_clock_rise_edges.defined()
-                               ? timing_raw_db.pin_clock_rise_edges.data_ptr<float>()
-                               : nullptr;
-    pin_clock_fall_edges = timing_raw_db.pin_clock_fall_edges.defined()
-                               ? timing_raw_db.pin_clock_fall_edges.data_ptr<float>()
-                               : nullptr;
-    pin_clock_slews = timing_raw_db.pin_clock_slews.defined()
-                          ? timing_raw_db.pin_clock_slews.data_ptr<float>()
-                          : nullptr;
     if (gtdb.clocks.empty())
         clock_period = 0;
     else

@@ -1,6 +1,6 @@
 # 04_TIMING_ANALYSYS.md
 
-Last reviewed: 2026-06-08
+Last reviewed: 2026-06-10
 
 本文展开 `00_POWER_ARCHITECTURE.md` 里的 `timer stage` 和后面的可选 release stage：
 
@@ -42,7 +42,7 @@ arc_types
 arc_id2test_id
 timing_arc_id_map
 d_allocator Liberty LUT
-SDC clock / uncertainty arrays
+sparse SDC clock id/table arrays
 ```
 
 `NUM_ATTR = 4`，约定是：
@@ -428,6 +428,69 @@ DmpModel::updateAtWinner(to_slot, at, arc_id, from_attr)
 - `pin_at_winner` 同时保存 winner value 和 traceback payload。
 - `pinSlew` 和 net `arcDelay` 在 finalize 前临时保存 encoded winner key，不是普通 float。
 
+### 7.2.1 Sparse clock 查询
+
+文件：
+
+```text
+cpp_to_py/gputimer/core/DmpModel.h
+cpp_to_py/gputimer/core/DmpModel.cu
+cpp_to_py/gputimer/core/DmpGateProp.cu
+```
+
+当前 DMP device state 不再保存 per-pin waveform/slew 和 per-test uncertainty dense arrays，而是保存 sparse clock id + clock table：
+
+```text
+pin_clock_ids[num_pins]                  # uint16_t, invalid = 65535
+test_clock_ids[num_tests]                # uint16_t
+clock_periods[num_clocks]
+clock_rise_edges[num_clocks]
+clock_fall_edges[num_clocks]
+clock_waveform_rise_edges[num_clocks]
+clock_waveform_fall_edges[num_clocks]
+clock_slews[num_clocks * NUM_ATTR]
+clock_setup_uncertainties[num_clocks]
+clock_hold_uncertainties[num_clocks]
+pin_clock_latency_overrides[num_pins]    # dense float, NaN means unset
+```
+
+关键 device helper：
+
+```text
+DmpModel::clockPeriodForTest(test_id)
+  clock_id = test_clock_ids[test_id]
+  return clock_periods[clock_id] if valid else fallback clock_period
+
+DmpModel::pinClockEdge(pin_id, fall)
+  clock_id = pin_clock_ids[pin_id]
+  override = pin_clock_latency_overrides[pin_id]
+  if override finite and clock_id valid:
+    return clock_waveform_*_edges[clock_id] + override
+  if override finite:
+    return override
+  return clock_*_edges[clock_id]
+
+DmpModel::idealClockEdgeTime(timing_id, from_pin_id)
+  choose rise/fall edge from timing trigger/latch rule
+  call pinClockEdge(from_pin_id, use_fall_edge)
+  fallback to pinAt if no finite sparse clock edge
+
+DmpModel::idealClockSlew(from_pin_id, attr)
+  clock_id = pin_clock_ids[from_pin_id]
+  return finite clock_slews[clock_id * NUM_ATTR + attr] or 0
+
+DmpModel::setupUncertaintyForTest(test_id)
+DmpModel::holdUncertaintyForTest(test_id)
+  clock_id = test_clock_ids[test_id]
+  return clock_setup/hold_uncertainties[clock_id] or 0
+```
+
+审查重点：
+
+- `clock_id` 是 SDC clock identity，不是 period id；同 period 不同 waveform/uncertainty 不会混掉。
+- `set_clock_latency [get_pins ...]` 第一版只支持 scalar override；DMP 侧用 dense `pin_clock_latency_overrides[num_pins]` 修正 edge。
+- power CUDA 会复用 `h_dmp_db->pin_clock_ids` 和 `h_dmp_db->clock_slews`，所以 timing 后的 scratch release 不能释放这些 clock tables。
+
 ### 7.3 `dmpDirectNetKernel`
 
 `dmpDirectNetKernel` 处理没有 gate driver fanin 的 direct net arcs：
@@ -793,12 +856,9 @@ gt::GPUTimer::release_dmp_timing_scratch_for_power()
     h_dmp_db->release_after_timing()
       cudaFree(pin_at_winner)
       cudaFree(pin_flags)
-      cudaFree(test_clock_ids)
-      cudaFree(clock_periods)
       cudaFree(r_pi)
       cudaFree(elmore_delay)
       set those host pointers to nullptr
-      clock_count = 0
     cudaMemcpy(dmp_db, h_dmp_db, sizeof(DmpModel), cudaMemcpyHostToDevice)
 ```
 
@@ -806,6 +866,7 @@ gt::GPUTimer::release_dmp_timing_scratch_for_power()
 
 - 这个 stage 只有在 `DMP_DEFER_TIMING_ALLOC` 启用时才实际释放；否则是 no-op。
 - 它释放 `r_pi` 和 `elmore_delay`。power stage 如果还需要这两个数组会出问题；当前 power path 主要消费 `pinLoad`、`pinSlew`、`pinAT/pinRAT`、`C1/C2`、clock 信息，不应依赖 `r_pi/elmore_delay`。
+- sparse clock device tables 保留不释放：`pin_clock_ids`、`test_clock_ids`、`clock_periods`、`clock_rise_edges/fall_edges`、`clock_waveform_*_edges`、`clock_slews`、`clock_setup/hold_uncertainties`、`pin_clock_latency_overrides`。
 - release 后不要再调用 `update_timing_dmp()` 或 path trace 依赖的 DMP traceback/RC timing scratch，除非重新准备/分配。
 
 ## 14. 主要状态读写表
@@ -814,15 +875,15 @@ gt::GPUTimer::release_dmp_timing_scratch_for_power()
 |---|---|---|
 | `applyDrivingCellSourceSlewKernel` | `driving_cell_sources` 展平数组、Liberty LUT、`C1/C2/r_pi` | source `pinSlew`、`at_prefix_*` |
 | `dmpResetForwardTargetsKernel` | pin flags、arc types | encoded `pinSlew` scratch、encoded/net `arcDelay` scratch、gate `arcDelay=NaN` |
-| `dmpGateKernel` | `pinAT`、`pinSlew`、Liberty LUT、`C1/C2/r_pi`、`elmore_delay`、clock arrays | gate `arcDelay`、encoded `pinSlew`、`pin_at_winner`、net encoded `arcDelay` |
+| `dmpGateKernel` | `pinAT`、`pinSlew`、Liberty LUT、`C1/C2/r_pi`、`elmore_delay`、sparse clock tables | gate `arcDelay`、encoded `pinSlew`、`pin_at_winner`、net encoded `arcDelay` |
 | `dmpDirectNetKernel` | source `pinSlew`、`elmore_delay`、driving-cell tags | encoded `pinSlew`、net encoded `arcDelay` |
 | `dmpNetWinnerKernel` | encoded net `arcDelay`、source `pinAT` | decoded net `arcDelay`、`pin_at_winner` |
 | `dmpPinWinnerKernel` | `pin_at_winner`、encoded `pinSlew` | `pinAT`、decoded `pinSlew`、`at_prefix_*` |
-| `dmpTestKernel` | `pinAT`、`pinSlew`、clock arrays、constraint LUT | `testRelatedAT`、`testConstraint`、`testRAT`、`pinRAT` |
+| `dmpTestKernel` | `pinAT`、`pinSlew`、`test_clock_ids`、clock period/uncertainty tables、constraint LUT | `testRelatedAT`、`testConstraint`、`testRAT`、`pinRAT` |
 | `dmpBackwardKernel` | `pinRAT`、`arcDelay`、graph arcs | upstream `pinRAT` |
 | `update_endpoints` kernels | `pinAT`、`pinRAT`、`testRAT`、endpoint maps | `endpoint_slacks`、`endpoint_pin_slacks` |
 | `report_wns_and_tns` | `pinAT`、`pinRAT`、`endpoints_id` | temporary torch slacks, returned WNS/TNS tensors |
-| `release_dmp_timing_scratch_for_power` | `DMP_DEFER_TIMING_ALLOC`, `h_dmp_db` | frees selected DMP scratch pointers |
+| `release_dmp_timing_scratch_for_power` | `DMP_DEFER_TIMING_ALLOC`, `h_dmp_db` | frees selected timing scratch; keeps sparse clock tables |
 
 ## 15. 最小函数索引
 
@@ -950,4 +1011,4 @@ cpp_to_py/gputimer/core/DmpModel.cu
 
 10. Power 前 release
 
-`release_dmp_timing_scratch_for_power()` 只有 `DMP_DEFER_TIMING_ALLOC` enabled 时才释放。确认 power CUDA input 不读被释放的 `r_pi/elmore_delay/pin_flags/test_clock_ids/clock_periods`。
+`release_dmp_timing_scratch_for_power()` 只有 `DMP_DEFER_TIMING_ALLOC` enabled 时才释放。确认 power CUDA input 不读被释放的 `r_pi/elmore_delay/pin_flags`；同时确认 `pin_clock_ids/test_clock_ids/clock_*` sparse tables 仍保留，因为 power 会复用 `pin_clock_ids` 和 `clock_slews`。

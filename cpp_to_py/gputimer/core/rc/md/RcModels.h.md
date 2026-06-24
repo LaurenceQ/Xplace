@@ -5,8 +5,11 @@ Names RC CUDA launcher inputs so star-RC and explicit-tree-RC code can be split
 without reintroducing long unstructured argument lists.
 
 ## Main Entry Points
-- `RcStarModel` for the simple star RC update path.
-- `RcGraphDeviceView` and `RcPropagateScratch` for explicit RC trees.
+- `RcStarNet` for the simple star RC update path.
+- `RcTreeHost` for host-side RC tree inputs passed to CUDA wrappers.
+- `RcTreeDeviceGraph` for copied device-side RC tree topology arrays.
+- `RcTreePropagation` for per-node load/delay/impulse propagation arrays.
+- `RcTreeDevice` for the complete CUDA kernel argument bundle.
 
 ## Data Ownership
 Pointers are borrowed from `GPUTimer`, Torch tensors, or temporary CUDA buffers

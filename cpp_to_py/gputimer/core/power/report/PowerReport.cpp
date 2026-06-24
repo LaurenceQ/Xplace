@@ -2,6 +2,7 @@
 #include "gputimer/core/DmpModel.h"
 #include "gputimer/core/power/common/PowerCudaModel.h"
 #include "gputimer/core/power/common/PowerHostCommon.h"
+#include "common/XplaceLog.h"
 #include "common/db/Cell.h"
 #include "common/db/Database.h"
 #include "common/db/Net.h"
@@ -96,13 +97,19 @@ tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> GPUTimer::repo
         const double elapsed =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - total_sum_start).count();
         addPowerStageProfileElapsed(elapsed);
-        std::fprintf(stderr, "[power_stage_profile] total_gpu_sum %.6f\n", elapsed);
         const double report_elapsed =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - report_start).count();
+        XPLACE_PROFILEF("XPLACE_POWER_PROFILE_STAGES",
+                        "phase=total_gpu_sum elapsed=%.6f total=%.6f",
+                        elapsed,
+                        report_elapsed);
         const double unprofiled = report_elapsed - powerStageProfileElapsed();
         if (unprofiled > 1.0e-6) {
             addPowerStageProfileElapsed(unprofiled);
-            std::fprintf(stderr, "[power_stage_profile] report_total_unprofiled %.6f\n", unprofiled);
+            XPLACE_PROFILEF("XPLACE_POWER_PROFILE_STAGES",
+                            "phase=report_total_unprofiled elapsed=%.6f total=%.6f",
+                            unprofiled,
+                            report_elapsed);
         }
     }
     return {inst_internal_gpu, inst_switching_gpu, inst_leakage_gpu, inst_total_gpu};

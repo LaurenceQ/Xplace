@@ -66,7 +66,11 @@ struct InferTimingModel {
     GPULutAllocator* d_allocator = nullptr;
     const uint8_t* pin_is_clk = nullptr;
     const uint8_t* pin_is_ideal_clk = nullptr;
-    const float* pin_clock_fall_edges = nullptr;
+    const uint16_t* pin_clock_ids = nullptr;
+    const float* clock_fall_edges = nullptr;
+    const float* clock_waveform_fall_edges = nullptr;
+    const float* pin_clock_latency_overrides = nullptr;
+    int clock_count = 0;
     int num_pins = 0;
 };
 

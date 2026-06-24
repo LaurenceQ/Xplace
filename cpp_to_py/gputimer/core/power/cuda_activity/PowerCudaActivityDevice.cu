@@ -42,7 +42,7 @@ __device__ bool PowerActivityOps::shouldMarkPendingSeq(float density) {
 
 namespace {
 
-__device__ __forceinline__ bool power_clock_slew_pin_marked(const PowerGraphDeviceView& graph,
+__device__ __forceinline__ bool power_clock_slew_pin_marked(const PowerGraphDevice& graph,
                                                             int pin) {
     const int* pins = graph.power_clock_slew_pins;
     int lo = 0;
@@ -56,16 +56,19 @@ __device__ __forceinline__ bool power_clock_slew_pin_marked(const PowerGraphDevi
     return lo < graph.num_power_clock_slew_pins && pins[lo] == pin;
 }
 
-__device__ __forceinline__ float power_clock_slew_value(const PowerGraphDeviceView& graph,
+__device__ __forceinline__ float power_clock_slew_value(const PowerGraphDevice& graph,
                                                         int pin,
                                                         int attr) {
     if (!graph.power_clock_slew_pins || graph.num_power_clock_slew_pins <= 0 ||
         pin < 0 || attr < 0 || attr >= NUM_ATTR ||
         !power_clock_slew_pin_marked(graph, pin))
         return nanf("");
-    if (graph.pin_clock_slews) {
-        const float slew = graph.pin_clock_slews[pin * NUM_ATTR + attr];
-        if (isfinite(slew)) return slew;
+    if (graph.pin_clock_ids && graph.clock_slews) {
+        const uint16_t clock_id = graph.pin_clock_ids[pin];
+        if (clock_id != 65535u && clock_id < static_cast<uint16_t>(graph.clock_count)) {
+            const float slew = graph.clock_slews[static_cast<int>(clock_id) * NUM_ATTR + attr];
+            if (isfinite(slew)) return slew;
+        }
     }
     return graph.power_clock_slew_fallback[attr];
 }
@@ -232,7 +235,7 @@ __device__ void PowerActivityOps::enqueueClockGateOutput(int pin) const {
     }
 }
 
-__device__ bool PowerExprView::evalBool(int expr_id,
+__device__ bool PowerExprEval::evalBool(int expr_id,
                                         uint64_t bits,
                                         int force_var,
                                         int force_val,
@@ -525,23 +528,23 @@ __device__ int PowerBddContextCuda::findVar(int var_key) const {
 }
 
 struct PowerBddExprEval {
-    const PowerExprView* view = nullptr;
+    const PowerExprEval* view = nullptr;
     PowerBddContextCuda ctx;
     int root = 1;
 
-    __device__ explicit PowerBddExprEval(const PowerExprView& view_) : view(&view_) {}
+    __device__ explicit PowerBddExprEval(const PowerExprEval& view_) : view(&view_) {}
     __device__ bool buildExpr(int expr_id);
     __device__ __noinline__ bool activity(int expr_id,
                                           float& out_density,
                                           float& out_duty,
                                           int& out_var_count);
     __device__ __noinline__ float diffDuty(int expr_id, int diff_pin);
-    static __device__ __noinline__ bool activityFallback(const PowerExprView& view,
+    static __device__ __noinline__ bool activityFallback(const PowerExprEval& view,
                                                          int expr_id,
                                                          float& out_density,
                                                          float& out_duty,
                                                          int& out_var_count);
-    static __device__ __noinline__ float diffDutyFallback(const PowerExprView& view,
+    static __device__ __noinline__ float diffDutyFallback(const PowerExprEval& view,
                                                           int expr_id,
                                                           int diff_pin);
 };
@@ -667,9 +670,9 @@ struct PowerDirectActivityValue {
 };
 
 struct PowerDirectExprEval {
-    const PowerExprView* view = nullptr;
+    const PowerExprEval* view = nullptr;
 
-    __device__ explicit PowerDirectExprEval(const PowerExprView& view_) : view(&view_) {}
+    __device__ explicit PowerDirectExprEval(const PowerExprEval& view_) : view(&view_) {}
     __device__ int uniqueVarCount(int expr_id) const;
     __device__ bool isSafe(int expr_id) const;
     __device__ bool dutyPoly(int expr_id, float& out_duty) const;
@@ -1018,7 +1021,7 @@ __device__ __noinline__ float PowerBddExprEval::diffDuty(int expr_id, int diff_p
     return ctx.evalDuty(diff);
 }
 
-__device__ __noinline__ bool PowerBddExprEval::activityFallback(const PowerExprView& view,
+__device__ __noinline__ bool PowerBddExprEval::activityFallback(const PowerExprEval& view,
                                                                 int expr_id,
                                                                 float& out_density,
                                                                 float& out_duty,
@@ -1027,7 +1030,7 @@ __device__ __noinline__ bool PowerBddExprEval::activityFallback(const PowerExprV
     return eval.activity(expr_id, out_density, out_duty, out_var_count);
 }
 
-__device__ __noinline__ float PowerBddExprEval::diffDutyFallback(const PowerExprView& view,
+__device__ __noinline__ float PowerBddExprEval::diffDutyFallback(const PowerExprEval& view,
                                                                  int expr_id,
                                                                  int diff_pin) {
     PowerBddExprEval eval(view);
@@ -1036,7 +1039,7 @@ __device__ __noinline__ float PowerBddExprEval::diffDutyFallback(const PowerExpr
 
 }  // namespace
 
-__device__ int PowerExprView::resolvePinArg(int arg) const {
+__device__ int PowerExprEval::resolvePinArg(int arg) const {
     if (arg >= 0) return arg;
     if (arg == -1 || !node_port_pin_start || !node_port_pin_list || node_id < 0) return -1;
     const int port_id = -2 - arg;
@@ -1046,7 +1049,7 @@ __device__ int PowerExprView::resolvePinArg(int arg) const {
     return node_port_pin_list[start + port_id];
 }
 
-__device__ bool PowerExprView::activity(int expr_id,
+__device__ bool PowerExprEval::activity(int expr_id,
                                         float& out_density,
                                         float& out_duty) const {
     const bool direct_allowed = !g_power_disable_direct_expr;
@@ -1092,7 +1095,7 @@ __device__ bool PowerExprView::activity(int expr_id,
     return isfinite(out_density) && isfinite(out_duty);
 }
 
-__device__ bool PowerExprView::hasKnownActivityInput(int expr_id, const uint8_t* origin) const {
+__device__ bool PowerExprEval::hasKnownActivityInput(int expr_id, const uint8_t* origin) const {
     if (expr_id < 0) return false;
     const int start = expr_start[expr_id];
     const int count = expr_count[expr_id];
@@ -1109,7 +1112,7 @@ __device__ bool PowerExprView::hasKnownActivityInput(int expr_id, const uint8_t*
     return !has_pin_arg;
 }
 
-__device__ float PowerExprView::duty(int expr_id) const {
+__device__ float PowerExprEval::duty(int expr_id) const {
     float direct_duty = 0.0f;
     if (!g_power_disable_direct_expr) {
         const PowerDirectExprEval direct_eval(*this);
@@ -1125,7 +1128,7 @@ __device__ float PowerExprView::duty(int expr_id) const {
     return fminf(fmaxf(activity_duty, 0.0f), 1.0f);
 }
 
-__device__ float PowerExprView::diffDuty(int expr_id, int diff_pin) const {
+__device__ float PowerExprEval::diffDuty(int expr_id, int diff_pin) const {
     if (expr_id < 0 || diff_pin < 0) return 0.0f;
     float direct_duty = 0.0f;
     if (!g_power_disable_direct_expr) {
@@ -1134,7 +1137,7 @@ __device__ float PowerExprView::diffDuty(int expr_id, int diff_pin) const {
             return direct_duty;
         }
     }
-    const PowerExprView bdd_view = withDensity(nullptr);
+    const PowerExprEval bdd_view = withDensity(nullptr);
     return PowerBddExprEval::diffDutyFallback(bdd_view, expr_id, diff_pin);
 }
 

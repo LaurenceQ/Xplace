@@ -1,11 +1,11 @@
 #include "PowerCudaInputBuildInternal.h"
 
+#include "common/XplaceLog.h"
 #include "gputimer/core/power/common/PowerHostCommon.h"
 #include "gputimer/core/power/common/PowerActivityHostUtils.h"
 
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -159,9 +159,7 @@ bool powerIsClockSlewPin(GTDatabase& gtdb, int n, int pin_id) {
     if (pin_id >= static_cast<int>(gtdb.pin_is_clk.size()) || !gtdb.pin_is_clk[pin_id])
         return false;
     for (int attr = 0; attr < NUM_ATTR; ++attr) {
-        const int idx = pin_id * NUM_ATTR + attr;
-        if (idx >= 0 && idx < static_cast<int>(gtdb.pin_clock_slews.size()) &&
-            std::isfinite(gtdb.pin_clock_slews[idx]))
+        if (std::isfinite(gtdb.ClockSlewForPin(pin_id, attr)))
             return true;
     }
     return false;
@@ -174,15 +172,12 @@ void markPowerClockSlewPin(std::vector<uint8_t>& h_power_clock_slew_pin, int n, 
 }  // namespace
 
 PowerStageProfiler::PowerStageProfiler(bool enabled)
-    : enabled_(enabled), last_(std::chrono::steady_clock::now()) {}
+    : profiler_("power_stage_profile", enabled, stderr) {}
 
 void PowerStageProfiler::mark(const char* label) {
-    if (!enabled_) return;
-    const auto now = std::chrono::steady_clock::now();
-    const double elapsed = std::chrono::duration<double>(now - last_).count();
+    const double elapsed = profiler_.markSeconds(label);
+    if (elapsed <= 0.0) return;
     addPowerStageProfileElapsed(elapsed);
-    std::fprintf(stderr, "[power_stage_profile] %s %.6f\n", label, elapsed);
-    last_ = now;
 }
 
 PowerClockPinActivity::PowerClockPinActivity() = default;
@@ -344,18 +339,15 @@ void printPowerSeqDupStatsIfRequested(GTDatabase& gtdb,
             max_writes = std::max(max_writes, count);
         }
     }
-    std::cerr << "[power_seq_dup_stats] seq_records=" << h_seqs.size()
-              << " duplicate_output_pins=" << duplicate_pins
-              << " duplicate_output_writes=" << duplicate_writes
-              << " max_writes_per_pin=" << max_writes
-              << std::endl;
+    XPLACE_DEBUGF("XPLACE_POWER_PRINT_SEQ_DUP_STATS",
+                  "seq_records=%zu duplicate_output_pins=%d duplicate_output_writes=%d max_writes_per_pin=%d",
+                  h_seqs.size(), duplicate_pins, duplicate_writes, max_writes);
     int printed = 0;
     for (int pin_id = 0; pin_id < n && printed < 20; ++pin_id) {
         if (seq_output_write_count[pin_id] <= 1) continue;
-        std::cerr << "[power_seq_dup_pin] pin_id=" << pin_id
-                  << " writes=" << seq_output_write_count[pin_id]
-                  << " pin=" << gtdb.pin_names[pin_id]
-                  << std::endl;
+        XPLACE_DEBUGF("XPLACE_POWER_PRINT_SEQ_DUP_STATS",
+                      "seq_dup_pin pin_id=%d writes=%d pin=%s",
+                      pin_id, seq_output_write_count[pin_id], gtdb.pin_names[pin_id].c_str());
         printed++;
     }
 }
@@ -671,10 +663,10 @@ PowerCudaArcSkipInputs buildPowerCudaArcSkipInputs(GTDatabase& gtdb,
                 ++disabled_constraint_net_arc_count;
         }
         if (disabled_constraint_arc_count > 0) {
-            std::fprintf(stderr,
-                         "[power_false_path] disabled_arcs=%d disabled_net_arcs=%d\n",
-                         disabled_constraint_arc_count,
-                         disabled_constraint_net_arc_count);
+            XPLACE_DEBUGF("XPLACE_POWER_APPLY_FALSE_PATHS",
+                          "power_false_path disabled_arcs=%d disabled_net_arcs=%d",
+                          disabled_constraint_arc_count,
+                          disabled_constraint_net_arc_count);
         }
     } else if (!apply_power_false_paths && !gtdb.power_disabled_constraint_arc.empty()) {
         int mapped_false_path_arcs = 0;
@@ -682,9 +674,9 @@ PowerCudaArcSkipInputs buildPowerCudaArcSkipInputs(GTDatabase& gtdb,
             if (mark) ++mapped_false_path_arcs;
         }
         if (mapped_false_path_arcs > 0) {
-            std::fprintf(stderr,
-                         "[power_false_path] mapped_arcs=%d apply=0\n",
-                         mapped_false_path_arcs);
+            XPLACE_DEBUGF("XPLACE_POWER_DEBUG",
+                          "power_false_path mapped_arcs=%d apply=0",
+                          mapped_false_path_arcs);
         }
     }
 
@@ -758,20 +750,20 @@ void finalizePowerCudaRootInputs(GTDatabase& gtdb,
                             power_fanin, pin_to_node, pin_to_net,
                             power_pin_level_cpu);
     if (std::getenv("XPLACE_POWER_PRINT_ROOT_STATS")) {
-        std::fprintf(stderr,
-                     "[power_activity_roots] seeds=%zu primary=%d timing_roots=%d floating_load_roots=%d timing_loop_roots=%d disabled_loop_arcs=%d power_roots=%d const_outputs=%d\n",
-                     roots.primary_inputs.size(), roots.primary_count, roots.zero_indeg_count,
-                     roots.floating_load_count, roots.timing_loop_count, roots.disabled_loop_arc_count,
-                     roots.power_level_count, roots.const_output_count);
+        XPLACE_DEBUGF("XPLACE_POWER_PRINT_ROOT_STATS",
+                      "power_activity_roots seeds=%zu primary=%d timing_roots=%d floating_load_roots=%d timing_loop_roots=%d disabled_loop_arcs=%d power_roots=%d const_outputs=%d",
+                      roots.primary_inputs.size(), roots.primary_count, roots.zero_indeg_count,
+                      roots.floating_load_count, roots.timing_loop_count, roots.disabled_loop_arc_count,
+                      roots.power_level_count, roots.const_output_count);
         if (roots.seed_seq_feedback_outputs) {
-            std::fprintf(stderr,
-                         "[power_activity_roots] seq_feedback=%d\n",
-                         roots.seq_feedback_count);
+            XPLACE_DEBUGF("XPLACE_POWER_PRINT_ROOT_STATS",
+                          "power_activity_roots seq_feedback=%d",
+                          roots.seq_feedback_count);
         }
         if (roots.init_seq_feedback_state) {
-            std::fprintf(stderr,
-                         "[power_activity_roots] seq_feedback_state=%d pins=%zu\n",
-                         roots.state_seq_feedback_count, roots.feedback_seed_pins.size());
+            XPLACE_DEBUGF("XPLACE_POWER_PRINT_ROOT_STATS",
+                          "power_activity_roots seq_feedback_state=%d pins=%zu",
+                          roots.state_seq_feedback_count, roots.feedback_seed_pins.size());
         }
     }
 }
@@ -794,7 +786,17 @@ PowerClockSlewSparse buildPowerClockSlews(GTDatabase& gtdb,
     if (!has_clock_slew_pins) return result;
 
     result.fallback.fill(nanf(""));
-    if (!gtdb.clock_transitions.empty()) result.fallback = gtdb.clock_transitions.begin()->second;
+    for (int clock_id = 0; clock_id < static_cast<int>(gtdb.clock_periods.size()); ++clock_id) {
+        bool has_finite = false;
+        for (int attr = 0; attr < NUM_ATTR; ++attr) {
+            const size_t idx = static_cast<size_t>(clock_id) * NUM_ATTR + attr;
+            if (idx < gtdb.clock_slews.size() && std::isfinite(gtdb.clock_slews[idx])) {
+                result.fallback[attr] = gtdb.clock_slews[idx];
+                has_finite = true;
+            }
+        }
+        if (has_finite) break;
+    }
     for (float& slew : result.fallback) {
         if (!std::isfinite(slew)) slew = 0.0f;
     }
@@ -885,8 +887,9 @@ torch::Tensor PowerCudaUploader::uploadFloat(const char* label, const std::vecto
 
 void PowerCudaUploader::mark(const char* phase, const char* label, size_t count, size_t elem_size) const {
     if (debug_) {
-        std::fprintf(stderr, "[power_upload] %s %s count=%zu bytes=%zu\n",
-                     phase, label ? label : "", count, count * elem_size);
+        XPLACE_ERRORF("power_upload",
+                      "phase=%s label=%s count=%zu bytes=%zu",
+                      phase, label ? label : "", count, count * elem_size);
     }
     if (sync_debug_) {
         const std::string sync_label =

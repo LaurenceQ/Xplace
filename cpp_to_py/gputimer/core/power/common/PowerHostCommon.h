@@ -26,7 +26,7 @@ struct PowerTraceEdge {
     std::string reason;
 };
 
-struct PowerTracePathState {
+struct PowerTracePathWriter {
     std::unordered_set<int> pins;
     std::unordered_set<int> arcs;
     std::unordered_set<int> nodes;
@@ -250,7 +250,7 @@ std::vector<std::string> readPowerPathTargetQueries();
 std::unordered_set<std::string> readOpenroadSeedRootNames(const char* file_name);
 std::vector<int> resolvePowerPathTargetPins(const std::vector<std::string>& queries,
                                             const std::vector<std::string>& pin_names);
-PowerTracePathState loadPowerTracePathState(const char* trace_path_file,
+PowerTracePathWriter loadPowerTracePathWriter(const char* trace_path_file,
                                             const char* out_file,
                                             const std::vector<int>& pin_to_node);
 bool evalPowerExprWithPortValues(const PowerExpr& expr,

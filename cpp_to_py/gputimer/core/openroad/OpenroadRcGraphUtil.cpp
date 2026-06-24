@@ -47,7 +47,7 @@ std::string openroad_gr_edge_key(int from, int to, const std::string& res_id)
     return std::to_string(from) + '\t' + std::to_string(to) + '\t' + res_id;
 }
 
-void ensure_local_node(LocalSpefNetRc& local, int node_id)
+void ensure_local_node(LocalRcNetGraph& local, int node_id)
 {
     while (node_id >= static_cast<int>(local.node2pin.size())) {
         local.node2pin.emplace_back(-1);
@@ -77,7 +77,7 @@ bool spef_includes_pin_caps_from_design_flow(const std::string& design_flow)
     return pin_cap_clause.find("NONE") == std::string::npos;
 }
 
-int count_tree_edges_from_root(const LocalSpefNetRc& local)
+int count_tree_edges_from_root(const LocalRcNetGraph& local)
 {
     if (local.node2pin.empty()) {
         return 0;
@@ -105,7 +105,7 @@ int count_tree_edges_from_root(const LocalSpefNetRc& local)
     return tree_edges;
 }
 
-FlatLocalAdjacency build_flat_local_adjacency(const LocalSpefNetRc& local)
+FlatLocalAdjacency build_flat_local_adjacency(const LocalRcNetGraph& local)
 {
     FlatLocalAdjacency adjacency;
     const int node_count = static_cast<int>(local.node2pin.size());
@@ -143,7 +143,7 @@ FlatLocalAdjacency build_flat_local_adjacency(const LocalSpefNetRc& local)
     return adjacency;
 }
 
-int prune_to_rooted_tree(LocalSpefNetRc& local)
+int prune_to_rooted_tree(LocalRcNetGraph& local)
 {
     if (local.node2pin.empty() || local.edge_from.empty()) {
         return 0;
@@ -222,11 +222,11 @@ int prune_to_rooted_tree(LocalSpefNetRc& local)
 }
 
 
-int append_blank_node(LocalSpefNetRc& local,
-                      int pin_id,
-                      const std::string& name,
-                      const OpenroadRoutePt& route_pt,
-                      bool keep_route_node_names)
+int append_local_rc_node(LocalRcNetGraph& local,
+                         int pin_id,
+                         const std::string& name,
+                         const OpenroadRoutePt& route_pt,
+                         bool keep_route_node_names)
 {
     const int node_id = static_cast<int>(local.node2pin.size());
     local.node2pin.emplace_back(pin_id);
@@ -240,7 +240,7 @@ int append_blank_node(LocalSpefNetRc& local,
     return node_id;
 }
 
-int append_pin_node(LocalSpefNetRc& local,
+int append_pin_node(LocalRcNetGraph& local,
                     int pin_id,
                     const std::vector<std::string>& pin_names,
                     bool keep_route_node_names)
@@ -250,21 +250,21 @@ int append_pin_node(LocalSpefNetRc& local,
     if (keep_route_node_names && pin_id >= 0 && pin_id < static_cast<int>(pin_names.size())) {
         name = pin_names[pin_id];
     }
-    return append_blank_node(local, pin_id, name, route_pt, keep_route_node_names);
+    return append_local_rc_node(local, pin_id, name, route_pt, keep_route_node_names);
 }
 
 int append_route_node(int net_idx,
                       const OpenroadRoutePtKey& key,
-                      std::vector<std::unique_ptr<LocalSpefNetRc>>& local_nets,
+                      std::vector<std::unique_ptr<LocalRcNetGraph>>& local_nets,
                       std::vector<std::unique_ptr<OpenroadRouteNodeMap>>& route_node_maps,
                       bool keep_route_node_names)
 {
     constexpr int route_node_linear_scan_limit = 16;
     auto& local_ptr = local_nets[net_idx];
     if (!local_ptr) {
-        local_ptr = std::make_unique<LocalSpefNetRc>();
+        local_ptr = std::make_unique<LocalRcNetGraph>();
     }
-    LocalSpefNetRc& local = *local_ptr;
+    LocalRcNetGraph& local = *local_ptr;
     auto& map_ptr = route_node_maps[net_idx];
     if (map_ptr) {
         auto iter = map_ptr->find(key);
@@ -294,21 +294,21 @@ int append_route_node(int net_idx,
         name = std::to_string(key.x) + "," + std::to_string(key.y) + ",M" +
                std::to_string(key.layer);
     }
-    const int node_id = append_blank_node(local, -1, name, route_pt, keep_route_node_names);
+    const int node_id = append_local_rc_node(local, -1, name, route_pt, keep_route_node_names);
     if (map_ptr) {
         map_ptr->emplace(key, node_id);
     }
     return node_id;
 }
 
-void add_edge(LocalSpefNetRc& local, int from, int to, float res)
+void add_edge(LocalRcNetGraph& local, int from, int to, float res)
 {
     local.edge_from.emplace_back(from);
     local.edge_to.emplace_back(to);
     local.edge_res.emplace_back(res);
 }
 
-void reorder_root(LocalSpefNetRc& local, int root_node)
+void reorder_root(LocalRcNetGraph& local, int root_node)
 {
     if (root_node <= 0 || root_node >= static_cast<int>(local.node2pin.size())) {
         return;

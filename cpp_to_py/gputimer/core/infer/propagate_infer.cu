@@ -31,6 +31,40 @@ using std::vector;
 
 namespace gt {
 
+namespace {
+
+__device__ __forceinline__ bool infer_clock_id_valid(const InferTimingModel* model,
+                                                     uint16_t clock_id) {
+    return clock_id != 65535u && clock_id < static_cast<uint16_t>(model->clock_count);
+}
+
+__device__ __forceinline__ float infer_pin_clock_fall_edge(const InferTimingModel* model,
+                                                           int pin_id) {
+    if (model->pin_clock_ids == nullptr || pin_id < 0 || pin_id >= model->num_pins) {
+        return nanf("");
+    }
+    const uint16_t clock_id = model->pin_clock_ids[pin_id];
+    const float override =
+        model->pin_clock_latency_overrides != nullptr
+            ? model->pin_clock_latency_overrides[pin_id]
+            : nanf("");
+    if (isfinite(override)) {
+        if (infer_clock_id_valid(model, clock_id) &&
+            model->clock_waveform_fall_edges != nullptr) {
+            const float waveform = model->clock_waveform_fall_edges[clock_id];
+            if (isfinite(waveform)) return waveform + override;
+        }
+        return override;
+    }
+    if (infer_clock_id_valid(model, clock_id) && model->clock_fall_edges != nullptr) {
+        const float edge = model->clock_fall_edges[clock_id];
+        if (isfinite(edge)) return edge;
+    }
+    return nanf("");
+}
+
+}  // namespace
+
 __device__ void propagateInferAT(const InferTimingModel* model,
                                  index_type arc_id,
                                  index_type from_pin_id,
@@ -211,8 +245,9 @@ __global__ void initClockSourceFallAT(InferTimingModel* model, int num_level0_pi
         const uint8_t* pin_is_ideal_clk = model->pin_is_ideal_clk;
         if (pin_is_clk[pin_id] && (pin_is_ideal_clk == nullptr || !pin_is_ideal_clk[pin_id])) {
             float fall_edge = model->clock_period / 2.0f;
-            if (model->pin_clock_fall_edges != nullptr && isfinite(model->pin_clock_fall_edges[pin_id])) {
-                fall_edge = model->pin_clock_fall_edges[pin_id];
+            const float sdc_fall_edge = infer_pin_clock_fall_edge(model, pin_id);
+            if (isfinite(sdc_fall_edge)) {
+                fall_edge = sdc_fall_edge;
             }
             if (isnan(pinAt[pin_id * NUM_ATTR + 1])) {
                 pinAt[pin_id * NUM_ATTR + 1] = fall_edge;  // early fall

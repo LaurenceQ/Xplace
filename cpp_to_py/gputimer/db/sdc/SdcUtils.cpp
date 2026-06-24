@@ -1,6 +1,7 @@
 #include "gputimer/db/sdc/SdcUtils.h"
 
-#include <cstdio>
+#include "common/XplaceLog.h"
+
 #include <utility>
 
 namespace gt {
@@ -20,8 +21,9 @@ bool is_transition_defined_cpu(const TimingArc* timing_arc, int input_rf, int ou
 }
 
 void warn_missing_sdc_object(const char* command, const char* kind, const std::string& name) {
-    if (!gputimer_env_enabled("GPUTIMER_VERBOSE_SDC_WARNINGS")) return;
-    std::fprintf(stderr, "%s: %s \"%s\" not found\n", command, kind, name.c_str());
+    XPLACE_DEBUGF("GPUTIMER_VERBOSE_SDC_WARNINGS",
+                  "%s: %s \"%s\" not found",
+                  command, kind, name.c_str());
 }
 
 std::string pin_name_colon_to_slash(const std::string& name) {

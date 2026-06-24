@@ -1,12 +1,12 @@
 #pragma once
 
+#include "common/StageProfiler.h"
 #include "gputimer/core/power/common/PowerCudaModel.h"
 #include "gputimer/db/GTDatabase.h"
 #include "common/lib/Liberty.h"
 #include "common/lib/Timing.h"
 #include "io_parser/gp/GPDatabase.h"
 
-#include <chrono>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -29,8 +29,7 @@ public:
     void mark(const char* label);
 
 private:
-    bool enabled_ = false;
-    std::chrono::steady_clock::time_point last_;
+    StageProfiler profiler_;
 };
 
 struct PowerActivityLevelSelection {
@@ -317,7 +316,7 @@ struct PowerCudaExprInputs {
     std::vector<GpuPowerExprOpHost> ops;
     std::vector<int> start;
     std::vector<int> count;
-    std::vector<int> pin_func_expr_id;
+    std::vector<int> pin_expr_id;
     std::vector<int> missing_func_out_start;
     std::vector<int> missing_func_out_list;
     std::unordered_map<std::string, int> template_expr_cache;

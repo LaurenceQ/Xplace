@@ -1,5 +1,6 @@
 #include "PowerCudaInputBuildInternal.h"
 
+#include "common/XplaceLog.h"
 #include "gputimer/core/power/common/PowerActivityHostUtils.h"
 #include "gputimer/core/power/common/PowerHostCommon.h"
 #include "common/db/Cell.h"
@@ -77,7 +78,7 @@ private:
 PowerCudaExprInputs::PowerCudaExprInputs() = default;
 
 PowerCudaExprInputs::PowerCudaExprInputs(int n)
-    : pin_func_expr_id(n, -1),
+    : pin_expr_id(n, -1),
       missing_func_out_start(n + 1, 0) {}
 
 PowerCudaSeqInputs::PowerCudaSeqInputs() = default;
@@ -162,24 +163,24 @@ PowerCudaExprInputs buildPowerCudaExprInputs(GTDatabase& gtdb,
             bool used_missing_const = false;
             const int template_expr_id = expr_inputs.addTemplateExpr(port->function_expr_, cell);
             if (template_expr_id >= 0 && expr_inputs.templatePortsPresent(template_expr_id, port_pin_by_offset)) {
-                expr_inputs.pin_func_expr_id[pin_id] = template_expr_id;
+                expr_inputs.pin_expr_id[pin_id] = template_expr_id;
             } else {
-                expr_inputs.pin_func_expr_id[pin_id] =
+                expr_inputs.pin_expr_id[pin_id] =
                     expr_inputs.addExpr(port->function_expr_, cell, node,
                                         const_port_value_for_node, &used_missing_const);
             }
-            if (expr_inputs.pin_func_expr_id[pin_id] >= 0 && used_missing_const) {
+            if (expr_inputs.pin_expr_id[pin_id] >= 0 && used_missing_const) {
                 pin_func_has_missing_const[pin_id] = 1;
             }
             if (debug_expr_node_env && node.getName().find(debug_expr_node_env) != std::string::npos) {
-                std::fprintf(stderr,
-                             "[XPLACE_POWER_DEBUG_EXPR] node=%s pin=%s port=%s expr_id=%d missing_const=%d function='%s'\n",
-                             node.getName().c_str(),
-                             gtdb.pin_names[pin_id].c_str(),
-                             port->name.c_str(),
-                             expr_inputs.pin_func_expr_id[pin_id],
-                             pin_func_has_missing_const[pin_id] ? 1 : 0,
-                             port->function_expr_.c_str());
+                XPLACE_DEBUGF("XPLACE_POWER_DEBUG_EXPR",
+                              "node=%s pin=%s port=%s expr_id=%d missing_const=%d function='%s'",
+                              node.getName().c_str(),
+                              gtdb.pin_names[pin_id].c_str(),
+                              port->name.c_str(),
+                              expr_inputs.pin_expr_id[pin_id],
+                              pin_func_has_missing_const[pin_id] ? 1 : 0,
+                              port->function_expr_.c_str());
             }
         }
     }
